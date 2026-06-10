@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 安全漏洞
+    url: https://github.com/leo123-tto/case-board/security/policy
+    about: 安全漏洞请按 SECURITY.md 私下报告,不要公开发 issue
+  - name: 💬 使用咨询 / 工作流讨论
+    url: https://github.com/leo123-tto/case-board/discussions
+    about: 怎么用、最佳实践、工作流讨论请到 Discussions

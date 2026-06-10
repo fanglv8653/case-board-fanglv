@@ -1,0 +1,22 @@
+-- 2026-05-26 V0.1.13 · 案件画像用户手改 overlay
+--
+-- 目的:让律师在案件详情页"编辑模式"里手改的字段(改电话/补案由/删错条目/拖卡片排序)
+-- 永远不被下一次 LLM 全局抽覆盖,LLM 跑出来的 agg_* 字段保持原样,用户值通过这一列叠加。
+--
+-- 数据结构(JSON,前端定义,后端透传):
+-- {
+--   "fields": {
+--     "agg_cause": "机动车交通事故责任纠纷",
+--     "agg_party_contacts[0].phone": "13800138000"
+--   },
+--   "hidden_sections": ["收费记录"],          // 用户隐藏的卡片(只在 UI,不删 DB)
+--   "deleted_rows": {                         // 用户在表格里删的行(只在 UI)
+--     "agg_party_contacts": ["李四|被告"]
+--   },
+--   "section_order": ["案件基本信息","当事人联系人","办案时间轴","办案机关人员"]
+-- }
+--
+-- 隐私:本地 SQLite,纯文本 JSON,不上传任何反馈通道(已在 sanitize_paths 之外,
+-- 不会被 feedback MD 带出)。
+
+ALTER TABLE cases ADD COLUMN user_overrides_json TEXT;

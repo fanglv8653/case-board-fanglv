@@ -1,0 +1,1673 @@
+//! 用户反馈通道(2026-05-24 e · 作者拍板的"MD 文件方案")。
+//!
+//! 流程:
+//!   1. 前端调 `collect_diagnostic_info()` 拿一份"无标识"的系统快照
+//!      (版本、OS、provider、统计数字 — 永不含案件名/当事人/文档内容)
+//!   2. 前端弹窗显示快照预览 + 用户描述输入框
+//!   3. 用户确认 → 调 `save_feedback_to_desktop(snapshot, description)`
+//!   4. 拼成 MD 写到 ~/Desktop/案件看板反馈_<timestamp>.md
+//!   5. 用户手工把 MD 发送给项目维护者(邮件等)
+//!
+//! 隐私铁律:
+//!   - 不含案件名 / 当事人 / 案号 / 文档内容
+//!   - 案件数 / 文档数 是聚合数字,不带 ID
+//!   - "最近错误"只列文件名后缀(.docx / .pdf)+ 错误信息,不带文件路径
+
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::path::PathBuf;
+
+/// 自动收集的诊断信息(给反馈 MD 用)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticInfo {
+    /// 匿名反馈识别码(UUID v4 前 8 位),作者可识别"同一个人重复反馈"
+    pub client_id_short: String,
+    /// CaseBoard App 版本(来自 Cargo.toml)
+    pub app_version: String,
+    /// macOS 版本 + 架构(如 "macOS 14.5 · arm64")
+    pub os_version: String,
+    /// 系统语言(zh-CN / en-US 等)
+    pub language: String,
+
+    /// LLM provider("local" / "cloud" / "未配置")
+    pub llm_provider: String,
+    /// OCR provider("local" / "cloud" / "未配置")
+    pub ocr_provider: String,
+    /// 本机 llama-server 状态描述
+    pub local_server_status: String,
+    /// 云端 DeepSeek 余额(元;未配置时 None)
+    pub deepseek_balance: Option<f64>,
+
+    /// 数据库聚合统计(数字,无 ID)
+    pub stats: AppStats,
+
+    /// 最近失败的抽取记录(最多 5 条,只含 filename + extraction_status)
+    pub recent_failures: Vec<RecentFailure>,
+
+    /// 2026-05-26 V0.1.11:Settings 关键配置(脱敏 - api_key / token 全替换成 [SET]/[EMPTY])
+    pub settings_snapshot: SettingsSnapshot,
+
+    /// 2026-05-26 V0.1.11:磁盘 / DB 大小 / 路径权限 / RAM 等系统级诊断
+    pub system_info: SystemInfo,
+
+    /// 2026-05-26 V0.1.11:App 自身最近的 stderr 日志(diagnostic_log ring buffer 快照)
+    /// 最多 200 行,新→旧(每行已 sanitize_paths,不含 /Users/.../<case-name>/ 路径)
+    pub stderr_tail: Vec<String>,
+
+    /// 2026-05-26 V0.1.11:前端累积的 console.error / window.onerror(由前端打开弹窗时传入)
+    /// 不持久化,刷新页面就丢
+    #[serde(default)]
+    pub console_errors: Vec<ConsoleError>,
+
+    /// 2026-05-26 V0.1.12:最近 200 条抽取性能埋点(stage / backend / 耗时 / 字数 / 成败)
+    /// 给作者拿来对比"本机 OCR vs 云端 OCR 哪个更快更准",决定后续要不要砍掉本机档全走云端
+    pub metrics_tail: Vec<MetricSample>,
+
+    /// 2026-05-26 V0.1.12:metrics 按 backend 聚合的统计(平均/中位耗时 + 成功率 + 样本数)
+    /// 直接给"本机 vs 云端"的 A/B 结论
+    pub metrics_summary: Vec<BackendStat>,
+
+    /// 2026-05-27 V0.1.13+:案件 AI 助手用量统计(按 model 聚合的最近 200 条 chat)。
+    /// **隐私**:绝不携带 chat_messages.content,只取 model / tokens / latency / task_type
+    /// / char count。回归测试在 chat::commands::tests::chat_content_never_leaks_into_feedback_md。
+    #[serde(default)]
+    pub chat_usage: Vec<ChatUsageBucket>,
+
+    /// 2026-05-27 V0.1.13+:功能模块用量统计 —— 老板用来一眼判断
+    /// 「同事用没用 chat / 跑没跑 LLM 报告 / 是诉讼还是非诉为主」。
+    /// 全是聚合数字,无任何业务标识。
+    #[serde(default)]
+    pub feature_usage: FeatureUsage,
+}
+
+/// 功能模块用量统计(2026-05-27 V0.1.13+)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeatureUsage {
+    /// chat_messages 总条数(含 user + assistant)
+    pub chat_messages_total: i64,
+    /// chat artifact 总数(documents WHERE source='chat')
+    pub chat_artifacts_total: i64,
+    /// 已生成「案件分析报告」(LLM 全局抽)的案件数
+    pub cases_with_analysis_report: i64,
+    /// 已生成元典风险报告的案件数
+    pub cases_with_risk_report: i64,
+    /// 已生成元典深挖报告的案件数
+    pub cases_with_deep_dive_report: i64,
+    /// 已生成完整执行追踪报告的案件数
+    pub cases_with_full_report: i64,
+    /// 有用户手改 overrides 的案件数(反映编辑模式使用度)
+    pub cases_with_user_overrides: i64,
+    /// 案件类型分布(case_type → count)— 民事/刑事/执行/非诉/...
+    pub case_types: Vec<KeyCount>,
+    /// document.source 分布:scan / llm_extract / chat 各多少
+    pub document_sources: Vec<KeyCount>,
+    /// 元典 API 累计调用次数(approximation:cases.risk_assessment_at IS NOT NULL ...)
+    pub yuandian_queried_cases: i64,
+    /// 写材料工具:save_artifact 生成的文书总数(documents WHERE source='chat_artifact')。
+    /// **注意区别于** chat_artifacts_total(source='chat',旧的生成型 chat 产物)。
+    pub save_artifacts_total: i64,
+    /// 写材料 doc_type 分布(category → count):民事起诉状/答辩状/执行悬赏申请书... 各多少。
+    /// 脱敏安全:category 是文书类型名,不含当事人信息。
+    pub save_artifact_by_type: Vec<KeyCount>,
+    /// 本地 KB 累计命中次数(SUM yuandian_credits_monthly.kb_hits)—— 「越用越省钱」的"省"。
+    pub kb_total_hits: i64,
+    /// 元典 API 累计调用次数(SUM yuandian_credits_monthly.api_calls)—— 跟 kb_total_hits 比看命中率。
+    pub yuandian_total_calls: i64,
+}
+
+/// `(key, count)` 简易计数对(用于分布统计)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyCount {
+    pub key: String,
+    pub count: i64,
+}
+
+/// chat 用量按 (model, task_type) 聚合的统计样本。
+///
+/// 给作者拿来对比"flash vs pro" / "自由问 vs 固定任务"的 token / 耗时。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatUsageBucket {
+    pub model: String,
+    /// "free_chat" / "generate_case_overview" / ...
+    pub task_type: String,
+    pub samples: i64,
+    pub ok_samples: i64,
+    /// 平均 prompt_tokens
+    pub avg_prompt: i64,
+    /// 平均 completion_tokens
+    pub avg_completion: i64,
+    /// 平均 latency_ms
+    pub avg_latency_ms: i64,
+    /// 平均 assistant 输出字符数
+    pub avg_chars: i64,
+}
+
+/// 反馈 MD 用的 metrics 行。原是与 db::metrics::MetricRow 逐字节相同的独立 struct + 手抄转换,
+/// 2026-06-03 直接复用 MetricRow(JSON 形状一致,前端 TS MetricSample 契约不变,B3/B8 收口)。
+pub use crate::db::metrics::MetricRow as MetricSample;
+
+/// 按 backend 聚合的统计样本。给反馈 MD 顶部一眼能看出对比。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendStat {
+    pub backend: String,
+    pub stage: String,
+    pub samples: i64,
+    pub ok_samples: i64,
+    pub avg_ms: i64,
+    pub p50_ms: i64,
+    pub avg_chars: Option<i64>,
+}
+
+/// Settings 关键配置脱敏快照(2026-05-26 V0.1.11)。
+///
+/// 安全规则:
+/// - 凡是 api_key / token / password 字段一律不出现原文,只标 `[SET]` / `[EMPTY]`
+/// - endpoint 字段会过一次 strip_endpoint_auth,把 `https://user:pass@host` 里的凭证去掉
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsSnapshot {
+    pub setup_completed: bool,
+    pub user_display_name_set: bool,
+    pub mineru_api_key: String,
+    pub mineru_endpoint: Option<String>,
+    pub mineru_verified: bool,
+    pub deepseek_api_key: String,
+    pub deepseek_endpoint: Option<String>,
+    pub deepseek_verified: bool,
+    pub yuandian_api_key: String,
+    pub yuandian_verified: bool,
+    pub local_model_dir: Option<String>,
+    pub local_server_endpoint: Option<String>,
+    pub local_server_auto_start: bool,
+}
+
+/// 系统级诊断(2026-05-26 V0.1.11)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemInfo {
+    /// 数据目录绝对路径(脱敏前——这里 /Users/<username>/Library/... 一般不含当事人名)
+    pub data_dir: String,
+    /// 数据目录是否可写(权限自检)
+    pub data_dir_writable: bool,
+    /// 数据库文件大小(MB);文件不存在时 None
+    pub db_size_mb: Option<f64>,
+    /// extracts/ 目录文件数 + 总大小(MB);不存在时 None
+    pub extracts_files: Option<u64>,
+    pub extracts_size_mb: Option<f64>,
+    /// reports/ + external/ 一起的总大小(MB)
+    pub reports_size_mb: Option<f64>,
+    /// 数据目录所在盘的剩余空间(GB)
+    pub disk_free_gb: Option<f64>,
+    /// pdftotext 是否在 PATH(影响 PDF 抽取链路第 2 档)
+    pub pdftotext_available: bool,
+    /// pdftoppm 是否在 PATH(本机 vision OCR 需要)
+    pub pdftoppm_available: bool,
+}
+
+/// 前端 console 上报的错误条目(2026-05-26 V0.1.11)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsoleError {
+    /// "error" / "warn" / "unhandled" 等
+    pub level: String,
+    /// 错误消息(可能含 stack trace 片段)
+    pub message: String,
+    /// 时间戳 (ISO 8601 字符串,前端 new Date().toISOString())
+    pub at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppStats {
+    pub cases_total: i64,
+    pub documents_total: i64,
+    pub documents_done: i64,
+    pub documents_skipped: i64,
+    pub documents_failed: i64,
+    pub documents_pending: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentFailure {
+    /// 文件名(只显示文件名后缀部分,不含完整路径)
+    pub filename: String,
+    /// category 标签(起诉状 / 判决书 / ...)
+    pub category: Option<String>,
+    /// 创建时间
+    pub created_at: String,
+    /// 2026-05-25 V0.1.8 加:抽取失败的具体原因(三轮重试全失败后落库的 last_error)。
+    /// 输出到反馈 MD 前会经 `sanitize_paths` 把绝对路径替换成 `<path>/<basename>`,
+    /// 防止泄漏当事人姓名出现在路径里(如 `/Users/.../李四/...`)。
+    pub last_error: Option<String>,
+}
+
+/// 把 endpoint URL 里 `https://user:pass@host/...` 这种内嵌凭证脱掉,只留 scheme + host + path。
+fn strip_endpoint_auth(url: &str) -> String {
+    // 标准库没 URL 解析,手写够用:看是否含 "://" 后面是否有 "@" 在第一个 "/" 之前
+    let trimmed = url.trim();
+    if let Some(scheme_end) = trimmed.find("://") {
+        let scheme = &trimmed[..scheme_end + 3];
+        let rest = &trimmed[scheme_end + 3..];
+        // rest 形如 "user:pass@host/path"
+        let host_end = rest.find('/').unwrap_or(rest.len());
+        let host_part = &rest[..host_end];
+        let path_part = &rest[host_end..];
+        let cleaned_host = match host_part.rfind('@') {
+            Some(at) => &host_part[at + 1..],
+            None => host_part,
+        };
+        return format!("{}{}{}", scheme, cleaned_host, path_part);
+    }
+    trimmed.to_string()
+}
+
+fn key_status(opt: &Option<String>) -> String {
+    match opt.as_deref() {
+        Some(s) if !s.trim().is_empty() => "[SET]".into(),
+        _ => "[EMPTY]".into(),
+    }
+}
+
+fn build_settings_snapshot(s: &crate::settings::Settings) -> SettingsSnapshot {
+    SettingsSnapshot {
+        setup_completed: s.setup_completed,
+        user_display_name_set: s
+            .user_display_name
+            .as_deref()
+            .map(|x| !x.trim().is_empty())
+            .unwrap_or(false),
+        mineru_api_key: key_status(&s.mineru_api_key),
+        mineru_endpoint: s.mineru_endpoint.as_deref().map(strip_endpoint_auth),
+        mineru_verified: s.mineru_verified_at.is_some(),
+        deepseek_api_key: key_status(&s.cloud_llm_api_key),
+        deepseek_endpoint: s.cloud_llm_endpoint.as_deref().map(strip_endpoint_auth),
+        deepseek_verified: s.deepseek_verified_at.is_some(),
+        yuandian_api_key: key_status(&s.yuandian_api_key),
+        yuandian_verified: s.yuandian_verified_at.is_some(),
+        local_model_dir: s.local_model_dir.clone(),
+        local_server_endpoint: s.ollama_endpoint.as_deref().map(strip_endpoint_auth),
+        local_server_auto_start: s.local_server_auto_start.unwrap_or(true),
+    }
+}
+
+fn dir_size_and_count(dir: &std::path::Path) -> (u64, u64) {
+    // 浅扫一层 + 子目录递归(extracts/<case_id>/*.md 这种两层结构)
+    let mut size = 0u64;
+    let mut count = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                if ft.is_file() {
+                    if let Ok(m) = entry.metadata() {
+                        size += m.len();
+                        count += 1;
+                    }
+                } else if ft.is_dir() {
+                    let (s, c) = dir_size_and_count(&entry.path());
+                    size += s;
+                    count += c;
+                }
+            }
+        }
+    }
+    (size, count)
+}
+
+fn cmd_in_path(cmd: &str) -> bool {
+    std::process::Command::new(cmd)
+        .arg("-v")
+        .output()
+        .map(|o| o.status.success() || o.status.code() == Some(99))
+        .unwrap_or(false)
+}
+
+fn collect_system_info() -> SystemInfo {
+    use std::path::PathBuf;
+    let data_dir = crate::db::app_data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    let data_dir_pb = PathBuf::from(&data_dir);
+
+    // 写权限:尝试创建 + 删一个探针文件
+    let writable = {
+        let probe = data_dir_pb.join(".caseboard_write_probe");
+        match std::fs::write(&probe, b"x") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    };
+
+    let db_size_mb = std::fs::metadata(data_dir_pb.join("caseboard.db"))
+        .ok()
+        .map(|m| m.len() as f64 / 1024.0 / 1024.0);
+
+    let (ex_size, ex_count) = dir_size_and_count(&data_dir_pb.join("extracts"));
+    let extracts_size_mb = if ex_count > 0 {
+        Some(ex_size as f64 / 1024.0 / 1024.0)
+    } else {
+        None
+    };
+    let extracts_files = if ex_count > 0 { Some(ex_count) } else { None };
+
+    let (rep_size, _) = dir_size_and_count(&data_dir_pb.join("reports"));
+    let (ext_size, _) = dir_size_and_count(&data_dir_pb.join("external"));
+    let rep_total = rep_size + ext_size;
+    let reports_size_mb = if rep_total > 0 {
+        Some(rep_total as f64 / 1024.0 / 1024.0)
+    } else {
+        None
+    };
+
+    // 磁盘剩余:用 df -k 取数据目录所在卷的 Available
+    let disk_free_gb = std::process::Command::new("df")
+        .arg("-k")
+        .arg(&data_dir)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| {
+            // 第二行第 4 列是 Available (KB)
+            let lines: Vec<&str> = s.lines().collect();
+            lines.get(1).and_then(|line| {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                cols.get(3).and_then(|kb| kb.parse::<u64>().ok())
+            })
+        })
+        .map(|kb| kb as f64 / 1024.0 / 1024.0);
+
+    SystemInfo {
+        data_dir,
+        data_dir_writable: writable,
+        db_size_mb,
+        extracts_files,
+        extracts_size_mb,
+        reports_size_mb,
+        disk_free_gb,
+        pdftotext_available: cmd_in_path("pdftotext"),
+        pdftoppm_available: cmd_in_path("pdftoppm"),
+    }
+}
+
+/// 从 DB + settings + 系统调用收集诊断信息。
+///
+/// `console_errors`:前端打开反馈弹窗时把累积的 console.error / window.onerror 数组传过来。
+/// 默认空向量即可——这只是观测信号,缺失不阻塞反馈。
+pub async fn collect(
+    pool: &SqlitePool,
+    console_errors: Vec<ConsoleError>,
+) -> Result<DiagnosticInfo, String> {
+    let app_version = env!("CARGO_PKG_VERSION").to_string();
+
+    // 匿名识别码:首次启动时生成 + 持久化(uuid v4 前 8 位足够区分)
+    let client_id_short = crate::settings::ensure_client_id()
+        .ok()
+        .map(|s| s.chars().take(8).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // 系统版本 + 架构
+    let os_version = collect_os_version();
+    let language = std::env::var("LANG").unwrap_or_else(|_| "zh-CN".to_string());
+
+    // settings
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let llm_provider = settings.effective_llm_provider().to_string();
+    let ocr_provider = settings.effective_ocr_provider().to_string();
+
+    // 本机服务状态(轻量探测,不连不报错)
+    let local_server_status = if settings.needs_local_server() {
+        match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+        {
+            Ok(client) => match client.get("http://127.0.0.1:8899/health").send().await {
+                Ok(r) if r.status().is_success() => "运行中(:8899)".to_string(),
+                _ => "未启动 / 不可达".to_string(),
+            },
+            Err(_) => "无法探测".to_string(),
+        }
+    } else {
+        "未启用(走云端)".to_string()
+    };
+
+    // DeepSeek 余额(只读缓存,不发请求 — 反馈对话框不该慢)
+    let deepseek_balance = crate::deepseek::cached_balance(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|b| b.total_balance);
+
+    // 统计
+    let cases_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cases")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("查 cases 数失败: {}", e))?;
+
+    let documents_total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("查 documents 数失败: {}", e))?;
+
+    let documents_done: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL AND extraction_status = 'done'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let documents_skipped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL AND extraction_status = 'skipped'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let documents_failed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL AND extraction_status = 'failed'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let documents_pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE deleted_at IS NULL AND extraction_status = 'pending'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // 最近失败的最多 200 条(filename + category + created_at + last_error)
+    // 2026-05-25 V0.1.8 加 last_error
+    // 2026-05-25 V0.1.9 改 LIMIT 5 → LIMIT 200:朋友反馈 34 个失败只看到 5 条没法诊断,
+    //                  作者要看全量。200 上限防止极端情况撑爆 MD 文件
+    let rows: Vec<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT filename, category, created_at, last_error FROM documents \
+         WHERE deleted_at IS NULL AND extraction_status = 'failed' \
+         ORDER BY created_at DESC LIMIT 200",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let recent_failures = rows
+        .into_iter()
+        .map(
+            |(filename, category, created_at, last_error)| RecentFailure {
+                filename,
+                category,
+                created_at,
+                last_error,
+            },
+        )
+        .collect();
+
+    // 2026-05-26 V0.1.11 加:settings 脱敏快照 + 系统级 + stderr ring buffer + 前端 console
+    let settings_snapshot = build_settings_snapshot(&settings);
+    let system_info = collect_system_info();
+    let stderr_tail = crate::diagnostic_log::snapshot();
+
+    // 2026-05-26 V0.1.12:最近 200 条抽取 metrics + 按 backend 聚合
+    // (metrics_tail 现直接是 Vec<MetricRow>,原逐字段手抄随 B3/B8 收口删除)
+    let metrics_tail: Vec<MetricSample> = crate::db::metrics::query_recent(pool, 200)
+        .await
+        .unwrap_or_default();
+    let metrics_summary = summarize_metrics(&metrics_tail);
+
+    // 2026-05-27 V0.1.13+:案件 AI 助手用量统计(只取数字 + meta,**绝不**含 content)
+    let chat_usage = summarize_chat_usage(pool).await.unwrap_or_default();
+
+    // 2026-05-27 V0.1.13+:功能模块用量(聚合数字,无业务标识)
+    let feature_usage = collect_feature_usage(pool).await.unwrap_or_default();
+
+    Ok(DiagnosticInfo {
+        client_id_short,
+        app_version,
+        os_version,
+        language,
+        llm_provider,
+        ocr_provider,
+        local_server_status,
+        deepseek_balance,
+        stats: AppStats {
+            cases_total,
+            documents_total,
+            documents_done,
+            documents_skipped,
+            documents_failed,
+            documents_pending,
+        },
+        recent_failures,
+        settings_snapshot,
+        system_info,
+        stderr_tail,
+        console_errors,
+        metrics_tail,
+        metrics_summary,
+        chat_usage,
+        feature_usage,
+    })
+}
+
+/// 收集功能模块用量(2026-05-27 V0.1.13+)。全部 SQL COUNT 聚合,无业务标识。
+async fn collect_feature_usage(pool: &SqlitePool) -> Result<FeatureUsage, sqlx::Error> {
+    let chat_messages_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_messages")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    let chat_artifacts_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE source = 'chat' AND deleted_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let cases_with_analysis_report: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE case_report_path IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    let cases_with_risk_report: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE risk_assessment_path IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    let cases_with_deep_dive_report: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE deep_dive_report_path IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    let cases_with_full_report: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cases WHERE full_report_path IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    let cases_with_user_overrides: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cases WHERE user_overrides_json IS NOT NULL \
+         AND user_overrides_json != '' AND user_overrides_json != '{}'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let case_type_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT case_type, COUNT(*) FROM cases GROUP BY case_type ORDER BY COUNT(*) DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let case_types: Vec<KeyCount> = case_type_rows
+        .into_iter()
+        .map(|(k, c)| KeyCount { key: k, count: c })
+        .collect();
+
+    let source_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT source, COUNT(*) FROM documents WHERE deleted_at IS NULL \
+         GROUP BY source ORDER BY COUNT(*) DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let document_sources: Vec<KeyCount> = source_rows
+        .into_iter()
+        .map(|(k, c)| KeyCount { key: k, count: c })
+        .collect();
+
+    let yuandian_queried_cases: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cases WHERE risk_assessment_at IS NOT NULL \
+         OR deep_dive_at IS NOT NULL OR full_report_at IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    // V0.3 写材料工具:save_artifact 落的文书 source='chat_artifact'(区别于旧 'chat')。
+    let save_artifacts_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE source = 'chat_artifact' AND deleted_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let artifact_type_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT category, COUNT(*) FROM documents \
+         WHERE source = 'chat_artifact' AND deleted_at IS NULL \
+         GROUP BY category ORDER BY COUNT(*) DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let save_artifact_by_type: Vec<KeyCount> = artifact_type_rows
+        .into_iter()
+        .map(|(k, c)| KeyCount {
+            key: k.unwrap_or_else(|| "未分类".into()),
+            count: c,
+        })
+        .collect();
+
+    // 本地 KB 命中 vs 元典调用(看「越用越省钱」是否生效:命中越高越省积分)。
+    // 真实可靠源 = `yuandian_credits_monthly`(hooks.rs 的 record_kb_hit / record_yuandian_call
+    // 在工具实时路径写入,也是设置页积分卡的数据源)。**注意**:chat_tasks.kb_hits 在当前
+    // agent_loop 流程下从不写、恒 0,别从那取(否则误报「省钱功能坏了」)。
+    let kb_total_hits: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(kb_hits), 0) FROM yuandian_credits_monthly")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+    let yuandian_total_calls: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(api_calls), 0) FROM yuandian_credits_monthly")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+
+    Ok(FeatureUsage {
+        chat_messages_total,
+        chat_artifacts_total,
+        cases_with_analysis_report,
+        cases_with_risk_report,
+        cases_with_deep_dive_report,
+        cases_with_full_report,
+        cases_with_user_overrides,
+        case_types,
+        document_sources,
+        yuandian_queried_cases,
+        save_artifacts_total,
+        save_artifact_by_type,
+        kb_total_hits,
+        yuandian_total_calls,
+    })
+}
+
+/// 单行 chat 用量(只取 model / task_type / 数字字段,**绝不** SELECT content)。
+#[derive(sqlx::FromRow)]
+struct ChatUsageRawRow {
+    model: String,
+    task_type: Option<String>,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    latency_ms: Option<i64>,
+    char_count: i64,
+    error_short: Option<String>,
+}
+
+/// 查 chat_messages 表的近 200 条 assistant 行,按 (model, task_type) 聚合。
+/// **隐私铁律**:此函数**只**查数字 + meta 字段,绝不 SELECT content。
+async fn summarize_chat_usage(pool: &SqlitePool) -> Result<Vec<ChatUsageBucket>, sqlx::Error> {
+    // 注意 SELECT 列表里 **没有** content:这是隐私铁律 #3 的最后一道防线
+    let rows: Vec<ChatUsageRawRow> = sqlx::query_as(
+        "SELECT \
+                COALESCE(model, '(unknown)') AS model, \
+                task_type, \
+                prompt_tokens, \
+                completion_tokens, \
+                latency_ms, \
+                LENGTH(content) AS char_count, \
+                error_short \
+             FROM chat_messages \
+             WHERE role = 'assistant' \
+             ORDER BY created_at DESC \
+             LIMIT 200",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Acc {
+        samples: i64,
+        ok: i64,
+        p_sum: i64,
+        c_sum: i64,
+        lat_sum: i64,
+        char_sum: i64,
+        p_cnt: i64,
+        c_cnt: i64,
+        lat_cnt: i64,
+        char_cnt: i64,
+    }
+    let mut buckets: HashMap<(String, String), Acc> = HashMap::new();
+    for row in rows {
+        let task = row.task_type.unwrap_or_else(|| "free_chat".into());
+        let acc = buckets.entry((row.model, task)).or_default();
+        acc.samples += 1;
+        if row.error_short.is_none() {
+            acc.ok += 1;
+        }
+        if let Some(v) = row.prompt_tokens {
+            acc.p_sum += v;
+            acc.p_cnt += 1;
+        }
+        if let Some(v) = row.completion_tokens {
+            acc.c_sum += v;
+            acc.c_cnt += 1;
+        }
+        if let Some(v) = row.latency_ms {
+            acc.lat_sum += v;
+            acc.lat_cnt += 1;
+        }
+        if row.char_count > 0 {
+            acc.char_sum += row.char_count;
+            acc.char_cnt += 1;
+        }
+    }
+    let mut out: Vec<ChatUsageBucket> = buckets
+        .into_iter()
+        .map(|((model, task_type), a)| ChatUsageBucket {
+            model,
+            task_type,
+            samples: a.samples,
+            ok_samples: a.ok,
+            avg_prompt: if a.p_cnt > 0 { a.p_sum / a.p_cnt } else { 0 },
+            avg_completion: if a.c_cnt > 0 { a.c_sum / a.c_cnt } else { 0 },
+            avg_latency_ms: if a.lat_cnt > 0 {
+                a.lat_sum / a.lat_cnt
+            } else {
+                0
+            },
+            avg_chars: if a.char_cnt > 0 {
+                a.char_sum / a.char_cnt
+            } else {
+                0
+            },
+        })
+        .collect();
+    out.sort_by_key(|b| std::cmp::Reverse(b.samples));
+    Ok(out)
+}
+
+/// 按 (backend, stage) 分桶聚合,算样本数 / 成功数 / 平均 / 中位 / 平均字数。
+/// 目的:反馈 MD 顶部一眼能看出本机 vs 云端速度对比。
+fn summarize_metrics(samples: &[MetricSample]) -> Vec<BackendStat> {
+    use std::collections::HashMap;
+    let mut buckets: HashMap<(String, String), Vec<&MetricSample>> = HashMap::new();
+    for s in samples {
+        buckets
+            .entry((s.backend.clone(), s.stage.clone()))
+            .or_default()
+            .push(s);
+    }
+    let mut stats: Vec<BackendStat> = buckets
+        .into_iter()
+        .map(|((backend, stage), entries)| {
+            let samples = entries.len() as i64;
+            let ok_entries: Vec<&&MetricSample> =
+                entries.iter().filter(|e| e.outcome == "ok").collect();
+            let ok_samples = ok_entries.len() as i64;
+            let mut elapsed: Vec<i64> = ok_entries.iter().map(|e| e.elapsed_ms).collect();
+            elapsed.sort_unstable();
+            let avg_ms = if !elapsed.is_empty() {
+                elapsed.iter().sum::<i64>() / elapsed.len() as i64
+            } else {
+                0
+            };
+            let p50_ms = if !elapsed.is_empty() {
+                elapsed[elapsed.len() / 2]
+            } else {
+                0
+            };
+            let chars: Vec<i64> = ok_entries.iter().filter_map(|e| e.text_chars).collect();
+            let avg_chars = if !chars.is_empty() {
+                Some(chars.iter().sum::<i64>() / chars.len() as i64)
+            } else {
+                None
+            };
+            BackendStat {
+                backend,
+                stage,
+                samples,
+                ok_samples,
+                avg_ms,
+                p50_ms,
+                avg_chars,
+            }
+        })
+        .collect();
+    // 排序:stage(text_extract → ocr → llm_extract)→ backend 字典序
+    stats.sort_by(|a, b| {
+        let order = |s: &str| match s {
+            "text_extract" => 0,
+            "ocr" => 1,
+            "llm_extract" => 2,
+            _ => 9,
+        };
+        order(&a.stage)
+            .cmp(&order(&b.stage))
+            .then(a.backend.cmp(&b.backend))
+    });
+    stats
+}
+
+fn collect_os_version() -> String {
+    let arch = std::env::consts::ARCH; // aarch64 / x86_64
+    let os = std::env::consts::OS; // macos
+                                   // 用 sw_vers 命令拿 macOS 版本号
+    let ver = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{} {} · {}", os, ver, arch)
+}
+
+/// 把诊断信息 + 用户描述拼成 MD,写到 ~/Desktop/案件看板反馈_<timestamp>.md。
+/// 返回最终文件的绝对路径。
+/// 2026-05-27 V0.1.13+ · 调用默认邮件客户端发反馈。
+///
+/// macOS 主路径:
+///   1. osascript 调 Mail.app:写新邮件 + 带 MD 附件,主窗口显示让用户最终点发送
+///   2. 失败 → fallback `open mailto:` 链接(不带附件,用户手动拖)
+///
+/// 返回 `(path_used, warning)`:
+///   - path_used: "applescript" 或 "mailto"
+///   - warning: 走 mailto fallback 时填提示用户"附件请手动拖入";applescript 时空
+pub async fn send_via_default_mail(
+    md_path: &str,
+    to: &str,
+    subject: &str,
+) -> Result<(String, String), String> {
+    // 安全:转义路径中的 " 和 \ 防 AppleScript 注入
+    fn escape_for_apple_script(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    let escaped_path = escape_for_apple_script(md_path);
+    let escaped_to = escape_for_apple_script(to);
+    let escaped_subject = escape_for_apple_script(subject);
+
+    let script = format!(
+        r#"tell application "Mail"
+    activate
+    set newMessage to make new outgoing message with properties {{subject:"{subject}", visible:true}}
+    tell newMessage
+        make new to recipient at end of to recipients with properties {{address:"{to}"}}
+        try
+            make new attachment with properties {{file name:(POSIX file "{path}")}} at after the last paragraph
+        end try
+    end tell
+end tell"#,
+        subject = escaped_subject,
+        to = escaped_to,
+        path = escaped_path,
+    );
+
+    // 调 osascript
+    let output = tokio::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => Ok(("applescript".to_string(), String::new())),
+        Ok(out) => {
+            // AppleScript 失败 — 走 fallback mailto
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            crate::dlog!("[feedback] AppleScript 失败,fallback mailto: {}", stderr);
+            fallback_mailto(to, subject)
+                .await
+                .map(|_| {
+                    (
+                        "mailto".to_string(),
+                        format!(
+                            "Mail.app 未成功(可能没装 / 未授权 AppleScript),已用 mailto 打开默认邮件客户端。\
+                            **附件请手动把这个 MD 拖进邮件**:{}",
+                            md_path
+                        ),
+                    )
+                })
+        }
+        Err(e) => {
+            crate::dlog!("[feedback] osascript 进程启动失败: {}", e);
+            fallback_mailto(to, subject).await.map(|_| {
+                (
+                    "mailto".to_string(),
+                    format!(
+                        "osascript 不可用,已用 mailto 打开默认邮件客户端。\
+                        **附件请手动把这个 MD 拖进邮件**:{}",
+                        md_path
+                    ),
+                )
+            })
+        }
+    }
+}
+
+/// fallback 路径:`open mailto:`,默认邮件客户端打开新邮件(无附件)。
+async fn fallback_mailto(to: &str, subject: &str) -> Result<(), String> {
+    let url = format!(
+        "mailto:{}?subject={}",
+        urlencode_simple(to),
+        urlencode_simple(subject),
+    );
+    tokio::process::Command::new("open")
+        .arg(&url)
+        .status()
+        .await
+        .map_err(|e| format!("open mailto 失败: {}", e))?;
+    Ok(())
+}
+
+/// 极简 URL encode(仅处理 mailto 必须的字符)。不引入新 crate。
+///
+/// 保留:RFC 3986 unreserved (A-Za-z0-9-_.~) + mailto 安全字符 `@ .`。
+/// 空格转 `%20`,其它(含中文)按 utf-8 byte percent-encode。
+fn urlencode_simple(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        let keep = c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '@');
+        if keep {
+            out.push(c);
+        } else if c == ' ' {
+            out.push_str("%20");
+        } else {
+            // 多字节 / 其它字符 → percent-encode 每个 utf-8 byte
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::urlencode_simple;
+
+    #[test]
+    fn keeps_alphanumerics_and_email_safe_chars() {
+        assert_eq!(urlencode_simple("user@example.com"), "user@example.com");
+        assert_eq!(urlencode_simple("hello-world_v1.2~"), "hello-world_v1.2~");
+    }
+
+    #[test]
+    fn space_becomes_percent_20() {
+        assert_eq!(urlencode_simple("a b"), "a%20b");
+    }
+
+    #[test]
+    fn chinese_is_percent_encoded_per_utf8_byte() {
+        // "案" = e6 a1 88 → %E6%A1%88
+        assert_eq!(urlencode_simple("案"), "%E6%A1%88");
+    }
+}
+
+pub fn save_to_desktop(info: &DiagnosticInfo, user_description: &str) -> Result<PathBuf, String> {
+    let desktop = dirs_desktop().ok_or_else(|| "无法定位桌面路径".to_string())?;
+    if !desktop.exists() {
+        std::fs::create_dir_all(&desktop).map_err(|e| format!("建桌面目录失败: {}", e))?;
+    }
+
+    let ts = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
+    let filename = format!("案件看板反馈_{}.md", ts);
+    let path = desktop.join(&filename);
+
+    let md = render_md(info, user_description);
+    std::fs::write(&path, md).map_err(|e| format!("写入失败: {}", e))?;
+    Ok(path)
+}
+
+/// 跨平台拿桌面目录路径
+fn dirs_desktop() -> Option<PathBuf> {
+    // ~/Desktop 在 macOS 一定存在
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join("Desktop"))
+}
+
+/// Test-only re-export of `render_md` so other modules can regression-test
+/// "敏感数据不应进反馈 MD"。生产代码继续走 `save_to_desktop`。
+#[cfg(test)]
+pub(crate) fn __test_render_md(info: &DiagnosticInfo, user_description: &str) -> String {
+    render_md(info, user_description)
+}
+
+fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut md = String::new();
+    md.push_str("# 案件看板 · 用户反馈\n\n");
+    md.push_str(&format!("**反馈方 ID**:`{}`(匿名)\n", info.client_id_short));
+    md.push_str(&format!("**时间**:{}\n", ts));
+    md.push_str(&format!("**App 版本**:{}\n", info.app_version));
+    md.push_str(&format!("**操作系统**:{}\n", info.os_version));
+    md.push_str(&format!("**语言**:{}\n", info.language));
+    md.push('\n');
+
+    md.push_str("## 当前配置\n\n");
+    md.push_str(&format!(
+        "- LLM 后端:**{}**\n",
+        provider_display(&info.llm_provider)
+    ));
+    md.push_str(&format!(
+        "- OCR 后端:**{}**\n",
+        provider_display(&info.ocr_provider)
+    ));
+    md.push_str(&format!("- 本机服务:{}\n", info.local_server_status));
+    if let Some(b) = info.deepseek_balance {
+        md.push_str(&format!("- DeepSeek 余额:¥{:.2}\n", b));
+    }
+    md.push('\n');
+
+    md.push_str("## 数据状态\n\n");
+    md.push_str(&format!("- 已导入案件:{}\n", info.stats.cases_total));
+    md.push_str(&format!(
+        "- 文档总数:{}(done {} / skipped {} / failed {} / pending {})\n",
+        info.stats.documents_total,
+        info.stats.documents_done,
+        info.stats.documents_skipped,
+        info.stats.documents_failed,
+        info.stats.documents_pending,
+    ));
+    md.push('\n');
+
+    // 2026-05-27 V0.1.13+:功能模块用量(老板用来判断同事用了哪些功能)
+    {
+        let f = &info.feature_usage;
+        md.push_str("## 功能模块用量\n\n");
+        md.push_str(&format!(
+            "- 案件 AI 助手:**{}** 条聊天消息 · **{}** 份 chat artifact\n",
+            f.chat_messages_total, f.chat_artifacts_total
+        ));
+        // V0.3 写材料工具用量(同事测试写起诉状/答辩状/律师函等的覆盖)
+        let artifact_types = if f.save_artifact_by_type.is_empty() {
+            String::new()
+        } else {
+            let t: Vec<String> = f
+                .save_artifact_by_type
+                .iter()
+                .map(|k| format!("{}×{}", k.key, k.count))
+                .collect();
+            format!("({})", t.join(" / "))
+        };
+        md.push_str(&format!(
+            "- 写材料(save_artifact 文书):**{}** 份 {}\n",
+            f.save_artifacts_total, artifact_types
+        ));
+        // 本地 KB 命中 vs 元典调用 —— 看「越用越省钱」是否真生效
+        let kb_rate = if f.kb_total_hits + f.yuandian_total_calls > 0 {
+            format!(
+                " · 命中率 {:.0}%",
+                100.0 * f.kb_total_hits as f64 / (f.kb_total_hits + f.yuandian_total_calls) as f64
+            )
+        } else {
+            String::new()
+        };
+        md.push_str(&format!(
+            "- 本地 KB 命中 **{}** 次 vs 元典 API 调用 **{}** 次{}\n",
+            f.kb_total_hits, f.yuandian_total_calls, kb_rate
+        ));
+        md.push_str(&format!(
+            "- 案件分析报告(LLM 全局抽):**{}** 个案件已生成\n",
+            f.cases_with_analysis_report
+        ));
+        md.push_str(&format!(
+            "- 元典风险报告:**{}** 个案件 · 深挖:**{}** · 完整报告:**{}**\n",
+            f.cases_with_risk_report, f.cases_with_deep_dive_report, f.cases_with_full_report,
+        ));
+        md.push_str(&format!(
+            "- 元典 API 调用过的案件:**{}** 个(risk / deep_dive / full 任一)\n",
+            f.yuandian_queried_cases
+        ));
+        md.push_str(&format!(
+            "- 编辑模式 user overrides:**{}** 个案件手改过字段\n",
+            f.cases_with_user_overrides
+        ));
+        if !f.case_types.is_empty() {
+            let types: Vec<String> = f
+                .case_types
+                .iter()
+                .map(|k| format!("{}×{}", k.key, k.count))
+                .collect();
+            md.push_str(&format!("- 案件类型分布:{}\n", types.join(" / ")));
+        }
+        if !f.document_sources.is_empty() {
+            let srcs: Vec<String> = f
+                .document_sources
+                .iter()
+                .map(|k| format!("{}×{}", k.key, k.count))
+                .collect();
+            md.push_str(&format!("- documents.source 分布:{}\n", srcs.join(" / ")));
+        }
+        md.push('\n');
+    }
+
+    if !info.recent_failures.is_empty() {
+        md.push_str(&format!(
+            "## 最近抽取失败的文档({} 条,最多 200)\n\n",
+            info.recent_failures.len()
+        ));
+        for f in &info.recent_failures {
+            let cat = f.category.as_deref().unwrap_or("未分类");
+            md.push_str(&format!(
+                "- **[{}] {}** · {}\n",
+                cat, f.filename, f.created_at
+            ));
+            // 失败原因(sanitize 后),帮作者快速判断是哪类问题(限流 / token / 大小 / 网络...)
+            if let Some(err) = &f.last_error {
+                let safe = sanitize_paths(err);
+                md.push_str(&format!("  - 错误:`{}`\n", safe));
+            }
+        }
+        md.push('\n');
+    }
+
+    // 2026-05-26 V0.1.11:Settings 脱敏快照
+    let s = &info.settings_snapshot;
+    md.push_str("## Settings 脱敏快照\n\n");
+    md.push_str(&format!(
+        "- 完成 onboarding:{}\n",
+        if s.setup_completed { "是" } else { "否" }
+    ));
+    md.push_str(&format!(
+        "- 用户称呼已设置:{}\n",
+        if s.user_display_name_set {
+            "是"
+        } else {
+            "否"
+        }
+    ));
+    // 2026-05-26 V0.1.11 老板补强:key 状态显式三态(已填+已验证 / **已填+未验证** / 未填),
+    //   方便作者拿到反馈 MD 第一眼就能识别"朋友 key 没验证"这种盲区
+    md.push_str(&format!(
+        "- MinerU key:{} · endpoint:{}\n",
+        key_state_display(&s.mineru_api_key, s.mineru_verified),
+        s.mineru_endpoint.as_deref().unwrap_or("(默认)"),
+    ));
+    md.push_str(&format!(
+        "- DeepSeek key:{} · endpoint:{}\n",
+        key_state_display(&s.deepseek_api_key, s.deepseek_verified),
+        s.deepseek_endpoint.as_deref().unwrap_or("(默认)"),
+    ));
+    md.push_str(&format!(
+        "- 元典 key:{}\n",
+        key_state_display(&s.yuandian_api_key, s.yuandian_verified),
+    ));
+    md.push_str(&format!(
+        "- 本机模型目录:{}\n",
+        s.local_model_dir
+            .as_deref()
+            .unwrap_or("(默认 ~/.cache/caseboard/models)"),
+    ));
+    md.push_str(&format!(
+        "- 本机 server endpoint:{} · 自动启动:{}\n",
+        s.local_server_endpoint.as_deref().unwrap_or("(默认 :8899)"),
+        if s.local_server_auto_start {
+            "是"
+        } else {
+            "否"
+        },
+    ));
+    md.push('\n');
+
+    // 2026-05-26 V0.1.11:系统级
+    let si = &info.system_info;
+    md.push_str("## 系统级诊断\n\n");
+    md.push_str(&format!("- 数据目录:`{}`\n", si.data_dir));
+    md.push_str(&format!(
+        "- 数据目录可写:{}\n",
+        if si.data_dir_writable {
+            "是"
+        } else {
+            "**否(权限有问题!)**"
+        }
+    ));
+    if let Some(s) = si.db_size_mb {
+        md.push_str(&format!("- 数据库大小:{:.2} MB\n", s));
+    } else {
+        md.push_str("- 数据库:**未找到**\n");
+    }
+    if let (Some(c), Some(s)) = (si.extracts_files, si.extracts_size_mb) {
+        md.push_str(&format!("- extracts/ 目录:{} 文件 / {:.2} MB\n", c, s));
+    }
+    if let Some(s) = si.reports_size_mb {
+        md.push_str(&format!("- reports/ + external/:{:.2} MB\n", s));
+    }
+    if let Some(g) = si.disk_free_gb {
+        md.push_str(&format!("- 数据盘剩余:{:.2} GB\n", g));
+    }
+    md.push_str(&format!(
+        "- pdftotext 可用:{} · pdftoppm 可用:{}\n",
+        if si.pdftotext_available { "是" } else { "否" },
+        if si.pdftoppm_available { "是" } else { "否" },
+    ));
+    md.push('\n');
+
+    // 2026-05-26 V0.1.11:App 自身 stderr ring buffer
+    if !info.stderr_tail.is_empty() {
+        md.push_str(&format!(
+            "## App 运行时日志(最近 {} 行,新→旧)\n\n```\n",
+            info.stderr_tail.len()
+        ));
+        for line in &info.stderr_tail {
+            md.push_str(line);
+            md.push('\n');
+        }
+        md.push_str("```\n\n");
+    }
+
+    // 2026-05-26 V0.1.12:抽取性能 A/B 对比(按 backend 聚合)
+    if !info.metrics_summary.is_empty() {
+        md.push_str("## 抽取性能样本(本地 vs 云端 A/B)\n\n");
+        md.push_str("| Stage | Backend | 样本 | 成功 | avg ms | p50 ms | avg chars |\n");
+        md.push_str("|:---|:---|---:|---:|---:|---:|---:|\n");
+        for s in &info.metrics_summary {
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                s.stage,
+                s.backend,
+                s.samples,
+                s.ok_samples,
+                s.avg_ms,
+                s.p50_ms,
+                s.avg_chars
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "—".into()),
+            ));
+        }
+        md.push('\n');
+    }
+
+    // 最近 20 条原始样本(给作者复盘个例用)
+    if !info.metrics_tail.is_empty() {
+        let preview_n = info.metrics_tail.len().min(20);
+        md.push_str(&format!(
+            "## 最近抽取样本(显示前 {} 条,共 {} 条入库)\n\n",
+            preview_n,
+            info.metrics_tail.len()
+        ));
+        md.push_str("| 时间 | 文件 | 大小 | Stage | Backend | 结果 | 耗时 | 字数 |\n");
+        md.push_str("|:---|:---|---:|:---|:---|:---|---:|---:|\n");
+        for s in info.metrics_tail.iter().take(preview_n) {
+            let size = if s.file_size_bytes >= 1024 * 1024 {
+                format!("{:.1}M", s.file_size_bytes as f64 / 1024.0 / 1024.0)
+            } else {
+                format!("{}K", s.file_size_bytes / 1024)
+            };
+            let chars = s
+                .text_chars
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "—".into());
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} ms | {} |\n",
+                s.created_at, s.filename, size, s.stage, s.backend, s.outcome, s.elapsed_ms, chars,
+            ));
+        }
+        md.push('\n');
+    }
+
+    // 2026-05-27 V0.1.13+:案件 AI 助手用量(按 model + task_type 聚合)
+    // **隐私**:本段只渲染数字 + model + task_type,**绝不**渲染 chat content
+    if !info.chat_usage.is_empty() {
+        md.push_str("## 案件 AI 助手用量(近 200 条 assistant 消息)\n\n");
+        md.push_str("| Model | Task | 样本 | 成功 | avg prompt | avg completion | avg latency | avg chars |\n");
+        md.push_str("|:---|:---|---:|---:|---:|---:|---:|---:|\n");
+        for b in &info.chat_usage {
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} ms | {} |\n",
+                b.model,
+                b.task_type,
+                b.samples,
+                b.ok_samples,
+                b.avg_prompt,
+                b.avg_completion,
+                b.avg_latency_ms,
+                b.avg_chars,
+            ));
+        }
+        md.push('\n');
+    }
+
+    // 2026-05-26 V0.1.11:前端 console 报错
+    if !info.console_errors.is_empty() {
+        md.push_str(&format!(
+            "## 前端 console / window.onerror({} 条)\n\n",
+            info.console_errors.len()
+        ));
+        for e in &info.console_errors {
+            let at = e.at.as_deref().unwrap_or("?");
+            md.push_str(&format!("- **[{}]** {}\n", e.level, at));
+            // message 可能多行,缩进展示
+            for line in e.message.lines() {
+                md.push_str("  > ");
+                md.push_str(line);
+                md.push('\n');
+            }
+        }
+        md.push('\n');
+    }
+
+    md.push_str("## 用户描述\n\n");
+    if user_description.trim().is_empty() {
+        md.push_str("(用户未填写)\n");
+    } else {
+        md.push_str(user_description.trim());
+        md.push('\n');
+    }
+    md.push('\n');
+
+    md.push_str("---\n\n");
+    md.push_str("> 此反馈由 CaseBoard 自动生成,**不包含案件名、当事人、文档内容**。\n");
+    md.push_str(
+        "> 反馈方 ID 是匿名 UUID 前 8 位,跟用户名/邮箱无关,只用于关联「同一人多次反馈」。\n",
+    );
+    md.push_str("> 把这个 MD 文件作为附件发送给项目维护者即可,无需粘贴文字。\n");
+
+    // 安全网:整份 MD 再过一次 sanitize_paths,兜底 stderr/console 里可能漏的路径
+    sanitize_paths(&md)
+}
+
+/// 反馈 MD 里 key 状态的统一文案。三态:
+/// - `[SET]` + verified=true   → "已填 · 已验证 ✓"
+/// - `[SET]` + verified=false  → "**已填 · ⚠ 未通过验证(可能无效 key)**"
+/// - `[EMPTY]`                 → "未填"
+fn key_state_display(api_key_status: &str, verified: bool) -> String {
+    if api_key_status == "[SET]" {
+        if verified {
+            "已填 · 已验证 ✓".to_string()
+        } else {
+            "**已填 · ⚠ 未通过验证(可能无效 key)**".to_string()
+        }
+    } else {
+        "未填".to_string()
+    }
+}
+
+fn provider_display(p: &str) -> &str {
+    match p {
+        "local" => "本机 MiniCPM-V",
+        "cloud" => "云端(DeepSeek / MinerU)",
+        _ => p,
+    }
+}
+
+/// 把错误信息里的绝对路径替换成 `<path>/<basename>`,防止案件路径(常含当事人名)泄漏。
+///
+/// 例:`/Users/alice/cases/李四/foo.pdf` → `<path>/foo.pdf`
+///
+/// 只匹配 macOS 常见的根前缀。
+///
+/// **已知限制**:**含空格的路径**(如 `/Users/x/Nutstore Files/y/z.pdf`)只能正确处理
+/// **引号包围**的版本(`"..."` / `'...'` / `` `...` ``).无引号 unquoted 路径会在
+/// 第一个空格切断,留下后段(如 `Files/李四/z.pdf` 仍含敏感名).MinerU CLI 通常会
+/// 引号包围 path,std::io::Error::Display 不含 path,所以这个简化可接受;但**绝不要**
+/// 把不可信用户输入喂进 sanitize_paths——它只用于工具 stderr 等受控来源.
+pub(crate) fn sanitize_paths(s: &str) -> String {
+    const PREFIXES: &[&str] = &["/Users/", "/Volumes/", "/private/", "/tmp/", "/var/"];
+    // unquoted 模式下的路径结束字符(含空格)
+    const UNQUOTED_END: &[char] = &[
+        ' ', '\t', '\n', '\r', ',', ';', '"', '\'', ')', ']', '}', '<', '>', '`',
+    ];
+    fn is_quote(c: char) -> bool {
+        matches!(c, '"' | '\'' | '`')
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let len = s.len();
+    let mut i = 0;
+
+    while i < len {
+        // 找第一个匹配的前缀
+        let mut matched_prefix: Option<usize> = None;
+        for &prefix in PREFIXES {
+            if s[i..].starts_with(prefix) {
+                matched_prefix = Some(prefix.len());
+                break;
+            }
+        }
+
+        if let Some(prefix_len) = matched_prefix {
+            // 看 path 前一个字符是不是引号(quoted 模式下,空格不算结束)
+            let is_quoted = s[..i].chars().last().map(is_quote).unwrap_or(false);
+
+            let path_start = i;
+            let mut j = i + prefix_len;
+            while j < len {
+                let ch = s[j..].chars().next().unwrap();
+                let is_end = if is_quoted {
+                    // quoted:只在引号 / 换行处结束
+                    is_quote(ch) || ch == '\n' || ch == '\r'
+                } else if ch == ' ' || ch == '\t' {
+                    // unquoted 空白:**heuristic** — 只在"下一个 token 末尾紧跟 `/`"时
+                    // 视作路径段名(覆盖 "Application Support" / "Nutstore Files")。
+                    // 不能用"同行任何位置还有 /"——会把空格分隔的两条独立路径错误合并。
+                    // 2026-05-26 V0.1.11:修 `/Users/.../Application Support/external/张三/foo.md`
+                    // 之前在第一个空格断,"张三" 漏出来。
+                    let rest = &s[j + 1..];
+                    // 找下一个 token 边界:`/` 视为分隔(因为我们要检测 "Support/" 这种形状)
+                    let next_break = rest
+                        .find([' ', '\t', '\n', '\r', '/'])
+                        .unwrap_or(rest.len());
+                    let next_token = &rest[..next_break];
+                    let next_continues = !next_token.is_empty()
+                        && next_break < rest.len()
+                        && rest.as_bytes()[next_break] == b'/';
+                    !next_continues
+                } else {
+                    // unquoted 其他标点:任何 UNQUOTED_END 都终止
+                    ch.is_ascii() && UNQUOTED_END.contains(&ch)
+                };
+                if is_end {
+                    break;
+                }
+                j += ch.len_utf8();
+            }
+            let path = &s[path_start..j];
+            // basename:最后一个 `/` 之后(可能为空,如 `/Users/`)
+            let basename = path.rsplit_once('/').map(|(_, b)| b).unwrap_or("");
+            out.push_str("<path>");
+            if !basename.is_empty() {
+                out.push('/');
+                out.push_str(basename);
+            }
+            i = j;
+        } else {
+            // 不在前缀位置,推一个字符
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_users_path_keeping_basename() {
+        // 无空格 path 是 mineru CLI / std::io::Error 的典型形态
+        let input = "无法读取文件元数据: /Users/alice/cases/李四/foo.pdf 不存在";
+        let out = sanitize_paths(input);
+        assert!(!out.contains("alice"), "should drop username: {}", out);
+        assert!(
+            !out.contains("李四"),
+            "should drop case name in path: {}",
+            out
+        );
+        assert!(
+            out.contains("<path>/foo.pdf"),
+            "should keep basename: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_quoted_path_with_spaces() {
+        // 含空格的路径只有引号包围时才能正确 sanitize(已知限制,见 sanitize_paths doc)
+        let input = r#"读 "/Users/alice/Nutstore Files/李四/foo.pdf" 失败"#;
+        let out = sanitize_paths(input);
+        assert!(!out.contains("alice"));
+        assert!(
+            !out.contains("李四"),
+            "quoted path should fully sanitize: {}",
+            out
+        );
+        assert!(out.contains("<path>"));
+    }
+
+    #[test]
+    fn sanitize_handles_volumes_and_private() {
+        let input = "调用失败 /Volumes/Data/big.pdf 和 /private/var/folders/xx/tmp.txt";
+        let out = sanitize_paths(input);
+        assert!(out.contains("<path>/big.pdf"));
+        assert!(out.contains("<path>/tmp.txt"));
+        assert!(!out.contains("/Volumes/"));
+        assert!(!out.contains("/private/"));
+    }
+
+    #[test]
+    fn sanitize_leaves_non_paths_alone() {
+        let input = "mineru extract 退出码 1: timeout after 900s";
+        assert_eq!(sanitize_paths(input), input);
+    }
+
+    #[test]
+    fn sanitize_handles_quoted_paths() {
+        let input = r#"读 "/Users/x/a/b.pdf" 失败"#;
+        let out = sanitize_paths(input);
+        assert!(out.contains("<path>/b.pdf"));
+        assert!(!out.contains("/Users/"));
+    }
+
+    #[test]
+    fn sanitize_empty_basename_after_trailing_slash() {
+        // 罕见情况:路径以 / 结尾
+        let input = "dir /Users/alice/ 不存在";
+        let out = sanitize_paths(input);
+        assert!(!out.contains("alice"));
+        assert!(out.contains("<path>"));
+    }
+
+    /* 2026-05-26 V0.1.11:反馈扩展 — 测整份 MD 兜底 sanitize 真起作用 */
+
+    fn make_info_with_dangerous_paths() -> DiagnosticInfo {
+        DiagnosticInfo {
+            client_id_short: "abcd1234".into(),
+            app_version: "0.1.11-test".into(),
+            os_version: "macOS 14.5 · arm64".into(),
+            language: "zh-CN".into(),
+            llm_provider: "cloud".into(),
+            ocr_provider: "cloud".into(),
+            local_server_status: "未启用(走云端)".into(),
+            deepseek_balance: Some(5.42),
+            stats: AppStats {
+                cases_total: 3,
+                documents_total: 10,
+                documents_done: 7,
+                documents_skipped: 1,
+                documents_failed: 2,
+                documents_pending: 0,
+            },
+            recent_failures: vec![],
+            settings_snapshot: SettingsSnapshot {
+                setup_completed: true,
+                user_display_name_set: true,
+                mineru_api_key: "[SET]".into(),
+                mineru_endpoint: Some("https://mineru.net/api/v4".into()),
+                mineru_verified: true,
+                deepseek_api_key: "[SET]".into(),
+                deepseek_endpoint: Some("https://api.deepseek.com".into()),
+                deepseek_verified: true,
+                yuandian_api_key: "[EMPTY]".into(),
+                yuandian_verified: false,
+                local_model_dir: None,
+                local_server_endpoint: Some("http://127.0.0.1:8899".into()),
+                local_server_auto_start: true,
+            },
+            system_info: SystemInfo {
+                // 兜底:即便 data_dir 含 username(默认会),也要被 sanitize 替换
+                data_dir: "/Users/alice/Library/Application Support/CaseBoard".into(),
+                data_dir_writable: true,
+                db_size_mb: Some(1.5),
+                extracts_files: Some(20),
+                extracts_size_mb: Some(2.3),
+                reports_size_mb: Some(0.5),
+                disk_free_gb: Some(120.0),
+                pdftotext_available: false,
+                pdftoppm_available: true,
+            },
+            // 关键:stderr/console 里的真实路径必须被兜底 sanitize 干掉
+            stderr_tail: vec![
+                "[10:30:01] panic 在 /Users/alice/cases/李四/拒执判断.rs:42".into(),
+            ],
+            console_errors: vec![ConsoleError {
+                level: "error".into(),
+                message: "无法读取 /Users/alice/Library/Application Support/CaseBoard/external/张三/risk.md"
+                    .into(),
+                at: Some("2026-05-26T03:00:00Z".into()),
+            }],
+            metrics_tail: Vec::new(),
+            metrics_summary: Vec::new(),
+            chat_usage: Vec::new(),
+            feature_usage: FeatureUsage::default(),
+        }
+    }
+
+    #[test]
+    fn render_md_full_pass_strips_sensitive_paths() {
+        let info = make_info_with_dangerous_paths();
+        let md = render_md(&info, "测试反馈描述");
+        // 路径里出现的当事人姓名必须被剥离
+        assert!(
+            !md.contains("李四"),
+            "leaked party name 李四 in MD:\n{}",
+            md
+        );
+        assert!(
+            !md.contains("张三"),
+            "leaked party name 张三 in MD:\n{}",
+            md
+        );
+        // username 也要剥离(避免 /Users/<real-username>/ 暴露)
+        assert!(
+            !md.contains("alice"),
+            "leaked username alice in MD:\n{}",
+            md
+        );
+        // 但 basename 应保留(便于排查)
+        assert!(md.contains("<path>"));
+        assert!(md.contains("拒执判断.rs"));
+        assert!(md.contains("risk.md"));
+    }
+
+    #[test]
+    fn render_md_includes_new_sections() {
+        let info = make_info_with_dangerous_paths();
+        let md = render_md(&info, "");
+        assert!(md.contains("## Settings 脱敏快照"));
+        assert!(md.contains("## 系统级诊断"));
+        assert!(md.contains("## App 运行时日志"));
+        assert!(md.contains("## 前端 console"));
+        // 2026-05-26 V0.1.11 三态 key:已验证 / 未验证 / 未填,三种都应出现在这个 fixture 里
+        // fixture: mineru SET+verified, deepseek SET+verified, yuandian EMPTY → 没有"未验证"档
+        assert!(md.contains("已填 · 已验证"));
+        assert!(md.contains("未填"));
+    }
+
+    #[test]
+    fn key_state_display_three_cases() {
+        assert_eq!(key_state_display("[SET]", true), "已填 · 已验证 ✓");
+        assert!(key_state_display("[SET]", false).contains("⚠ 未通过验证"));
+        assert_eq!(key_state_display("[EMPTY]", false), "未填");
+        // 未填时即便 verified=true 也仍是未填(永不可能,但语义要稳)
+        assert_eq!(key_state_display("[EMPTY]", true), "未填");
+    }
+
+    #[test]
+    fn strip_endpoint_auth_removes_basic_creds() {
+        assert_eq!(
+            strip_endpoint_auth("https://user:pass@api.example.com/v1/abc"),
+            "https://api.example.com/v1/abc"
+        );
+        assert_eq!(
+            strip_endpoint_auth("http://127.0.0.1:8899"),
+            "http://127.0.0.1:8899"
+        );
+        assert_eq!(
+            strip_endpoint_auth("https://api.deepseek.com"),
+            "https://api.deepseek.com"
+        );
+    }
+}

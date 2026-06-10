@@ -1,0 +1,21 @@
+# Cargo workspace 根配置
+#
+# Tauri 2 CLI 在某些路径下会到项目根调用 cargo metadata,
+# 因此在根目录提供一个 workspace 声明,把 src-tauri 注册为成员。
+# 这也让 IDE / cargo 工具在项目根目录正常工作。
+
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
+# 共享 profile 配置(所有 workspace 成员共用)
+[profile.release]
+opt-level = "s"      # 体积优先(桌面 App 的常见选择)
+lto = true           # 链接时优化
+codegen-units = 1    # 体积/速度更优,编译变慢一点
+panic = "abort"      # 体积更小
+strip = true         # 去除调试符号
+
+[profile.dev]
+opt-level = 0
+debug = true

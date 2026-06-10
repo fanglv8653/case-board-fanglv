@@ -1,0 +1,1097 @@
+/**
+ * 集中封装所有 Tauri 后端命令调用。
+ *
+ * 把 `invoke<T>("xxx", { ... })` 这种 IPC 调用收敛到一处,好处:
+ *   - 类型安全:命令参数 + 返回值都有 TS 类型
+ *   - 重构友好:Rust 端改命令名,只用改这一个文件
+ *   - 易于 mock 测试(以后)
+ */
+
+import { invoke } from "@tauri-apps/api/core";
+
+import type {
+  Case,
+  CaseWithDocs,
+  ExtractedFields,
+  ImportPlan,
+  ImportResult,
+  ScannedDoc,
+  Settings,
+  UpdateInfo,
+  VerifyResult,
+} from "./types";
+
+/* ------------------------------------------------------------------ */
+/* 扫描 / 导入                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 纯扫描,不入库。给"先看看"用。 */
+export function scanCaseFolder(path: string): Promise<ScannedDoc[]> {
+  return invoke<ScannedDoc[]>("scan_case_folder", { path });
+}
+
+/** 导入文件夹:扫描 + upsert 案件 + 替换文档列表。是 V0.1 的主路径。 */
+export function importCaseFolder(path: string): Promise<ImportResult> {
+  return invoke<ImportResult>("import_case_folder", { path });
+}
+
+/** 多案件检测:对文件夹做拆分预案(只读)。multi=false 时按单案导入即可。 */
+export function planImportFolder(path: string): Promise<ImportPlan> {
+  return invoke<ImportPlan>("plan_import_folder", { path });
+}
+
+/** 按确认后的拆分预案批量建案。`root` = 被拖入的上层文件夹(用于替换旧的整体单案)。 */
+export function commitImportFolder(
+  root: string,
+  cases: { dir: string; name: string }[],
+  sharedDirs: string[],
+): Promise<ImportResult[]> {
+  return invoke<ImportResult[]>("commit_import_folder", {
+    root,
+    cases,
+    sharedDirs,
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* 案件读写                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 列出所有已导入案件,按 updated_at 倒序。 */
+export function listCases(): Promise<Case[]> {
+  return invoke<Case[]>("list_cases");
+}
+
+/** 取案件详情 + 该案件所有文档。 */
+export function getCaseWithDocs(id: string): Promise<CaseWithDocs> {
+  return invoke<CaseWithDocs>("get_case_with_docs", { id });
+}
+
+/** 删除一个案件(级联删除关联文档)。不动原始文件夹。 */
+export function deleteCase(id: string): Promise<void> {
+  return invoke<void>("delete_case", { id });
+}
+
+/* ------------------------------------------------------------------ */
+/* 文件读取                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 读一个文本文件(.md/.html/.txt)的全文。仅限 5MB 以内。 */
+export function readTextFile(path: string): Promise<string> {
+  return invoke<string>("read_text_file", { path });
+}
+
+/**
+ * 抽 .docx / .doc / .rtf / .odt 的纯文本(macOS textutil)。
+ * 用于在 App 内预览 Word 文档,不用启动 Word。
+ */
+export function extractDocText(path: string): Promise<string> {
+  return invoke<string>("extract_doc_text", { path });
+}
+
+/**
+ * 把一段诉讼文书纯文本喂给本机 LLM(llama.cpp + MiniCPM-V 4.6),
+ * 抽出 7 个结构化字段。耗时通常 3-8 秒。
+ */
+export function extractFieldsFromText(text: string): Promise<ExtractedFields> {
+  return invoke<ExtractedFields>("extract_fields_from_text", { text });
+}
+
+/** 用系统默认应用打开一个文件(PDF→Preview, docx→Word, 图片→Preview)。 */
+export function openInDefaultApp(path: string): Promise<void> {
+  return invoke<void>("open_in_default_app", { path });
+}
+
+/** 用系统默认浏览器打开 URL(Settings 里 token 申请链接、外链等)。2026-05-24 k */
+export function openUrl(url: string): Promise<void> {
+  return invoke<void>("open_url", { url });
+}
+
+/** 在 Finder 中显示该路径(选中并打开父目录)。 */
+export function revealInFinder(path: string): Promise<void> {
+  return invoke<void>("reveal_in_finder", { path });
+}
+
+/* ------------------------------------------------------------------ */
+/* 用户设置                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 2026-05-25 V0.1.6:在线验证 MinerU API token。 */
+export function verifyMinerUKey(token: string): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_mineru_key", { token });
+}
+
+/** 2026-05-25 V0.1.6:onboarding 完成时调一次,如果案件表为空就 seed 示例案件。 */
+export function seedDemoCaseIfEmpty(): Promise<boolean> {
+  return invoke<boolean>("seed_demo_case_if_empty");
+}
+
+/** 2026-05-25 V0.1.6:在线验证 DeepSeek API key。 */
+export function verifyDeepSeekKey(
+  apiKey: string,
+  endpoint?: string,
+): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_deepseek_key", {
+    apiKey,
+    endpoint: endpoint || null,
+  });
+}
+
+/** 2026-05-25 V0.1.8:在线验证元典(open.chineselaw.com)API key。
+ *  消耗 1 次企业搜索配额(用 name=test top_k=1 探测,代价最小)。*/
+export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_yuandian_key", { apiKey });
+}
+
+/** 2026-05-25 V0.1.8:检测远程最新版本(lawtools.top 仓库的 version.json)。
+ *  失败时 has_update=false + error 字段填上原因,前端可静默忽略。*/
+export function checkForUpdate(): Promise<UpdateInfo> {
+  return invoke<UpdateInfo>("check_for_update");
+}
+
+/** 2026-05-25 V0.1.8:拿当前 App 版本(Cargo.toml CARGO_PKG_VERSION)。 */
+export function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}
+
+/** 读取用户设置(endpoint 字段有 sensible 默认值,api_key 不会有默认值)。 */
+export function getSettings(): Promise<Settings> {
+  return invoke<Settings>("get_settings");
+}
+
+/** 写入用户设置(全量覆盖)。 */
+export function saveSettings(payload: Settings): Promise<void> {
+  return invoke<void>("save_settings", { payload });
+}
+
+/** 检测本机模型 + llama-server 状态(给 onboarding/Settings 用)。 */
+export function detectLocalReadiness(
+  modelDir?: string | null
+): Promise<import("./types").LocalReadiness> {
+  return invoke("detect_local_readiness", { modelDir: modelDir ?? null });
+}
+
+/** 主动让 App 后台启动 llama-server(等到就绪才返回,可能要 10-30s)。 */
+export function ensureLocalReady(): Promise<void> {
+  return invoke("ensure_local_ready");
+}
+
+/* ------------------------------------------------------------------ */
+/* 案件聚合维护                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `reaggregate_all_cases` 命令的返回汇报(对应 Rust `ReaggregateReport`)。
+ * 用于显示"刷新了 N 个案件,X 个成功,Y 个失败"。
+ */
+export interface ReaggregateReport {
+  total: number;
+  succeeded: number;
+  failed: number;
+  /** [(case_id, 错误消息), ...] */
+  failures: [string, string][];
+}
+
+/**
+ * 对所有案件重跑一次 **LLM 全局抽**(2026-05-24 h)。
+ *
+ * 用途:升级 prompt / schema 后,刷新所有案件的 cases.agg_* + 案件分析报告。
+ * 串行跑,每个案件 ~10-30 秒,**会调 LLM**(不像旧 aggregator)。
+ */
+export function reaggregateAllCases(): Promise<ReaggregateReport> {
+  return invoke<ReaggregateReport>("reaggregate_all_cases");
+}
+
+/** 单个案件全局抽报告(2026-05-24 i)。 */
+export interface GlobalExtractReport {
+  case_id: string;
+  docs_included: number;
+  table_ok: boolean;
+  report_ok: boolean;
+  report_path: string | null;
+  elapsed_ms: number;
+  error: string | null;
+}
+
+/**
+ * 单个案件主动触发 LLM 全局抽。用户点「📖 案件报告」按钮时,
+ * 若案件还没报告(case_report_path 为 null),前端就 await 这个 → 完成后弹报告。
+ */
+export function globalExtractCase(caseId: string): Promise<GlobalExtractReport> {
+  return invoke<GlobalExtractReport>("global_extract_case", { caseId });
+}
+
+/* ------------------------------------------------------------------ */
+/* 报告导出(2026-05-24 j)                                              */
+/* ------------------------------------------------------------------ */
+
+/** 导出案件报告为 HTML(陶土红 × 羊皮纸风格,单文件内嵌 CSS)。返回实际写入路径。 */
+export function exportReportHtml(caseId: string, savePath: string): Promise<string> {
+  return invoke<string>("export_report_html", { caseId, savePath });
+}
+
+/** 导出案件报告为 Word .docx(走 macOS textutil)。返回实际写入路径。 */
+export function exportReportDocx(caseId: string, savePath: string): Promise<string> {
+  return invoke<string>("export_report_docx", { caseId, savePath });
+}
+
+/** 2026-05-25 V0.1.7 · 通用 MD → HTML 导出(任意 MD 路径 + 标题)。 */
+export function exportMdHtml(
+  mdPath: string,
+  title: string,
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("export_md_html", { mdPath, title, savePath });
+}
+
+/** 2026-05-25 V0.1.7 · 通用 MD → Word 导出。 */
+export function exportMdDocx(
+  mdPath: string,
+  title: string,
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("export_md_docx", { mdPath, title, savePath });
+}
+
+/**
+ * 2026-05-31 V0.3 M1 · 把 save_artifact 生成的文书导出为 **Word(法律格式)**。
+ * 走原生 OOXML(方正小标宋标题/黑体小标题/仿宋正文/两端对齐/首行缩进2字),
+ * 复刻 quote.law 样本排版,区别于 exportMdDocx 的通用 textutil 路径。`docId` = documents 行 id。
+ */
+export function exportFilingDocx(docId: string, savePath: string): Promise<string> {
+  return invoke<string>("export_filing_docx", { docId, savePath });
+}
+
+/** save_editor_doc 返回:被写回的 document id(本批永远 = 传入 doc_id,原地覆盖)。 */
+export interface EditorSaveResult {
+  doc_id: string;
+}
+
+/**
+ * 2026-05-31 V0.3 D1+D2 · Milkdown 编辑器保存:把编辑后的正文写回该文书的 .md 文件。
+ *
+ * 后端按 doc_id 查 category(=doc_type)→ 重建 filing 注释头 → 原地覆盖 source_path →
+ * 更新 size_bytes/modified_at。前端只传 (title, 正文 body),**不传注释头**(后端重建)。
+ * 对 AI 写的材料(source='chat' 分析产物 / 'chat_artifact' 起草文书)有效(后端校验 is_ai_artifact)。
+ */
+export function saveEditorDoc(
+  docId: string,
+  title: string,
+  contentMd: string,
+): Promise<EditorSaveResult> {
+  return invoke<EditorSaveResult>("save_editor_doc", { docId, title, contentMd });
+}
+
+/* ------------------------------------------------------------------ */
+/* 元典查被执行人(2026-05-24 k · P1)                                   */
+/* ------------------------------------------------------------------ */
+
+export interface YuandianSubject {
+  name: string;
+  kind: "person" | "enterprise";
+  id_no: string | null;
+}
+
+export interface OrchestratorReport {
+  case_id: string;
+  subjects: YuandianSubject[];
+  raw_files: string[];
+  elapsed_ms: number;
+  failures: [string, string][];
+}
+
+export interface DigHint {
+  kind: string;
+  target: string;
+  reason: string;
+}
+
+export interface AssessmentReport {
+  case_id: string;
+  report_path: string | null;
+  dig_hints_path: string | null;
+  dig_hints: DigHint[];
+  raw_count: number;
+  corpus_chars: number;
+  elapsed_ms: number;
+  error: string | null;
+}
+
+export interface YuandianP1Response {
+  orchestrator: OrchestratorReport;
+  assessment: AssessmentReport;
+}
+
+/**
+ * 主动触发元典 P1 查询:
+ *   1. 从 LLM 抽出的 party_contacts 拿被执行人
+ *   2. 跑元典聚合查询(聚合优先,约 5-8 端点)→ 原始 JSON 落 external/<case_id>/yuandian_raw/
+ *   3. 喂 DeepSeek 写风险提示报告 + 深挖建议
+ *   4. 写 cases.risk_assessment_path
+ */
+export function yuandianBasicQuery(caseId: string): Promise<YuandianP1Response> {
+  return invoke<YuandianP1Response>("yuandian_basic_query", { caseId });
+}
+
+/** P2 深挖结果(2026-05-24 k-9)。 */
+export interface DeepDiveReport {
+  case_id: string;
+  hints_used: number;
+  raw_count: number;
+  corpus_chars: number;
+  report_path: string | null;
+  elapsed_ms: number;
+  error: string | null;
+}
+
+/**
+ * 主动触发 P2 深挖:用 P1 LLM 给的 dig_hints 拉关联公司 / 案号 / 第三方主体,
+ * 出深查报告(参考股权转让案件 yuandian_深查 格式)。
+ *
+ * 前置:必须先跑 P1(yuandianBasicQuery)生成 dig_hints,否则报错。
+ * 时间:60-180 秒(取决于 hints 数量)。
+ */
+export function yuandianDeepDive(caseId: string): Promise<DeepDiveReport> {
+  return invoke<DeepDiveReport>("yuandian_deep_dive", { caseId });
+}
+
+/** 2026-05-25 V0.1.7 · 完整报告(合并风险报告 + 深挖报告 → 第三份)结果。 */
+export interface FullReportResult {
+  case_id: string;
+  report_path: string | null;
+  generated_at: string;
+  elapsed_ms: number;
+  error: string | null;
+}
+
+/** 合并完整报告:前置必须有 risk_assessment_path + deep_dive_report_path。 */
+export function yuandianFullReport(caseId: string): Promise<FullReportResult> {
+  return invoke<FullReportResult>("yuandian_full_report", { caseId });
+}
+
+/* ------------------------------------------------------------------ */
+/* 还款记录(2026-05-25 · case_payments)                              */
+/* ------------------------------------------------------------------ */
+
+export interface Payment {
+  id: string;
+  case_id: string;
+  amount: number;
+  paid_at: string;
+  note: string | null;
+  created_at: string;
+}
+
+export interface NewPayment {
+  case_id: string;
+  amount: number;
+  paid_at: string;
+  note: string | null;
+}
+
+export function addPayment(p: NewPayment): Promise<Payment> {
+  return invoke<Payment>("add_payment", { new: p });
+}
+
+export function listPayments(caseId: string): Promise<Payment[]> {
+  return invoke<Payment[]>("list_payments", { caseId });
+}
+
+export function deletePayment(id: string): Promise<number> {
+  return invoke<number>("delete_payment", { id });
+}
+
+/** V0.2.2 · 软删一个文档(从材料列表移除,主要给 AI artifact 用)。返回受影响行数。 */
+export function deleteDocument(id: string): Promise<number> {
+  return invoke<number>("delete_document", { id });
+}
+
+/**
+ * V0.3 · 强制重抽单个文档(源文件列表「重新抽取」按钮)。
+ * 后端重置状态为 pending + 清错误 → 后台重新 OCR/抽取(走 extraction_progress 事件)。
+ * ⚠️ PDF 走云端 OCR 会再烧 MinerU 积分。
+ */
+export function reextractDocument(docId: string): Promise<void> {
+  return invoke<void>("reextract_document", { docId });
+}
+
+/* ------------------------------------------------------------------ */
+/* 用户反馈 — MD 文件方案(2026-05-24 e)                              */
+/* ------------------------------------------------------------------ */
+
+export interface ConsoleError {
+  level: string; // "error" | "warn" | "unhandled"
+  message: string;
+  at: string | null;
+}
+
+export interface SettingsSnapshot {
+  setup_completed: boolean;
+  user_display_name_set: boolean;
+  mineru_api_key: string; // "[SET]" | "[EMPTY]"
+  mineru_endpoint: string | null;
+  mineru_verified: boolean;
+  deepseek_api_key: string;
+  deepseek_endpoint: string | null;
+  deepseek_verified: boolean;
+  yuandian_api_key: string;
+  yuandian_verified: boolean;
+  local_model_dir: string | null;
+  local_server_endpoint: string | null;
+  local_server_auto_start: boolean;
+}
+
+export interface SystemInfo {
+  data_dir: string;
+  data_dir_writable: boolean;
+  db_size_mb: number | null;
+  extracts_files: number | null;
+  extracts_size_mb: number | null;
+  reports_size_mb: number | null;
+  disk_free_gb: number | null;
+  pdftotext_available: boolean;
+  pdftoppm_available: boolean;
+}
+
+export interface MetricSample {
+  filename: string;
+  ext: string;
+  file_size_bytes: number;
+  stage: string;
+  backend: string;
+  outcome: string;
+  elapsed_ms: number;
+  text_chars: number | null;
+  error_short: string | null;
+  created_at: string;
+}
+
+export interface BackendStat {
+  backend: string;
+  stage: string;
+  samples: number;
+  ok_samples: number;
+  avg_ms: number;
+  p50_ms: number;
+  avg_chars: number | null;
+}
+
+export interface FeedbackDiagnostic {
+  client_id_short: string;
+  app_version: string;
+  os_version: string;
+  language: string;
+  llm_provider: string;
+  ocr_provider: string;
+  local_server_status: string;
+  deepseek_balance: number | null;
+  stats: {
+    cases_total: number;
+    documents_total: number;
+    documents_done: number;
+    documents_skipped: number;
+    documents_failed: number;
+    documents_pending: number;
+  };
+  recent_failures: {
+    filename: string;
+    category: string | null;
+    created_at: string;
+    last_error: string | null;
+  }[];
+  settings_snapshot: SettingsSnapshot;
+  system_info: SystemInfo;
+  stderr_tail: string[];
+  console_errors: ConsoleError[];
+  /** 2026-05-26 V0.1.12:最近 200 条抽取性能埋点(stage/backend/耗时/字数/成败) */
+  metrics_tail: MetricSample[];
+  /** 2026-05-26 V0.1.12:按 backend 聚合的统计(本地 vs 云端 A/B) */
+  metrics_summary: BackendStat[];
+  /** 2026-05-27 V0.1.13+:chat 用量(按 model + task_type 聚合,**不含 content**) */
+  chat_usage: ChatUsageBucket[];
+  /** 2026-05-27 V0.1.13+:功能模块用量(聚合数字,无业务标识) */
+  feature_usage: FeatureUsage;
+}
+
+export interface ChatUsageBucket {
+  model: string;
+  task_type: string;
+  samples: number;
+  ok_samples: number;
+  avg_prompt: number;
+  avg_completion: number;
+  avg_latency_ms: number;
+  avg_chars: number;
+}
+
+export interface FeatureUsage {
+  chat_messages_total: number;
+  chat_artifacts_total: number;
+  cases_with_analysis_report: number;
+  cases_with_risk_report: number;
+  cases_with_deep_dive_report: number;
+  cases_with_full_report: number;
+  cases_with_user_overrides: number;
+  case_types: { key: string; count: number }[];
+  document_sources: { key: string; count: number }[];
+  yuandian_queried_cases: number;
+}
+
+/** 收集反馈用的诊断信息(给弹窗预填)。
+ * 2026-05-26 V0.1.11:打开反馈弹窗时把前端累积的 console.error/window.onerror 传过来,
+ * Rust 端会跟自家 stderr ring buffer + settings 脱敏快照 + 系统信息一起写进 MD。 */
+export function collectFeedbackDiagnostic(
+  consoleErrors: ConsoleError[] = [],
+): Promise<FeedbackDiagnostic> {
+  return invoke<FeedbackDiagnostic>("collect_feedback_diagnostic", {
+    consoleErrors,
+  });
+}
+
+/**
+ * 2026-05-27 V0.1.13+ · 调用默认邮件客户端发反馈。
+ *
+ * 返回值 `[path, warning]`:
+ *   - path: "applescript" 表示走 Mail.app 自动带附件
+ *   - path: "mailto" 表示 fallback,需要用户手动拖附件
+ *   - warning: 走 mailto 时填提示;applescript 时空串
+ */
+export function sendFeedbackEmail(
+  mdPath: string,
+  to: string,
+  subject: string,
+): Promise<[string, string]> {
+  return invoke<[string, string]>("send_feedback_email", {
+    mdPath,
+    to,
+    subject,
+  });
+}
+
+/** 把诊断 + 用户描述拼成 MD,写到桌面。返回最终绝对路径。 */
+export function saveFeedbackMd(
+  info: FeedbackDiagnostic,
+  description: string,
+): Promise<string> {
+  return invoke<string>("save_feedback_md", { info, description });
+}
+
+/* ------------------------------------------------------------------ */
+/* DeepSeek 余额(给整个界面右上角 chip 用)                            */
+/* ------------------------------------------------------------------ */
+
+/** 对应 Rust `DeepSeekBalance` */
+export interface DeepSeekBalance {
+  total_balance: number;
+  granted_balance: number;
+  topped_up_balance: number;
+  /** 今日消费(元)— 没有昨日快照时为 null */
+  today_consumed: number | null;
+  /** ISO 8601 */
+  fetched_at: string;
+}
+
+/**
+ * 拉 DeepSeek 余额 + 算今日消费。
+ * `refresh=true` → 发请求拉新数据并落 DB(慢,失败抛错)
+ * `refresh=false` → 只读 DB 缓存(瞬时,无数据返 null)
+ */
+export function getDeepSeekBalance(refresh = false): Promise<DeepSeekBalance | null> {
+  return invoke<DeepSeekBalance | null>("get_deepseek_balance", { refresh });
+}
+
+/**
+ * 2026-05-24 e:手工覆盖案件工作流状态(看板卡片右上角的 chip)。
+ *
+ * `status = null` → 清空,前端走自动推断;
+ * 非 null → 用户手工选过(8 档之一,见 modules/litigation/lib/inferStatus.ts)。
+ */
+export function updateWorkflowStatus(
+  caseId: string,
+  status: string | null,
+): Promise<void> {
+  return invoke<void>("update_workflow_status", { caseId, status });
+}
+
+/**
+ * 2026-05-26 V0.1.13 · 写入案件 user_overrides JSON(编辑模式手改 overlay)。
+ *
+ * `overridesJson = null` → 清空所有用户改动,详情页回到纯 LLM 抽取的视图;
+ * 非 null → 整段覆盖(前端 debounce 300ms 后整包提交,见 P3 编辑模式)。
+ *
+ * 结构由前端 `lib/userOverrides.ts` 定义,后端 sqlite 透传不解析。
+ * LLM 全局抽永不写这列,所以这里保存的用户值不会被下次重抽覆盖。
+ */
+export function updateCaseOverrides(
+  caseId: string,
+  overridesJson: string | null,
+): Promise<void> {
+  return invoke<void>("update_case_overrides", { caseId, overridesJson });
+}
+
+/**
+ * 2026-05-26 V0.1.13 · 写入"首页在办案件"用户拖动后的顺序。
+ *
+ * 空数组等同于"清空" — 后端会把 home_case_order 设为 None,首页回到默认排序。
+ * 后端 read-modify-write 只动这一个字段,跟 SettingsModal 同时写不会冲突。
+ */
+export function updateHomeCaseOrder(caseIds: string[]): Promise<void> {
+  return invoke<void>("update_home_case_order", { caseIds });
+}
+
+/**
+ * 重抽该案件的所有 LLM 抽取(**真的会跑 LLM**,慢)。
+ *
+ * 用途:升级 prompt 后,让 LLM 按新 prompt 重新抽存量文档的字段。
+ * 做法:把 `extraction_status='done'` 的文档重置为 `'pending'` + 清抽取产物,
+ *      然后触发后台 pipeline。前端订阅 `extraction_progress` 事件看进度。
+ *
+ * @returns 被重置的文档数(立即返回,不等 LLM 跑完)
+ */
+export function recomputeCaseExtraction(caseId: string): Promise<number> {
+  return invoke<number>("recompute_case_extraction", { caseId });
+}
+
+/**
+ * 刷新案件源文件(增量同步)。
+ *
+ * 用户在案件文件夹里手工加/改/删文件后,点「🔄 刷新源文件」触发。
+ * 后端扫文件夹 → diff documents 表 → 新增/修改的标 pending + 软删消失的 →
+ * 后台 spawn_extraction 跑 pending(并自动重生成画像 + 报告)。
+ *
+ * 立即返回 SyncStats,前端 toast 显示;LLM 抽取进度通过 `extraction_progress`
+ * 事件订阅(跟首次导入复用同一套进度推送)。
+ */
+export interface SyncStats {
+  added: number;
+  updated: number;
+  unchanged: number;
+  deleted: number;
+}
+
+export function refreshCaseFiles(caseId: string): Promise<SyncStats> {
+  return invoke<SyncStats>("refresh_case_files", { caseId });
+}
+
+/* ───────────── 法院短信处理(V0.3 · 一张网 zxfw.court.gov.cn) ───────────── */
+
+/** 一张网送达链接参数(只传这三个,不传时效性的下载地址 wjlj)。 */
+export interface ZxfwLink {
+  sdbh: string;
+  qdbh: string;
+  sdsin: string;
+}
+
+export interface CourtSmsDocBrief {
+  name: string;
+  ext: string;
+}
+
+export interface CourtSmsPreview {
+  court: string | null;
+  case_no: string | null;
+  has_link: boolean;
+  link: ZxfwLink | null;
+  docs: CourtSmsDocBrief[];
+  matched_case_id: string | null;
+  matched_case_name: string | null;
+  note: string | null;
+}
+
+export interface CourtSmsIngestResult {
+  downloaded: string[];
+  skipped: string[];
+  sync: SyncStats;
+}
+
+/** 预览:解析短信 + 拉文书列表 + 匹配在办案件(不下载、无副作用)。 */
+export function previewCourtSms(smsText: string): Promise<CourtSmsPreview> {
+  return invoke<CourtSmsPreview>("preview_court_sms", { smsText });
+}
+
+/** 导入:重新拉新鲜下载地址 → 下载 PDF 进案件源文件夹 → 触发抽取上看板。 */
+export function ingestCourtSms(
+  caseId: string,
+  link: ZxfwLink,
+): Promise<CourtSmsIngestResult> {
+  return invoke<CourtSmsIngestResult>("ingest_court_sms", { caseId, link });
+}
+
+/* ───────────── 快递查询(V0.3 · 快递100 实时查询) ───────────── */
+
+export interface ExpressTrackNode {
+  time: string;
+  context: string;
+}
+
+/** 一条被跟踪的快递记录(落本地 express_tracks.json)。 */
+export interface ExpressTrack {
+  num: string;
+  com: string;
+  com_name: string;
+  /** 收寄件人手机号(顺丰/中通查询必填);旧数据可能无此字段。 */
+  phone?: string;
+  state: string;
+  state_text: string;
+  delivered: boolean;
+  nodes: ExpressTrackNode[];
+  created_at: string;
+  last_polled_at: string;
+}
+
+/** 查询并跟踪一个单号(查 + 落本地 + 返回最新全列表)。需先在设置填快递100 customer+key。
+ *  phone = 收寄件人手机号,顺丰/中通必填(否则快递100 报 408),其它快递可留空。 */
+export function queryExpress(
+  com: string,
+  comName: string,
+  num: string,
+  phone: string,
+): Promise<ExpressTrack[]> {
+  return invoke<ExpressTrack[]>("query_express", { com, comName, num, phone });
+}
+
+/** 列出本地所有跟踪记录(不联网)。 */
+export function listExpressTracks(): Promise<ExpressTrack[]> {
+  return invoke<ExpressTrack[]>("list_express_tracks");
+}
+
+/** 刷新在跟踪的单号(未签收+30天内+距上次≥6小时;40天内重查免费)。 */
+export function refreshExpressTracks(): Promise<ExpressTrack[]> {
+  return invoke<ExpressTrack[]>("refresh_express_tracks");
+}
+
+/** 删除一个跟踪记录。 */
+export function deleteExpressTrack(num: string): Promise<ExpressTrack[]> {
+  return invoke<ExpressTrack[]>("delete_express_track", { num });
+}
+
+/* ------------------------------------------------------------------ */
+/* 健康检查                                                            */
+/* ------------------------------------------------------------------ */
+
+export interface DbHealth {
+  ok: boolean;
+  table_count: number;
+  case_count: number;
+  db_path: string;
+}
+
+export function dbHealth(): Promise<DbHealth> {
+  return invoke<DbHealth>("db_health");
+}
+
+/* ------------------------------------------------------------------ */
+/* 案件 AI 助手 · case-aware chat (V0.1.13+)                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 固定任务的 task_type 枚举。自由问 / 写文书入口传 null。
+ *
+ * V0.3.3:6 个功能单一的生成型任务(案件总览/证据目录/时间线/客户进展/查付款/待补材料)已删 ——
+ * AI 助手已是 agent,用户直接打字提需求,它自己拆解、调工具、产出直答或可编辑文书。现仅剩 4 个
+ * 复杂工具/分析型任务(都走 agent_loop):
+ *  - compile_legal_basis:围绕诉求查法条+案例(没引用文档时)
+ *  - verify_my_draft:核校这份引用的法条/案例是否真实(引用文档时)
+ *  - find_similar_cases:找相似案例对比
+ *  - simulate_opposition:站对方立场推演抗辩/进攻 + 我方应对
+ */
+export type CaseChatTaskType =
+  | "compile_legal_basis"
+  | "verify_my_draft"
+  | "find_similar_cases"
+  | "simulate_opposition";
+
+/** chat_messages 表一行(后端 db::chat::ChatMessage 对应)。 */
+export interface ChatMessage {
+  id: string;
+  case_id: string;
+  /** 'user' | 'assistant' */
+  role: string;
+  content: string;
+  task_type: CaseChatTaskType | null;
+  model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  latency_ms: number | null;
+  /** JSON 数组,引用的 document.id */
+  based_on: string | null;
+  /** 若 assistant 输出落了 artifact,这里是新 documents.id */
+  artifact_doc_id: string | null;
+  /** 出错时填脱敏错误(content 为空串) */
+  error_short: string | null;
+  created_at: string;
+  /**
+   * V0.2 D6.5 · user 消息上的 AttachmentPicker 引用 doc.id 列表(JSON 数组字符串)。
+   * 前端 JSON.parse 后给 AttachmentChips 渲染。assistant 消息通常为 null。
+   */
+  attached_doc_ids: string | null;
+  /**
+   * V0.2 D6.5 · assistant 消息的 `<CITATIONS>` 解析结果(JSON 数组字符串,`Citation[]`)。
+   * 前端 JSON.parse 后给 CitationsCard 渲染。仅 assistant 消息有值。
+   */
+  citations_json: string | null;
+  /**
+   * V0.2 D6.5 · 关联 chat_tasks.id;前端可据此 lazy fetch tool_calls trace(任务 V0.3+)。
+   */
+  task_id: string | null;
+}
+
+/** SSE 流式事件,通过 listen("chat-stream-{messageId}") 接收。 */
+/** V0.3 · ask_user 选项式追问的单个问题(后端 AskQuestion 镜像) */
+export interface AskQuestion {
+  question: string;
+  /** 预设选项;空数组 → 只显自由输入框 */
+  options: string[];
+  /** 是否允许自由输入(无选项时前端也强制可输入) */
+  allow_input: boolean;
+}
+
+export type ChatStreamEvent =
+  | { kind: "delta"; text: string }
+  | {
+      /** V0.2 D6.5 · 单次工具调用完成 — 前端 ToolCallTrace 追加一行 */
+      kind: "tool_call";
+      record: import("./types").ToolCallRecord;
+    }
+  | {
+      /** V0.3 · 模型调 ask_user 发起选项式追问 — 前端渲染选项卡片 */
+      kind: "ask_user";
+      questions: AskQuestion[];
+    }
+  | {
+      kind: "done";
+      prompt_tokens: number | null;
+      completion_tokens: number | null;
+      model: string;
+    }
+  | { kind: "error"; message: string };
+
+/** case_chat 完成后的元数据(promise 返回值)。 */
+export interface CaseChatResult {
+  user_message_id: string;
+  assistant_message_id: string;
+  model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  latency_ms: number;
+  /** 若产出落了 artifact,这里返回 documents.id */
+  artifact_doc_id: string | null;
+  /** "lightweight" | "keyword-hits" | "keyword-fallback-lightweight" */
+  strategy: string;
+  based_on_doc_ids: string[];
+  /** V0.2 D6.5 · `<CITATIONS>` 解析结果,流式结束时直接返回前端,免一次 list 回拉 */
+  citations: import("./types").Citation[];
+  /** V0.2 D6.5 · agent_loop 全程 tool_trace,兜底防漏 emit */
+  tool_calls: import("./types").ToolCallRecord[];
+  /** V0.2 D6.5 · 本会话 chat_tasks.id(若走了 agent_loop) */
+  task_id: string | null;
+  /** V0.3 · 本轮模型调 ask_user 发起的选项式追问;前端据此渲染选项卡片。null = 正常回答 */
+  ask_user: AskQuestion[] | null;
+}
+
+export interface CaseChatInput {
+  case_id: string;
+  user_message: string;
+  task_type: CaseChatTaskType | null;
+  /** 前端事先生成的 uuid,作为流式 channel 名后缀 + assistant_message_id */
+  message_id: string;
+  /**
+   * V0.2 D6-D7 · 本轮引用的文档 id 数组(`AttachmentPicker` 勾选的)。
+   * null/空数组都表示不引用;非空时后端强制走 agent_loop 工具链路。
+   */
+  attached_doc_ids?: string[] | null;
+  /**
+   * V0.3 ADR-0003 Phase 1B · 写作模式下编辑器里正打开的 AI 文书 doc_id。
+   * 非空时后端注入 system prompt,让模型知道「要改的是这份」→ 局部 edit_artifact。
+   */
+  editing_doc_id?: string | null;
+}
+
+/**
+ * 启动一次案件聊天。
+ *
+ * 调用前应:
+ *   1. 用 crypto.randomUUID() 生成 message_id
+ *   2. listen("chat-stream-{message_id}") 拼字 delta
+ *   3. 然后 await caseChat(...)
+ *
+ * Promise resolve 时流式已结束(或被取消 / 出错)。
+ */
+export function caseChat(input: CaseChatInput): Promise<CaseChatResult> {
+  return invoke<CaseChatResult>("case_chat", { input });
+}
+
+/** 取案件聊天历史(升序;不传 limit = 全部)。 */
+export function listChatHistory(
+  caseId: string,
+  limit?: number,
+): Promise<ChatMessage[]> {
+  return invoke<ChatMessage[]>("list_chat_history", {
+    caseId,
+    limit: limit ?? null,
+  });
+}
+
+/**
+ * 取消进行中的 chat。
+ * message_id 必须跟 caseChat 入参的 message_id 相同。
+ * 返回 true 表示成功取消,false 表示已经完成(找不到对应 cancel sender)。
+ */
+export function cancelChat(messageId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_chat", { messageId });
+}
+
+/** 清空某案件下全部聊天记录(用户主动)。返回删除条数。 */
+export function clearChatHistory(caseId: string): Promise<number> {
+  return invoke<number>("clear_chat_history", { caseId });
+}
+
+/* ------------------------------------------------------------------ */
+/* V0.2 D7 · 本地知识库 + 元典积分 Settings 卡片                      */
+/* ------------------------------------------------------------------ */
+
+/** 本地 KB 三态(对应 Rust `local_kb::status::KbStatus`)。 */
+export type KbStatus =
+  | {
+      state: "bound";
+      root: string;
+      cache_dir: string;
+      cache_count: number;
+      /** `{"法规": 156, "案例": 89, "企业": 242, "其他": 0}` */
+      cache_breakdown: Record<string, number>;
+      /** 可检索内容篇数(raw/notes + wiki/sources + wiki/topics + gap-log),跟 cache_count 是两回事 */
+      content_count: number;
+      total_size_bytes: number | null;
+      /** RFC3339 时间戳,null = 还没写过任何缓存 */
+      last_write_at: string | null;
+    }
+  | {
+      state: "unbound";
+      /** 用户配置过但路径不存在,或没配过 */
+      configured_root: string | null;
+    }
+  | {
+      state: "permission_denied";
+      root: string;
+    };
+
+/** 创建空 KB 结果(对应 Rust `local_kb::init::KbInitResult`)。 */
+export interface KbInitResult {
+  /** RFC3339 */
+  created_at: string;
+  path: string;
+  files_created: number;
+  dirs_created: number;
+  /** true = 复用已有 KB(只补缺),false = 全新建 */
+  reused_existing: boolean;
+}
+
+/** 导出结果。 */
+export interface KbExportResult {
+  output_path: string;
+  total_items: number;
+  total_size_bytes: number;
+}
+
+/** 导入冲突策略。 */
+export type KbConflictStrategy = "skip" | "overwrite_older" | "always_overwrite";
+
+/** 单条冲突 / 失败记录。 */
+export interface KbConflictRecord {
+  path: string;
+  /** `"skip"` / `"overwrite"` / `"failed"` */
+  action: string;
+  reason: string;
+}
+
+/** 导入结果。 */
+export interface KbImportResult {
+  total_in_zip: number;
+  added: number;
+  skipped: number;
+  overwritten: number;
+  failed: number;
+  conflicts: KbConflictRecord[];
+}
+
+/** 检测本地 KB 状态;每次打开 Settings 都调一次(状态实时)。 */
+export function detectKbStatus(): Promise<KbStatus> {
+  return invoke<KbStatus>("detect_kb_status");
+}
+
+/** 在指定路径建空 KB(已有则只补缺失子目录),自动写回 settings 启用。 */
+export function createLocalKb(path: string): Promise<KbInitResult> {
+  return invoke<KbInitResult>("create_local_kb", { path });
+}
+
+/** 从 zip 导入资料包合并进当前 KB。 */
+export function importKbFromZip(
+  zipPath: string,
+  onConflict: KbConflictStrategy,
+): Promise<KbImportResult> {
+  return invoke<KbImportResult>("import_kb_from_zip", {
+    zipPath,
+    onConflict,
+  });
+}
+
+/** 把当前 KB 元典缓存打成 zip 导出到指定路径。 */
+export function exportKbToZip(outputPath: string): Promise<KbExportResult> {
+  return invoke<KbExportResult>("export_kb_to_zip", { outputPath });
+}
+
+/** prune_yuandian_cache 回执(对应 Rust `local_kb::cache::PruneStats`)。 */
+export interface KbPruneStats {
+  /** 清掉的 index 条目数 */
+  removed_entries: number;
+  /** 删掉的物理文件数(.md + .raw.json) */
+  removed_files: number;
+}
+
+/**
+ * 清理「搜索/向量类、超 maxAgeDays 天」的元典缓存(检索列表)。
+ * 法规/案例/企业**全文详情**不动(复用资产)。显式触发,需用户确认。
+ */
+export function pruneYuandianCache(maxAgeDays: number): Promise<KbPruneStats> {
+  return invoke<KbPruneStats>("prune_yuandian_cache", { maxAgeDays });
+}
+
+/** 月度元典积分账(对应 Rust `db::credits::MonthlyCredits`)。 */
+export interface YuandianMonthlyStats {
+  year_month: string;
+  credits_used: number;
+  api_calls: number;
+  /** 本地 KB 命中次数(替元典省了 N 次外查) */
+  kb_hits: number;
+  updated_at: string;
+}
+
+/** 取本月元典积分统计。 */
+export function getYuandianMonthlyStats(): Promise<YuandianMonthlyStats> {
+  return invoke<YuandianMonthlyStats>("get_yuandian_monthly_stats");
+}
+
+/** 积分账总览(当月 + 上月 + 累计;对应 Rust `db::credits::CreditsOverview`)。
+ *  当月跨月归 0 时,前端用 prev_month / total 补显示,避免误以为数据丢了。 */
+export interface CreditsOverview {
+  current: YuandianMonthlyStats;
+  prev_month: YuandianMonthlyStats | null;
+  total_credits: number;
+  total_api_calls: number;
+  total_kb_hits: number;
+}
+
+/** 取元典积分账总览(当月 + 上月 + 累计)。 */
+export function getYuandianCreditsOverview(): Promise<CreditsOverview> {
+  return invoke<CreditsOverview>("get_yuandian_credits_overview");
+}
+
+/** 验证 embedding 配置(embed 探针词),成功返回向量维度。给设置页验证按钮。
+ *  endpoint/model 留空则后端用硅基流动 bge-m3 默认。 */
+export function verifyEmbeddingKey(
+  endpoint: string,
+  model: string,
+  apiKey: string,
+): Promise<number> {
+  return invoke<number>("verify_embedding_key", { endpoint, model, apiKey });
+}

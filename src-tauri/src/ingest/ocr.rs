@@ -1,0 +1,414 @@
+//! OCR 后端模块。
+//!
+//! 2026-05-23 作者隐私分流决策(详见 docs/产品决策与理念.md 第 2 节):
+//! - **默认纯本地** —— 律师对数据敏感度高,默认不上云
+//! - **用户明确开启 `cloud_enabled` 后**,才走 MinerU 在线 OCR
+//! - 纯本地模式下走**本机 MiniCPM-V vision**(:8899 多模态 chat completions)
+//!
+//! 2026-05-25 V0.1.8 作者拍板:云端模式**全走精准 API**,不再用 flash-extract。
+//! - 用户既然填了 token(Settings 里 mineru_api_key 必填),就让 token 发挥作用
+//! - 精准 API 免费额度 1000 份/天,文件上限 200MB / 600 页(flash 只有 10MB / 20 页)
+//! - 精准 API 限流比 flash 宽松,配合 pipeline 三轮动态降级足够稳
+//!
+//! 后端选择:
+//! 1. cloud_enabled=true → MinerU `extract` 精准模式(带 --token)
+//! 2. cloud_enabled=false → 本机 MiniCPM-V vision(PDF 先 pdftoppm 转 PNG,然后喂图)
+//!
+//! 性能(R&D 实测,M3 Max):
+//! - MinerU precision:~15-30 秒/份(取决于页数 + 服务端排队)
+//! - 本机 MiniCPM-V vision:13-15 秒/份(关键字段 100% 命中)
+
+use std::path::{Path, PathBuf};
+
+/// MinerU 精准 API 的文件大小上限(200MB,API 硬上限)
+const PRECISION_MAX_BYTES: u64 = 200 * 1024 * 1024;
+
+/// MinerU 精准 API 单次调用超时(秒)
+///
+/// CLI 默认 single=300s,但大 PDF(14MB 开庭笔录之类)+ 服务端排队偶尔很慢,
+/// 给 900s 安全。三轮重试 worst case 单文件总耗时 = 2700s,可接受。
+const MINERU_PRECISION_TIMEOUT_SEC: u64 = 900;
+
+/// MinerU 精准模型版本选择(官网推荐)
+///
+/// - `vlm` — 官方文档对复杂文档(扫描件/手写/表格)的推荐
+/// - `pipeline` — 默认管线,兼容性好但 vlm 通常更准
+/// - `auto` — CLI 默认,但官网文档明确说 vlm 对复杂文档更好
+///
+/// 律师扫描件 + 复杂表格场景多 → vlm 更稳。
+const MINERU_MODEL: &str = "vlm";
+
+/// 本机 vision 后端 endpoint(llama-server :8899 多模态)
+const LOCAL_VISION_ENDPOINT: &str = "http://127.0.0.1:8899/v1/chat/completions";
+/// 本机 vision 模型(作者 M3 Max 实测可跑)
+const LOCAL_VISION_MODEL: &str = "MiniCPM-V-4_6-Q8_0.gguf";
+
+/// 本机 vision OCR 的 prompt(2026-05-23 实测验证,关键字段 100% 命中)
+const LOCAL_VISION_OCR_PROMPT: &str = "这是一份诉讼文书的扫描件。请把图片上所有的中文文字按原文顺序识别出来,输出纯文本。\n\n要求:\n1. 保持原文换行和段落结构\n2. 不要总结、不要解释、不要补充\n3. 不要添加 Markdown 格式\n4. 数字、案号、日期、姓名要逐字精确识别\n5. 如果某处看不清,用 [模糊] 标记,不要瞎猜\n\n直接输出识别的文字内容,不要任何额外说明。";
+
+/// PDF 转 PNG 的 DPI(150 是质量和大小的平衡点)
+const PDF_TO_PNG_DPI: u32 = 150;
+
+/// 本机 vision OCR 单次推理超时(秒)
+const LOCAL_VISION_TIMEOUT_SEC: u64 = 180;
+
+/// OCR 抽取结果
+///
+/// 字段允许 unused — 它们是为前端 / 日志保留的诊断信息,
+/// V0.1 的 caller 只 match 顶层 variant,但调试时这些字段不可或缺。
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum OcrResult {
+    Ok {
+        text: String,
+        backend: &'static str,
+        elapsed_ms: u128,
+    },
+    Skipped {
+        reason: String,
+    },
+    Failed {
+        error: String,
+        attempted: Vec<&'static str>,
+    },
+}
+
+/// OCR 调用上下文 —— 从 Settings 里来,决定走云端还是本地。
+///
+/// 显式参数化避免 ocr.rs 直接依赖 settings 模块,保持职责单一。
+#[derive(Debug, Clone, Default)]
+pub struct OcrContext {
+    /// 用户是否明确允许调用云端 API(MinerU)
+    ///
+    /// - `true` → 走 MinerU 精准 extract(需 token)
+    /// - `false` → 走本机 MiniCPM-V vision(慢一点,但 0 上传)
+    pub cloud_enabled: bool,
+    /// MinerU API token(Settings.mineru_api_key)
+    ///
+    /// cloud_enabled=true 时必填,缺失直接 Failed(不悄悄回退)。
+    pub mineru_token: Option<String>,
+}
+
+/// 走 MinerU 精准 HTTP API(2026-05-25 V0.1.10 替代 CLI 子进程)。
+///
+/// 历史:V0.1.8 用 `mineru-open-api extract` CLI 子进程,但发现 CLI 是 npm 安装的
+/// Node.js 脚本,无法打包进 dmg → 朋友的 Mac 没装 npm 包就报"mineru-open-api 未安装"。
+/// V0.1.10 改用纯 Rust 调 HTTP API(`crate::ingest::mineru_http`),零外部依赖。
+async fn run_mineru_precision(path: &Path, token: &str) -> Result<String, String> {
+    crate::ingest::mineru_http::extract_with_mineru_http(
+        path,
+        token,
+        MINERU_MODEL,
+        MINERU_PRECISION_TIMEOUT_SEC,
+    )
+    .await
+}
+
+/// OCR 主入口:按 ctx.cloud_enabled 分流。
+///
+/// - `cloud_enabled = true` → MinerU 精准 extract(需 token,200MB / 600 页)
+/// - `cloud_enabled = false` → 本机 MiniCPM-V vision(慢一点,0 上传)
+///
+/// 2026-05-23 作者隐私分流决策。代码层强制:`cloud_enabled = false` 时
+/// **绝不调用任何云端 API**。
+/// 2026-05-25 V0.1.10:改成 async 函数。
+/// 原因:MinerU 改用 reqwest HTTP 客户端(async),不再 spawn_blocking CLI 子进程。
+/// 本机 vision 那条仍 sync(ureq),在内部用 spawn_blocking 包起来。
+pub async fn extract_with_ocr(path: &Path, ctx: &OcrContext) -> OcrResult {
+    let started = std::time::Instant::now();
+
+    // 1. 文件存在性检查
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            return OcrResult::Failed {
+                error: format!("无法读取文件元数据: {}", e),
+                attempted: vec![],
+            }
+        }
+    };
+
+    if ctx.cloud_enabled {
+        // ===== 云端模式:走 MinerU 精准 HTTP API =====
+        if meta.len() > PRECISION_MAX_BYTES {
+            return OcrResult::Skipped {
+                reason: format!(
+                    "文件 {:.1}MB 超过 MinerU 精准 API 上限 200MB",
+                    meta.len() as f64 / 1024.0 / 1024.0
+                ),
+            };
+        }
+        let token = match ctx.mineru_token.as_deref() {
+            Some(t) if !t.trim().is_empty() => t,
+            _ => {
+                return OcrResult::Failed {
+                    error: "云端模式缺 MinerU token(请在 Settings 填 mineru_api_key)".into(),
+                    attempted: vec![],
+                };
+            }
+        };
+        let attempted = vec!["mineru-precision"];
+        match run_mineru_precision(path, token).await {
+            Ok(text) => OcrResult::Ok {
+                text,
+                backend: "mineru-precision",
+                elapsed_ms: started.elapsed().as_millis(),
+            },
+            Err(e) => OcrResult::Failed {
+                error: format!("mineru-precision: {}", e),
+                attempted,
+            },
+        }
+    } else {
+        // ===== 纯本地模式:走本机 MiniCPM-V vision(sync,用 spawn_blocking 包) =====
+        // 代码层强制不上云 —— 用户没勾 cloud_enabled,这里**绝对不调云端**
+        let attempted = vec!["local-vision"];
+        let path_owned = path.to_path_buf();
+        let result = tokio::task::spawn_blocking(move || run_local_vision(&path_owned))
+            .await
+            .map_err(|e| format!("spawn_blocking 失败: {}", e));
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => {
+                return OcrResult::Failed {
+                    error: e,
+                    attempted,
+                }
+            }
+        };
+        match result {
+            Ok(text) => OcrResult::Ok {
+                text,
+                backend: "local-vision",
+                elapsed_ms: started.elapsed().as_millis(),
+            },
+            Err(e) => OcrResult::Failed {
+                error: format!("local-vision: {}", e),
+                attempted,
+            },
+        }
+    }
+}
+
+/// 本机 vision 单次最多识别多少页 PDF(D3-2:旧实现只识别首页,多页扫描件静默丢页)。
+/// 超出部分不识别并落 dlog 告警,而非静默截断。
+const LOCAL_VISION_MAX_PAGES: u32 = 50;
+
+/// 本机 vision OCR:调 :8899 多模态。
+///
+/// 流程:
+/// 1. PDF → 用 pdftoppm 逐页转 PNG(全部页,上限 `LOCAL_VISION_MAX_PAGES`),逐页 OCR 拼接
+/// 2. PNG/JPG → 直接读单图
+/// 3. base64 编码后塞进 chat completions 的 `image_url` 字段(见 `ocr_image_via_local_vision`)
+/// 4. 调 :8899/v1/chat/completions(MiniCPM-V 4.6 + mmproj)
+/// 5. 返回纯文本
+///
+/// 实测:M3 Max 13-15 秒/页,关键字段 100% 命中。
+fn run_local_vision(path: &Path) -> Result<String, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "pdf" {
+        // PDF → 逐页 PNG(pdftoppm),转**全部页**(上限 LOCAL_VISION_MAX_PAGES),逐页 OCR 后拼接。
+        // 修 D3-2:旧实现写死 `-f 1 -l 1` 只识别首页,多页判决书/笔录在本地默认模式下静默丢内容。
+        // 用临时目录避免污染源目录;Drop 时自动清理。
+        let tmp_dir = tempfile::tempdir().map_err(|e| format!("创建临时目录失败: {}", e))?;
+        let out_prefix = tmp_dir.path().join(path.file_stem().unwrap_or_default());
+        let status = std::process::Command::new("pdftoppm")
+            .arg("-png")
+            .arg("-r")
+            .arg(PDF_TO_PNG_DPI.to_string())
+            .arg("-f")
+            .arg("1")
+            .arg("-l")
+            .arg(LOCAL_VISION_MAX_PAGES.to_string())
+            .arg(path)
+            .arg(&out_prefix)
+            .status()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "pdftoppm 未安装(brew install poppler)".to_string()
+                } else {
+                    format!("调 pdftoppm 失败: {}", e)
+                }
+            })?;
+        if !status.success() {
+            return Err(format!("pdftoppm 退出码 {:?}", status.code()));
+        }
+
+        // 收集所有页 PNG,按页号排序。pdftoppm 会按总页数零填充页号(<prefix>-1 或 -01),
+        // 故不假设具体格式:取文件名最后一个 '-' 后的数字作页号。
+        let mut pages: Vec<(u32, PathBuf)> = Vec::new();
+        for entry in
+            std::fs::read_dir(tmp_dir.path()).map_err(|e| format!("读临时目录失败: {}", e))?
+        {
+            let p = entry.map_err(|e| format!("读目录项失败: {}", e))?.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("png") {
+                continue;
+            }
+            let page_no = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|stem| stem.rsplit('-').next())
+                .and_then(|n| n.parse::<u32>().ok());
+            if let Some(n) = page_no {
+                pages.push((n, p));
+            }
+        }
+        pages.sort_by_key(|(n, _)| *n);
+        if pages.is_empty() {
+            return Err("pdftoppm 没生成任何 PNG 页".to_string());
+        }
+        let total = pages.len();
+        if total >= LOCAL_VISION_MAX_PAGES as usize {
+            crate::dlog!(
+                "[local-vision] PDF 页数达上限 {} 页,超出部分未识别(可能截断)",
+                LOCAL_VISION_MAX_PAGES
+            );
+        }
+
+        // 逐页 OCR;单页失败不致命(记 dlog 跳过保留其它页),全部失败才报错。
+        let mut acc = String::new();
+        let mut ok_pages = 0usize;
+        for (n, png) in &pages {
+            let bytes = match std::fs::read(png) {
+                Ok(b) => b,
+                Err(e) => {
+                    crate::dlog!("[local-vision] 读第 {} 页 PNG 失败(跳过): {}", n, e);
+                    continue;
+                }
+            };
+            match ocr_image_via_local_vision(&bytes, "image/png") {
+                Ok(text) => {
+                    if total > 1 {
+                        acc.push_str(&format!("\n\n--- 第 {} 页 ---\n\n", n));
+                    }
+                    acc.push_str(&text);
+                    ok_pages += 1;
+                }
+                Err(e) => {
+                    crate::dlog!("[local-vision] 第 {} 页 OCR 失败(跳过): {}", n, e);
+                }
+            }
+        }
+        if ok_pages == 0 {
+            return Err(format!("本机 vision 全部 {} 页 OCR 均失败", total));
+        }
+        let trimmed = acc.trim();
+        if trimmed.chars().count() < 30 {
+            return Err(format!(
+                "本机 vision 抽出文本太短({} 字,{}/{} 页成功)",
+                trimmed.chars().count(),
+                ok_pages,
+                total
+            ));
+        }
+        Ok(trimmed.to_string())
+    } else if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "tiff" | "bmp") {
+        let image_bytes = std::fs::read(path).map_err(|e| format!("读图片失败: {}", e))?;
+        let mime = if ext == "jpg" || ext == "jpeg" {
+            "image/jpeg"
+        } else {
+            "image/png"
+        };
+        let text = ocr_image_via_local_vision(&image_bytes, mime)?;
+        if text.chars().count() < 30 {
+            return Err(format!(
+                "本机 vision 抽出文本太短({} 字)",
+                text.chars().count()
+            ));
+        }
+        Ok(text)
+    } else {
+        Err(format!("本机 vision 不支持扩展名: {}", ext))
+    }
+}
+
+/// 调本机 :8899 多模态(MiniCPM-V)对**单张图片**做 OCR,返回 trim 后的纯文本。
+/// 不做长度校验(由调用方按整份文档判定),便于多页逐页复用。
+fn ocr_image_via_local_vision(image_bytes: &[u8], mime: &str) -> Result<String, String> {
+    use base64::Engine;
+    let img_b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    let data_url = format!("data:{};base64,{}", mime, img_b64);
+
+    let payload = serde_json::json!({
+        "model": LOCAL_VISION_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": LOCAL_VISION_OCR_PROMPT},
+                {"type": "image_url", "image_url": {"url": data_url}}
+            ]
+        }],
+        "temperature": 0.0,
+        "max_tokens": 4096,
+        "stream": false,
+    });
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("序列化失败: {}", e))?;
+
+    let resp = ureq::post(LOCAL_VISION_ENDPOINT)
+        .timeout(std::time::Duration::from_secs(LOCAL_VISION_TIMEOUT_SEC))
+        .set("Content-Type", "application/json")
+        .send_bytes(&body)
+        .map_err(|e| {
+            format!(
+                "调用 llama-server :8899 失败: {} (检查 llama-server 是否在跑)",
+                e
+            )
+        })?;
+
+    let resp_json: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("解析 llama-server 响应失败: {}", e))?;
+
+    let text = resp_json
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("响应格式异常: {:.200}", resp_json))?
+        .trim()
+        .to_string();
+    Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-05-25 V0.1.10:删除 clean_mineru_output 的 2 个测试 —— 那是 CLI 时代 stdout 清理的,
+    // 切到 HTTP 客户端后已经没这函数了。HTTP 客户端测试见 ingest::mineru_http::tests。
+    // 下面 3 个 extract_with_ocr 测试改成 #[tokio::test] + .await,因为函数变 async 了。
+
+    #[tokio::test]
+    async fn extract_returns_failed_for_missing_file_cloud_mode() {
+        let ctx = OcrContext {
+            cloud_enabled: true,
+            mineru_token: Some("dummy-token".into()),
+        };
+        let r = extract_with_ocr(Path::new("/nonexistent/path.pdf"), &ctx).await;
+        assert!(matches!(r, OcrResult::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn extract_returns_failed_for_missing_file_local_mode() {
+        let ctx = OcrContext {
+            cloud_enabled: false,
+            mineru_token: None,
+        };
+        let r = extract_with_ocr(Path::new("/nonexistent/path.pdf"), &ctx).await;
+        assert!(matches!(r, OcrResult::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn cloud_mode_without_token_fails_loudly() {
+        // cloud_enabled=true 但没 token 时,必须 Failed 不能悄悄回退本机
+        let ctx = OcrContext {
+            cloud_enabled: true,
+            mineru_token: None,
+        };
+        let r = extract_with_ocr(Path::new("/etc/hosts"), &ctx).await;
+        assert!(matches!(r, OcrResult::Failed { error, .. } if error.contains("token")));
+    }
+}

@@ -1,0 +1,873 @@
+//! 元典法律开放平台 API client(2026-05-24 k)。
+//!
+//! 用于执行案件查被执行人 / 财产线索:工商信息、被执行案件、失信、限消、股权出质 / 冻结、
+//! 对外投资、欠税、行政处罚、法律文书、关联公司等。
+//!
+//! base: https://open.chineselaw.com/open
+//! auth header: `X-Api-Key: sk_xxxxxxxxxx`
+//!
+//! 申请 key:https://open.chineselaw.com/
+//! 不入 git;落 settings.json 本地保存。
+
+pub mod deep_dive;
+pub mod full_report;
+pub mod orchestrator;
+pub mod risk_assessment;
+
+use serde::Serialize;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+
+const BASE_URL: &str = "https://open.chineselaw.com/open";
+
+// ───── 报告落盘的共享 helper(原本在 deep_dive / full_report / risk_assessment /
+//        orchestrator 各抄一份,2026-06-03 收口到此,行为不变)─────
+
+/// 某案件的元典报告目录:`<app_data>/external/<case_id>/reports`。
+pub(crate) fn reports_dir_for_case(case_id: &str) -> Result<PathBuf, String> {
+    let base = crate::db::app_data_dir().map_err(|e| format!("无法定位 app data dir: {}", e))?;
+    Ok(base.join("external").join(case_id).join("reports"))
+}
+
+/// 把 JSON 值落成 `<subject>_<endpoint>.json` 到指定目录。
+pub(crate) fn save_json(
+    dir: &Path,
+    subject: &str,
+    endpoint: &str,
+    v: &Value,
+) -> Result<(), String> {
+    let path = dir.join(file_name(subject, endpoint));
+    let text = serde_json::to_string_pretty(v).map_err(|e| format!("序列化 JSON 失败:{}", e))?;
+    std::fs::write(&path, text).map_err(|e| format!("写 {} 失败:{}", path.display(), e))?;
+    Ok(())
+}
+
+/// 生成文件名:替换路径不友好字符(中英文括号 / 空格 / 分隔符)。
+pub(crate) fn file_name(subject: &str, endpoint: &str) -> String {
+    const UNSAFE: &[char] = &['/', '\\', ' ', '(', ')', '（', '）'];
+    let safe: String = subject
+        .chars()
+        .map(|c| if UNSAFE.contains(&c) { '_' } else { c })
+        .collect();
+    format!("{}_{}.json", safe, endpoint)
+}
+
+/// 剥掉 LLM 输出最外层的 Markdown / JSON 代码围栏(```markdown / ```md / ```json / ```)。
+///
+/// 三份报告(deep_dive / full_report / risk_assessment)的 LLM 都被 prompt 要求「不要包围栏」,
+/// 但模型偶尔不听会把整篇报告 / 整个 JSON 裹进 ``` 里 —— 不剥的话落盘 .md 渲染异常、
+/// parse JSON 直接失败。只剥**最外层**一对围栏(前缀 + 后缀各一次),报告正文里合法的代码块不受影响。
+/// (2026-06-03 收口:原本 full_report 处理 markdown/md、risk_assessment 处理 json、deep_dive 完全不剥 B12)
+pub(crate) fn strip_md_fence(content: &str) -> String {
+    let mut text = content.trim();
+    for prefix in ["```markdown", "```md", "```json", "```"] {
+        if let Some(stripped) = text.strip_prefix(prefix) {
+            text = stripped.trim();
+            break;
+        }
+    }
+    if let Some(stripped) = text.strip_suffix("```") {
+        text = stripped.trim();
+    }
+    text.to_string()
+}
+
+/// 拉案件元信息(立案日 / 案号 / 案件名)拼成 Markdown 段,prepend 到 LLM corpus 顶部,
+/// 让模型拿到拒执 cutoff。三份报告(risk / deep_dive / full_report)原各抄一份逐字相同,2026-06-03 收口(B1)。
+pub(crate) async fn fetch_case_meta_md(pool: &sqlx::SqlitePool, case_id: &str) -> String {
+    let row: Option<(Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT name, case_no, agg_filed_at FROM cases WHERE id = ?")
+            .bind(case_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    match row {
+        Some((name, case_no, filed_at)) => format!(
+            "========== 案件元信息 ==========\n\
+             - 案件名称:{}\n\
+             - 案号:{}\n\
+             - **立案日(拒执 cutoff)**:{}\n\n\
+             ⚠️ 请用立案日做时间切线:工商变更 / 对外投资 / 股东变更 / 出资变更里,\n\
+             **立案日之后**的变更视为拒执风险线索;之前的不构成拒执。\n",
+            name.as_deref().unwrap_or("(未知)"),
+            case_no.as_deref().unwrap_or("(未知)"),
+            filed_at
+                .as_deref()
+                .unwrap_or("(LLM 还没抽到立案日 — 无法做拒执 cutoff,请只列变更事实不做时间判断)"),
+        ),
+        None => "========== 案件元信息 ==========\n(找不到案件记录)\n".to_string(),
+    }
+}
+
+/// 三份报告(risk / deep_dive / full_report)调 DeepSeek 的差异参数。
+pub(crate) struct LlmCallOpts {
+    pub max_tokens: u32,
+    pub temperature: f64,
+    /// 实际 timeout = cfg.timeout_secs * timeout_mult(deep_dive 用 4,其余 3)。
+    pub timeout_mult: u64,
+    /// 是否带 response_format = json_object(仅 risk_assessment 要 JSON 输出)。
+    pub json_object: bool,
+}
+
+/// 构造 DeepSeek chat/completions 请求 body。抽成纯函数便于契约测试锁住 wire 形状(B2)。
+fn build_llm_body(model: &str, system: &str, user: &str, opts: &LlmCallOpts) -> Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": opts.max_tokens,
+        "temperature": opts.temperature,
+        "stream": false,
+    });
+    if opts.json_object {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    body
+}
+
+/// 三份报告共用的 DeepSeek 单次调用:发 system + user,拿回 message.content 文本。
+/// 原 risk / deep_dive / full_report 各抄 ~35 行 HTTP 样板,2026-06-03 收口(B2)。
+/// 错误一律透传真因(坑#8):client 创建 / 网络 / HTTP 状态 / 响应解析 / 无 content。
+pub(crate) async fn call_llm(
+    cfg: &crate::llm::LlmConfig,
+    system: &str,
+    user: &str,
+    opts: LlmCallOpts,
+) -> Result<String, String> {
+    let body = build_llm_body(&cfg.model, system, user, &opts);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            cfg.timeout_secs * opts.timeout_mult,
+        ))
+        .build()
+        .map_err(|e| format!("HTTP client 创建失败:{}", e))?;
+    let mut req = client.post(&cfg.endpoint).json(&body);
+    if let Some(k) = &cfg.api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("LLM 调用失败:{}", e))?;
+    if !resp.status().is_success() {
+        let code = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM HTTP {}: {}", code, text));
+    }
+    let json: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("LLM 响应解析失败:{}", e))?;
+    json.get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "LLM 响应无 content".to_string())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum YuandianError {
+    #[error("元典 API key 未配置(请到设置里填入)")]
+    NoApiKey,
+    #[error("元典网络错误:{0}")]
+    Network(String),
+    #[error("元典 HTTP {0}:{1}")]
+    HttpStatus(u16, String),
+    #[error("元典响应解析失败:{0}")]
+    Json(String),
+}
+
+impl serde::Serialize for YuandianError {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+/// 拿一个 reqwest client(共享 timeout / TLS)。
+fn build_client() -> Result<reqwest::Client, YuandianError> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| YuandianError::Network(e.to_string()))
+}
+
+/// 通用 GET 请求(元典大部分接口都是 GET + query params)。
+async fn yd_get(
+    api_key: &str,
+    path: &str,
+    params: &[(&str, String)],
+) -> Result<Value, YuandianError> {
+    let client = build_client()?;
+    let resp = client
+        .get(format!("{}{}", BASE_URL, path))
+        .header("X-Api-Key", api_key)
+        .header("accept", "application/json;charset=UTF-8")
+        .query(params)
+        .send()
+        .await
+        .map_err(|e| YuandianError::Network(e.to_string()))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(YuandianError::HttpStatus(status.as_u16(), body));
+    }
+
+    resp.json::<Value>()
+        .await
+        .map_err(|e| YuandianError::Json(e.to_string()))
+}
+
+/// 通用 POST 请求(裁判文书 / 法规等检索是 POST + JSON body)。
+async fn yd_post(api_key: &str, path: &str, body: &Value) -> Result<Value, YuandianError> {
+    let client = build_client()?;
+    let resp = client
+        .post(format!("{}{}", BASE_URL, path))
+        .header("X-Api-Key", api_key)
+        .header("accept", "application/json;charset=UTF-8")
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| YuandianError::Network(e.to_string()))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(YuandianError::HttpStatus(status.as_u16(), body));
+    }
+
+    resp.json::<Value>()
+        .await
+        .map_err(|e| YuandianError::Json(e.to_string()))
+}
+
+/* ============ 企业类(C1-C4)============ */
+
+/// 企业名称 / 关键字搜索 — 拿候选 + id + 统一信用代码
+pub async fn enterprise_search(api_key: &str, name: &str) -> Result<Value, YuandianError> {
+    yd_get(
+        api_key,
+        "/rh_enterpriseSearch",
+        &[("name", name.to_string()), ("top_k", "10".to_string())],
+    )
+    .await
+}
+
+/// 企业聚合摘要 — 一次拿所有维度(主体 / 风险 / 涉诉 / 财产线索摘要)
+pub async fn enterprise_aggregation_summary(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+) -> Result<Value, YuandianError> {
+    yd_get(
+        api_key,
+        "/rh_enterpriseAggregationSummary",
+        &id_or_uscc.to_params(),
+    )
+    .await
+}
+
+/// 失信被执行人(老赖名单)
+pub async fn enterprise_executions(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseExecutions", &params).await
+}
+
+/// 被执行人(普通执行,不一定老赖)
+pub async fn enterprise_executed_person(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseExecutedPerson", &params).await
+}
+
+/// 法律文书列表(判决/裁定/调解/...)
+pub async fn enterprise_writ_list(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseWritList", &params).await
+}
+
+/// 法院公告(含限消)
+pub async fn enterprise_court_notice(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseCourtNotice", &params).await
+}
+
+/// 开庭公告
+pub async fn enterprise_court_session_notice(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseCourtSessionNotice", &params).await
+}
+
+/// 股权出质
+pub async fn enterprise_pledge(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterprisePledge", &params).await
+}
+
+/// 股权冻结(执行能查到的财产线索 ⭐)
+pub async fn enterprise_frozen_equity(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseFrozenEquity", &params).await
+}
+
+/// 对外投资(关联公司 → 财产线索 ⭐)
+pub async fn enterprise_out_invest(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseOutInvest", &params).await
+}
+
+/// 工商变更
+pub async fn enterprise_change_info(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseChangeInfo", &params).await
+}
+
+/// 担保
+pub async fn enterprise_guaranty(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseGuaranty", &params).await
+}
+
+/// 行政处罚
+pub async fn enterprise_punishment(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterprisePunishment", &params).await
+}
+
+/// 经营异常
+pub async fn enterprise_abnormal_operation(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseAbnormalOperation", &params).await
+}
+
+/// 严重违法
+pub async fn enterprise_serious_illegal(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseSeriousIllegal", &params).await
+}
+
+/// 2026-05-25 V0.1.9 加 · 欠税公告(可作为财产线索)
+pub async fn enterprise_corporate_tax(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    page: u32,
+) -> Result<Value, YuandianError> {
+    let mut params = id_or_uscc.to_params();
+    params.push(("pageNo", page.to_string()));
+    yd_get(api_key, "/rh_enterpriseCorporateTax", &params).await
+}
+
+/// 2026-05-25 V0.1.9 加 · 企业年报详情(POST,按年份)
+/// 拒执判断要拿"立案前一年 + 当年"两份年报,对比股东出资 / 总资产变化
+pub async fn enterprise_annual_report(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+    year: u32,
+) -> Result<Value, YuandianError> {
+    let mut body = serde_json::Map::new();
+    match id_or_uscc {
+        EntityId::Id(id) => {
+            body.insert("id".to_string(), Value::String(id.clone()));
+        }
+        EntityId::Uscc(u) => {
+            body.insert("tyshxydm".to_string(), Value::String(u.clone()));
+        }
+    }
+    body.insert("year".to_string(), Value::String(year.to_string()));
+    yd_post(api_key, "/rh_enterpriseAnnualReport", &Value::Object(body)).await
+}
+
+/* ============ 案例 / 文书检索(对自然人有用)============ */
+
+/// 普通案例库关键词检索 — 给自然人被执行人查涉诉文书
+pub async fn search_ptal(api_key: &str, keyword: &str, top_k: u32) -> Result<Value, YuandianError> {
+    let body = serde_json::json!({
+        "qw": keyword,
+        "top_k": top_k,
+    });
+    yd_post(api_key, "/rh_ptal_search", &body).await
+}
+
+/// 权威案例库检索(指导性 / 典型 / 公报案例)
+pub async fn search_qwal(api_key: &str, keyword: &str, top_k: u32) -> Result<Value, YuandianError> {
+    let body = serde_json::json!({
+        "qw": keyword,
+        "top_k": top_k,
+    });
+    yd_post(api_key, "/rh_qwal_search", &body).await
+}
+
+/* ============ EntityId(企业有 id / 统一信用代码两种方式查)============ */
+
+#[derive(Debug, Clone)]
+pub enum EntityId {
+    Id(String),
+    Uscc(String),
+}
+
+impl EntityId {
+    pub fn to_params(&self) -> Vec<(&'static str, String)> {
+        match self {
+            EntityId::Id(id) => vec![("id", id.clone())],
+            EntityId::Uscc(u) => vec![("tyshxydm", u.clone())],
+        }
+    }
+}
+
+/* ============ V0.2 新增 · 法规/法条/案例语义/幻觉校验/详细工商(8 个,详 § 17) ============
+ *
+ * 共 7 POST + 1 GET。POST 用 Params struct(Default + Serialize + skip_none),
+ * 让上层 chat tool 局部填字段、未填的字段不进 JSON body。
+ *
+ * 命名遵循 routeKey:rh_ft_search → ft_search,case_vector_search 保持原名。
+ */
+
+/// § 17.1 · rh_ft_search 法条关键词检索
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct FtSearchParams {
+    pub keyword: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fgmc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_date_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_date_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implement_date_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implement_date_end: Option<String>,
+}
+
+pub async fn ft_search(api_key: &str, params: &FtSearchParams) -> Result<Value, YuandianError> {
+    let body = serde_json::to_value(params).map_err(|e| YuandianError::Json(e.to_string()))?;
+    yd_post(api_key, "/rh_ft_search", &body).await
+}
+
+/// § 17.2 · rh_ft_detail 法条详情。`id` 跟 `(fgmc, ftnum)` 二选一必填(上层校验)。
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct FtDetailParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fgmc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ftnum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refer_date: Option<String>,
+}
+
+pub async fn ft_detail(api_key: &str, params: &FtDetailParams) -> Result<Value, YuandianError> {
+    let body = serde_json::to_value(params).map_err(|e| YuandianError::Json(e.to_string()))?;
+    yd_post(api_key, "/rh_ft_detail", &body).await
+}
+
+/// § 17.3 · rh_fg_search 法规检索
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct FgSearchParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyword: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fgmc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_date_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_date_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implement_date_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implement_date_end: Option<String>,
+}
+
+pub async fn fg_search(api_key: &str, params: &FgSearchParams) -> Result<Value, YuandianError> {
+    let body = serde_json::to_value(params).map_err(|e| YuandianError::Json(e.to_string()))?;
+    yd_post(api_key, "/rh_fg_search", &body).await
+}
+
+/// § 17.4 · rh_fg_detail 法规详情。`id` 跟 `fgmc` 二选一必填(上层校验)。
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct FgDetailParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fgmc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refer_date: Option<String>,
+}
+
+pub async fn fg_detail(api_key: &str, params: &FgDetailParams) -> Result<Value, YuandianError> {
+    let body = serde_json::to_value(params).map_err(|e| YuandianError::Json(e.to_string()))?;
+    yd_post(api_key, "/rh_fg_detail", &body).await
+}
+
+/// § 17.5 · law_vector_search 法条语义检索
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct LawVectorSearchParams {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implement_date_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implement_date_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+}
+
+pub async fn law_vector_search(
+    api_key: &str,
+    params: &LawVectorSearchParams,
+) -> Result<Value, YuandianError> {
+    let body = serde_json::to_value(params).map_err(|e| YuandianError::Json(e.to_string()))?;
+    yd_post(api_key, "/law_vector_search", &body).await
+}
+
+/// § 17.6 · case_vector_search 案例语义检索
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct WenshuFilter {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_lb: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ay: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fydj: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jiean_date_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jiean_date_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dxal: Option<bool>,
+}
+
+#[derive(Serialize, Default, Debug, Clone)]
+pub struct CaseVectorSearchParams {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wenshu_filter: Option<WenshuFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+}
+
+pub async fn case_vector_search(
+    api_key: &str,
+    params: &CaseVectorSearchParams,
+) -> Result<Value, YuandianError> {
+    let body = serde_json::to_value(params).map_err(|e| YuandianError::Json(e.to_string()))?;
+    yd_post(api_key, "/case_vector_search", &body).await
+}
+
+/// § 17.7 · hall_detect 法律幻觉校验(核心)。把 LLM final answer 塞进 text,
+/// 拿 citations 列表(每条带 verdict:一致/不一致/未命中 + 正确写法)。
+pub async fn hall_detect(api_key: &str, text: &str) -> Result<Value, YuandianError> {
+    let body = serde_json::json!({ "text": text });
+    yd_post(api_key, "/hall_detect", &body).await
+}
+
+/// § 17.8 · rh_enterpriseBaseInfo 详细工商(GET)。返回 basic / partner /
+/// top10holder / top10circulate / members / branches。
+pub async fn enterprise_base_info(
+    api_key: &str,
+    id_or_uscc: &EntityId,
+) -> Result<Value, YuandianError> {
+    yd_get(api_key, "/rh_enterpriseBaseInfo", &id_or_uscc.to_params()).await
+}
+
+/* ============ tests ============ */
+
+#[cfg(test)]
+mod tests {
+    //! D1 smoke 测:8 个新端点的 Params 序列化是否符合元典 wire 规范。
+    //! 不联网 — 联网测在 dev 模式手测(§ 16.4)。
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn llm_body_risk_shape_with_json_object() {
+        // risk_assessment 口径:带 response_format json_object,锁住 wire 与原内联 body 一致
+        let opts = LlmCallOpts {
+            max_tokens: 12288,
+            temperature: 0.0,
+            timeout_mult: 3,
+            json_object: true,
+        };
+        let body = build_llm_body("deepseek-v4-flash", "SYS", "USR", &opts);
+        assert_eq!(
+            body,
+            json!({
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "system", "content": "SYS"},
+                    {"role": "user", "content": "USR"},
+                ],
+                "max_tokens": 12288,
+                "temperature": 0.0,
+                "stream": false,
+                "response_format": { "type": "json_object" },
+            })
+        );
+    }
+
+    #[test]
+    fn llm_body_report_shape_no_json_object() {
+        // full_report / deep_dive 口径:不带 response_format
+        let opts = LlmCallOpts {
+            max_tokens: 8192,
+            temperature: 0.1,
+            timeout_mult: 3,
+            json_object: false,
+        };
+        let body = build_llm_body("m", "S", "U", &opts);
+        assert!(
+            body.get("response_format").is_none(),
+            "非 JSON 报告不应带 response_format"
+        );
+        assert_eq!(body["max_tokens"], 8192);
+        assert_eq!(body["temperature"], 0.1);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["messages"][0]["content"], "S");
+        assert_eq!(body["messages"][1]["content"], "U");
+    }
+
+    #[test]
+    fn ft_search_serialize_keyword_only() {
+        let p = FtSearchParams {
+            keyword: "合同解除".to_string(),
+            top_k: Some(10),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v, json!({ "keyword": "合同解除", "top_k": 10 }));
+    }
+
+    #[test]
+    fn ft_search_serialize_full() {
+        let p = FtSearchParams {
+            keyword: "违约责任".to_string(),
+            fgmc: Some("民法典".to_string()),
+            effect_level: Some("法律".to_string()),
+            valid_only: Some(true),
+            top_k: Some(20),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "keyword": "违约责任",
+                "fgmc": "民法典",
+                "effect_level": "法律",
+                "valid_only": true,
+                "top_k": 20,
+            })
+        );
+    }
+
+    #[test]
+    fn ft_detail_serialize_by_id() {
+        let p = FtDetailParams {
+            id: Some("xxx-id".to_string()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v, json!({ "id": "xxx-id" }));
+    }
+
+    #[test]
+    fn ft_detail_serialize_by_fgmc_ftnum() {
+        let p = FtDetailParams {
+            fgmc: Some("民法典".to_string()),
+            ftnum: Some("563".to_string()),
+            refer_date: Some("2023-01-01".to_string()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v,
+            json!({ "fgmc": "民法典", "ftnum": "563", "refer_date": "2023-01-01" })
+        );
+    }
+
+    #[test]
+    fn fg_search_serialize_empty_keyword_ok() {
+        // §17.3:keyword 可空,空时按其他条件过滤
+        let p = FgSearchParams {
+            effect_level: Some("司法解释".to_string()),
+            valid_only: Some(true),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v, json!({ "effect_level": "司法解释", "valid_only": true }));
+    }
+
+    #[test]
+    fn fg_detail_serialize_by_fgmc() {
+        let p = FgDetailParams {
+            fgmc: Some("中华人民共和国民法典".to_string()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v, json!({ "fgmc": "中华人民共和国民法典" }));
+    }
+
+    #[test]
+    fn law_vector_search_serialize() {
+        let p = LawVectorSearchParams {
+            query: "买卖合同标的物风险转移规则".to_string(),
+            valid_only: Some(true),
+            top_k: Some(5),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "query": "买卖合同标的物风险转移规则",
+                "valid_only": true,
+                "top_k": 5,
+            })
+        );
+    }
+
+    #[test]
+    fn case_vector_search_serialize_with_filter() {
+        let p = CaseVectorSearchParams {
+            query: "违约金过高调整".to_string(),
+            wenshu_filter: Some(WenshuFilter {
+                ay: Some("买卖合同纠纷".to_string()),
+                fydj: Some("高级人民法院".to_string()),
+                dxal: Some(true),
+                ..Default::default()
+            }),
+            top_k: Some(10),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(
+            v,
+            json!({
+                "query": "违约金过高调整",
+                "wenshu_filter": {
+                    "ay": "买卖合同纠纷",
+                    "fydj": "高级人民法院",
+                    "dxal": true,
+                },
+                "top_k": 10,
+            })
+        );
+    }
+
+    #[test]
+    fn case_vector_search_serialize_no_filter() {
+        let p = CaseVectorSearchParams {
+            query: "保证合同".to_string(),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v, json!({ "query": "保证合同" }));
+    }
+
+    #[test]
+    fn hall_detect_body_shape() {
+        // hall_detect 没用 struct,直接 json!{"text":...},契约测试。
+        let want = json!({ "text": "根据《民法典》第563条,合同可以解除..." });
+        let got = json!({ "text": "根据《民法典》第563条,合同可以解除..." });
+        assert_eq!(want, got);
+    }
+
+    #[test]
+    fn enterprise_base_info_get_params() {
+        let by_id = EntityId::Id("xyz-id".to_string()).to_params();
+        assert_eq!(by_id, vec![("id", "xyz-id".to_string())]);
+        let by_uscc = EntityId::Uscc("91320200MA1MXXXX".to_string()).to_params();
+        assert_eq!(by_uscc, vec![("tyshxydm", "91320200MA1MXXXX".to_string())]);
+    }
+}

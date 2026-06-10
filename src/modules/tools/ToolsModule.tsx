@@ -1,0 +1,290 @@
+/**
+ * 工具模块入口(2026-05-24 e · 5 工具 React 重写)。
+ *
+ * 三态:
+ *   - `activeTool === null`:工具列表态
+ *   - `activeTool === <id>` 且对应工具有 React 组件:React 原生视图
+ *   - `activeTool === "interest"`:iframe 兜底(利息计算器复杂逻辑还在重写中)
+ *
+ * 已完成 React 重写(项目原生 UI 风,跟 App 整体一致):
+ *   - 数字大写转换器(NumberConverter)
+ *   - 天数计算器(DateCalculator)
+ *   - 律师费计算器(LawyerFeeCalculator)
+ *   - 诉讼费计算器(LitigationFeeCalculator)
+ *
+ * 待重写(临时 iframe):
+ *   - 利息 / 执行款计算器(interest.html,含 LPR 历史 + 五阶段清偿 + 多案合并)
+ */
+
+import { useEffect, useState } from "react";
+
+import type { InterestPrefill } from "./calculators/InterestCalculator";
+import {
+  ArrowLeft,
+  Calculator,
+  Calendar,
+  Gavel,
+  Hash,
+  Scale,
+  Share2,
+  TrendingUp,
+  Truck,
+} from "lucide-react";
+
+import { DateCalculator } from "./calculators/DateCalculator";
+import { InterestCalculator } from "./calculators/InterestCalculator";
+import { LawyerFeeCalculator } from "./calculators/LawyerFeeCalculator";
+import { LitigationFeeCalculator } from "./calculators/LitigationFeeCalculator";
+import { NumberConverter } from "./calculators/NumberConverter";
+import { KbShareTool } from "./KbShareTool";
+import { CourtSmsTool } from "./CourtSmsTool";
+import { CourierTool } from "./CourierTool";
+import { LegalToolCard } from "./components/LegalToolCard";
+
+type LegalToolId =
+  | "number"
+  | "daycal"
+  | "fee"
+  | "legalfee"
+  | "interest"
+  | "kbshare"
+  | "courtsms"
+  | "courier";
+
+interface LegalTool {
+  id: LegalToolId;
+  title: string;
+  desc: string;
+  icon: typeof Calculator;
+}
+
+const LEGAL_TOOLS: LegalTool[] = [
+  {
+    id: "number",
+    title: "数字大写转换器",
+    desc: "阿拉伯数字实时转中文大写金额,支持角分",
+    icon: Hash,
+  },
+  {
+    id: "daycal",
+    title: "天数计算器",
+    desc: "算两个日期之间天数,或从某天加减若干天推算",
+    icon: Calendar,
+  },
+  {
+    id: "fee",
+    title: "律师费计算器",
+    desc: "按案件类型 + 标的额计算律师服务费(一口价 / 基础+风险)",
+    icon: Calculator,
+  },
+  {
+    id: "legalfee",
+    title: "诉讼费计算器",
+    desc: "按《诉讼费用交纳办法》算财产 / 离婚案件诉讼费 + 财产保全费",
+    icon: Scale,
+  },
+  {
+    id: "interest",
+    title: "利息 / 执行款计算器",
+    desc: "借款利息(LPR 历史)+ 执行款(多案 / 还款抵扣 / 五阶段清偿 / 迟延履行利息)",
+    icon: TrendingUp,
+  },
+];
+
+export function ToolsModule({
+  initialTool,
+  interestPrefill,
+}: {
+  /** 2026-05-25:从执行模块「→ 算剩余执行款」跳过来时,自动打开对应工具 */
+  initialTool?: LegalToolId | null;
+  /** 给 InterestCalculator 的预填(本金 / 起算日 / 备注)*/
+  interestPrefill?: InterestPrefill | null;
+}) {
+  const [activeTool, setActiveTool] = useState<LegalToolId | null>(initialTool ?? null);
+  // 父组件切换 initialTool 时同步
+  useEffect(() => {
+    if (initialTool) setActiveTool(initialTool);
+  }, [initialTool]);
+  const tool = activeTool
+    ? LEGAL_TOOLS.find((t) => t.id === activeTool) ?? null
+    : null;
+
+  // ──────────── 知识库共享(独立于计算器,自带视图) ────────────
+  if (activeTool === "kbshare") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">本地知识库共享</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <KbShareTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ──────────── 法院短信处理(独立于计算器,自带视图) ────────────
+  if (activeTool === "courtsms") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">法院短信处理</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <CourtSmsTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ──────────── 快递查询(独立于计算器,自带视图) ────────────
+  if (activeTool === "courier") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">快递查询</h2>
+        </header>
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            <CourierTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ────────────────────────── 工具视图态 ──────────────────────────
+  if (tool) {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回工具列表
+          </button>
+          <span className="text-muted-foreground/40">·</span>
+          <h2 className="text-sm font-medium text-foreground">{tool.title}</h2>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-auto">
+          <div className="mx-auto max-w-3xl px-6 py-6">
+            {tool.id === "number" && <NumberConverter />}
+            {tool.id === "daycal" && <DateCalculator />}
+            {tool.id === "fee" && <LawyerFeeCalculator />}
+            {tool.id === "legalfee" && <LitigationFeeCalculator />}
+            {tool.id === "interest" && <InterestCalculator prefill={interestPrefill} />}
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ────────────────────────── 工具列表态 ──────────────────────────
+  return (
+    <main className="flex h-full w-full flex-col bg-background">
+      <div className="flex-1 overflow-auto">
+        <div className="mx-auto max-w-6xl space-y-6 px-8 py-6">
+          {/* 法律计算工具(可用) */}
+          <section className="space-y-2">
+            <div className="px-1">
+              <h2 className="text-sm font-semibold text-foreground">
+                法律计算工具
+              </h2>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {LEGAL_TOOLS.map((t) => (
+                <LegalToolCard
+                  key={t.id}
+                  icon={t.icon}
+                  title={t.title}
+                  desc={t.desc}
+                  onClick={() => setActiveTool(t.id)}
+                />
+              ))}
+            </div>
+          </section>
+
+          {/* 知识库共享(团队协作 · 省积分) */}
+          <section className="space-y-2">
+            <div className="px-1">
+              <h2 className="text-sm font-semibold text-foreground">
+                知识库共享
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                把花积分查过的元典结果打包发给同事,或导入同事的包 —— 团队互相省积分
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <LegalToolCard
+                icon={Share2}
+                title="本地知识库共享"
+                desc="导出 / 导入元典缓存资料包(.zip),团队互通、互相省积分"
+                onClick={() => setActiveTool("kbshare")}
+              />
+            </div>
+          </section>
+
+          {/* 案件自动化 */}
+          <section className="space-y-2">
+            <div className="px-1">
+              <h2 className="text-sm font-semibold text-foreground">案件自动化</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                把重复的取件 / 归档动作交给程序
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <LegalToolCard
+                icon={Gavel}
+                title="法院短信处理"
+                desc="粘贴一张网送达短信 → 自动下载文书、归档进对应案件、抽取上看板"
+                onClick={() => setActiveTool("courtsms")}
+              />
+              <LegalToolCard
+                icon={Truck}
+                title="快递查询"
+                desc="查 EMS / 顺丰等物流轨迹(寄送达、材料追踪);需配快递100 key"
+                onClick={() => setActiveTool("courier")}
+              />
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </main>
+  );
+}

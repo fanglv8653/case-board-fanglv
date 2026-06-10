@@ -1,0 +1,63 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Tauri / Rust
+target/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+# 注意:Cargo.lock 不在此忽略 —— 这是 binary application,需要提交以锁定依赖版本
+
+# Frontend / Node
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+.eslintcache
+.vite/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+# 遥测 Supabase key(进 dmg,不进 git)。通配兜底防 .backup 等副产物泄露 key。
+telemetry/.env.telemetry*
+
+# Local data (SQLite test fixtures, logs)
+data/
+*.db
+*.db-journal
+
+# Superpowers scratch
+.superpowers/
+
+# Legacy archive's nested build artifacts
+_legacy_codex/backend/.venv/
+_legacy_codex/backend/.pytest_cache/
+_legacy_codex/backend/**/__pycache__/
+_legacy_codex/backend/*.egg-info/
+_legacy_codex/frontend/node_modules/
+_legacy_codex/frontend/dist/
+_legacy_codex/frontend/tsconfig.tsbuildinfo
+
+# ── 内部协作 / 隐私:本地保留,不进 GitHub ──
+# 旧版 Codex 探索归档(可能含早期数据,作者本地参考)
+_legacy_codex/
+
+# Claude / Agent 工作上下文(只给 Claude session 看,不公开)
+CLAUDE.md
+AGENTS.md
+
+# 项目内部讨论 / 决策记录 / 方法论 / 分发交接文档
+# (可能含客户名 / 决策过程 / 敏感产品策略;作者本地保留)
+docs/
+
+# FleetView / Claude Code 本地 session 状态
+.clawhub/
+.superpowers/
+
+# macOS 系统 metadata
+*.DS_Store

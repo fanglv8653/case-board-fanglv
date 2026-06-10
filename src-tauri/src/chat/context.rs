@@ -1,0 +1,695 @@
+//! 案件 AI 助手 — context builder。
+//!
+//! V0.3.3 起删除了老的「两策略 + 无工具 stream」链路(Lightweight / KeywordHits /
+//! `build_context` / `strategy_for_task`):所有 chat 现在统一走 `agent_loop`(constitution
+//! 完整宪法 + 工具)。案件材料由 `constitution::build_system_prompt` 用 `lightweight_docs_md`
+//! 拼成轻量摘要,详细内容让 LLM 按需调 `read_case_doc` / `find_in_document` /
+//! `semantic_search_case_docs` 工具拿。
+//!
+//! 本模块现在只剩三块、且都被 `constitution` 复用:
+//!   - `TaskType`:任务路由枚举(FreeChat + 4 个工具/分析型 chip)
+//!   - `case_snapshot_md`:案件聚合字段 → 「案件信息卡」MD
+//!   - `lightweight_docs_md`:文档清单的轻量摘要(filename + category + extracted_fields)
+
+use crate::db::cases::Case;
+use crate::db::documents::Document;
+
+// =============================================================================
+// 公开类型
+// =============================================================================
+
+/// 案件 chat 的 task 枚举。前端传字符串,后端 parse。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskType {
+    /// 自由问答(用户自己打字)
+    FreeChat,
+    /// 整理法律依据(并行调 search_laws / get_law_article / law_vector_search)
+    CompileLegalBasis,
+    /// 找类似案例(并行调 search_cases_normal / search_cases_authority / case_vector_search)
+    FindSimilarCases,
+    /// 核校用户已写的草稿里的法条/案号引用(走 verify_legal_citations)
+    VerifyMyDraft,
+    /// 模拟对抗:站对方立场推演抗辩/进攻 + 我方应对(走 agent_loop,查支持对方的法条/类案)
+    SimulateOpposition,
+}
+
+impl TaskType {
+    /// 字符串(前端传入)→ TaskType。未知字符串当 FreeChat。
+    pub fn from_str_loose(s: Option<&str>) -> Self {
+        match s {
+            Some("compile_legal_basis") => Self::CompileLegalBasis,
+            Some("find_similar_cases") => Self::FindSimilarCases,
+            Some("verify_my_draft") => Self::VerifyMyDraft,
+            Some("simulate_opposition") => Self::SimulateOpposition,
+            _ => Self::FreeChat,
+        }
+    }
+
+    /// 回写到 chat_messages.task_type 用的稳定字符串。
+    pub fn as_db_str(&self) -> Option<&'static str> {
+        match self {
+            Self::FreeChat => None,
+            Self::CompileLegalBasis => Some("compile_legal_basis"),
+            Self::FindSimilarCases => Some("find_similar_cases"),
+            Self::VerifyMyDraft => Some("verify_my_draft"),
+            Self::SimulateOpposition => Some("simulate_opposition"),
+        }
+    }
+
+    /// 本任务是否属于「工具/分析型」(4 个)。V0.3.3 起**所有任务都走 agent_loop**;
+    /// 本标志现仅用于 model_router auto 档分流(工具型 → pro)等细分,不再决定走哪条链路。
+    pub fn needs_tools(&self) -> bool {
+        matches!(
+            self,
+            Self::CompileLegalBasis
+                | Self::FindSimilarCases
+                | Self::VerifyMyDraft
+                | Self::SimulateOpposition
+        )
+    }
+}
+
+/// 每份文档轻量摘要长度上限(filename + category + 摘要)。
+const PER_DOC_LIGHT_CHAR_LIMIT: usize = 600;
+
+// =============================================================================
+// snapshot 拼装
+// =============================================================================
+
+/// 把 case.agg_* 字段拼成 MD 段(给 LLM 看的"案件信息卡")。
+///
+/// V0.2 D4-D5 起,`chat::constitution::build_system_prompt` 也复用本函数 — 因此 `pub(crate)`。
+pub(crate) fn case_snapshot_md(case: &Case) -> String {
+    let mut s = String::with_capacity(2048);
+
+    // 基本信息
+    s.push_str("【基本信息】\n");
+    push_kv(&mut s, "案件名称", Some(&case.name));
+    push_kv(&mut s, "案件类型", Some(&case.case_type));
+    push_kv(
+        &mut s,
+        "案号",
+        case.agg_case_no.as_deref().or(case.case_no.as_deref()),
+    );
+    push_kv(
+        &mut s,
+        "法院",
+        case.agg_court.as_deref().or(case.court.as_deref()),
+    );
+    push_kv(
+        &mut s,
+        "案由",
+        case.agg_cause.as_deref().or(case.cause.as_deref()),
+    );
+    push_kv(&mut s, "立案日", case.agg_filed_at.as_deref());
+    push_kv(
+        &mut s,
+        "诉讼请求金额",
+        case.agg_claim_amount.map(format_amount).as_deref(),
+    );
+    // D9-1:DB 存英文 StatusId,喂 LLM 时还原中文 label(更可读,且不依赖 agg_status_text)。
+    push_kv(
+        &mut s,
+        "工作流状态",
+        case.workflow_status
+            .as_deref()
+            .map(crate::ingest::global_pipeline::workflow_status_en_to_zh),
+    );
+    push_kv(&mut s, "LLM 状态描述", case.agg_status_text.as_deref());
+    push_kv(&mut s, "案件总状态", Some(&case.case_status));
+    push_kv(&mut s, "一句话摘要", case.case_summary.as_deref());
+
+    // 当事人
+    s.push_str("\n【当事人】\n");
+    push_json_list(&mut s, "原告/申请人", case.agg_plaintiffs.as_deref());
+    push_json_list(&mut s, "被告/被申请人", case.agg_defendants.as_deref());
+    push_json_list(&mut s, "第三人", case.agg_third_parties.as_deref());
+    push_json_list(&mut s, "承办法官", case.agg_judges.as_deref());
+
+    // 联系人(简略)
+    if let Some(party_json) = &case.agg_party_contacts {
+        let summary = summarize_party_contacts(party_json);
+        if !summary.is_empty() {
+            s.push_str(&format!("- 当事人联系人:\n{}\n", indent_block(&summary, 2)));
+        }
+    }
+    if let Some(court_json) = &case.agg_court_contacts {
+        let summary = summarize_court_contacts(court_json);
+        if !summary.is_empty() {
+            s.push_str(&format!("- 法院联系人:\n{}\n", indent_block(&summary, 2)));
+        }
+    }
+
+    // 关键日期
+    if let Some(kd_json) = &case.agg_key_dates {
+        let summary = summarize_key_dates(kd_json);
+        if !summary.is_empty() {
+            s.push_str("\n【关键日期】\n");
+            s.push_str(&summary);
+        }
+    }
+
+    // 费用
+    if let Some(fees_json) = &case.agg_fees {
+        let summary = summarize_fees(fees_json);
+        if !summary.is_empty() {
+            s.push_str("\n【费用记录】\n");
+            s.push_str(&summary);
+        }
+    }
+
+    // 下一节点 / 执行进度
+    if case.next_milestone_at.is_some() || case.next_milestone_type.is_some() {
+        s.push_str("\n【下一关键节点】\n");
+        push_kv(&mut s, "类型", case.next_milestone_type.as_deref());
+        push_kv(&mut s, "日期", case.next_milestone_at.as_deref());
+        push_kv(&mut s, "状态", case.next_milestone_status.as_deref());
+        push_kv(&mut s, "备注", case.next_milestone_note.as_deref());
+    }
+
+    if case.execution_total.is_some() || case.execution_received.is_some() {
+        s.push_str("\n【执行款追踪】\n");
+        push_kv(
+            &mut s,
+            "执行总额",
+            case.execution_total.map(format_amount).as_deref(),
+        );
+        push_kv(
+            &mut s,
+            "已收回",
+            case.execution_received.map(format_amount).as_deref(),
+        );
+        push_kv(
+            &mut s,
+            "剩余",
+            case.execution_remaining.map(format_amount).as_deref(),
+        );
+    }
+
+    if let Some(reso) = &case.agg_resolution {
+        if !reso.trim().is_empty() {
+            s.push_str("\n【处理结果】\n");
+            s.push_str(reso);
+            s.push('\n');
+        }
+    }
+
+    s
+}
+
+fn push_kv(s: &mut String, label: &str, val: Option<&str>) {
+    if let Some(v) = val {
+        if !v.trim().is_empty() {
+            s.push_str(&format!("- {}: {}\n", label, v));
+        }
+    }
+}
+
+fn push_json_list(s: &mut String, label: &str, json: Option<&str>) {
+    if let Some(j) = json {
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(j) {
+            let cleaned: Vec<String> = arr.into_iter().filter(|x| !x.trim().is_empty()).collect();
+            if !cleaned.is_empty() {
+                s.push_str(&format!("- {}: {}\n", label, cleaned.join("、")));
+            }
+        }
+    }
+}
+
+fn format_amount(amount: f64) -> String {
+    if amount.abs() >= 10_000.0 {
+        format!("{} 元({:.2} 万)", amount as i64, amount / 10_000.0)
+    } else {
+        format!("{} 元", amount as i64)
+    }
+}
+
+fn summarize_party_contacts(json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return String::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for item in arr {
+        let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        let role = item.get("role").and_then(|x| x.as_str()).unwrap_or("");
+        let phone = item.get("phone").and_then(|x| x.as_str()).unwrap_or("");
+        let aliases = item.get("aliases").and_then(|x| x.as_array());
+        if name.is_empty() && role.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("- {} ({})", name, role));
+        if !phone.is_empty() {
+            out.push_str(&format!(", 电话 {}", phone));
+        }
+        if let Some(al) = aliases {
+            let als: Vec<String> = al
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect();
+            if !als.is_empty() {
+                out.push_str(&format!(", 别名: {}", als.join("、")));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn summarize_court_contacts(json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return String::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for item in arr {
+        let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        let role = item.get("role").and_then(|x| x.as_str()).unwrap_or("");
+        let phone = item.get("phone").and_then(|x| x.as_str()).unwrap_or("");
+        if name.is_empty() && role.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("- {} ({})", name, role));
+        if !phone.is_empty() {
+            out.push_str(&format!(", 电话 {}", phone));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn summarize_key_dates(json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return String::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for item in arr {
+        let date = item.get("date").and_then(|x| x.as_str()).unwrap_or("");
+        let event = item.get("event").and_then(|x| x.as_str()).unwrap_or("");
+        let note = item.get("note").and_then(|x| x.as_str());
+        if date.is_empty() || event.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("- {} — {}", date, event));
+        if let Some(n) = note {
+            if !n.trim().is_empty() {
+                out.push_str(&format!("({})", n));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn summarize_fees(json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return String::new();
+    };
+    let Some(arr) = v.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for item in arr {
+        let item_name = item.get("item").and_then(|x| x.as_str()).unwrap_or("");
+        let amount = item.get("amount");
+        let note = item.get("note").and_then(|x| x.as_str()).unwrap_or("");
+        if item_name.is_empty() {
+            continue;
+        }
+        let amount_str = match amount {
+            Some(serde_json::Value::Number(n)) => n.as_f64().map(format_amount).unwrap_or_default(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        out.push_str(&format!("- {} {}", item_name, amount_str));
+        if !note.is_empty() {
+            out.push_str(&format!(" — {}", note));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn indent_block(s: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    s.lines()
+        .map(|l| format!("{}{}", pad, l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// =============================================================================
+// 文档段拼装
+// =============================================================================
+
+/// Lightweight:列每份文档的 filename + category + extracted_fields 关键字段。
+/// 不读 extracted_text_path 全文。
+/// V0.2 D4-D5 起 `chat::constitution` 复用 — `pub(crate)`。
+pub(crate) fn lightweight_docs_md(docs: &[Document]) -> (String, Vec<String>) {
+    let mut active: Vec<&Document> = docs
+        .iter()
+        .filter(|d| !d.missing && d.deleted_at.is_none())
+        .collect();
+
+    if active.is_empty() {
+        return ("(本案暂无文档材料)\n".to_string(), vec![]);
+    }
+
+    // 🥇 重要性排序:文档摘要总长超 DOC_SECTION_CHAR_LIMIT 会从尾部截断,排序保证
+    // 切掉的是「不重要的」,别把关键证据切没。优先级(排前=不被截):
+    //   ① 置顶(pinned)② 非 AI 产物(原始材料 > AI 生成报告,防自证循环)
+    //   ③ 非归档类(证据/实体材料 > 风险告知/笔录等程序归档)④ 最近(created_at 降序)。
+    active.sort_by(|a, b| {
+        b.pinned_at
+            .is_some()
+            .cmp(&a.pinned_at.is_some())
+            .then_with(|| a.is_ai_artifact.cmp(&b.is_ai_artifact))
+            .then_with(|| {
+                crate::ingest::pipeline::is_archival_category(a.category.as_deref()).cmp(
+                    &crate::ingest::pipeline::is_archival_category(b.category.as_deref()),
+                )
+            })
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+
+    let mut out = String::with_capacity(active.len() * 200);
+    let mut ids = Vec::with_capacity(active.len());
+    out.push_str(&format!("共 {} 份文档:\n\n", active.len()));
+
+    for d in &active {
+        let block = format_doc_light(d);
+        if block.chars().count() > PER_DOC_LIGHT_CHAR_LIMIT {
+            let trimmed: String = block.chars().take(PER_DOC_LIGHT_CHAR_LIMIT).collect();
+            out.push_str(&trimmed);
+            out.push_str("[…摘要已截断]\n");
+        } else {
+            out.push_str(&block);
+        }
+        out.push('\n');
+        ids.push(d.id.clone());
+    }
+    (out, ids)
+}
+
+fn format_doc_light(d: &Document) -> String {
+    let mut s = String::with_capacity(256);
+    s.push_str(&format!("### 文档 · {}\n", d.filename));
+    if let Some(cat) = &d.category {
+        s.push_str(&format!("- 分类: {}\n", cat));
+    }
+    if let Some(stage) = &d.stage {
+        s.push_str(&format!("- 阶段: {}\n", stage));
+    }
+    if d.is_ai_artifact {
+        s.push_str(&format!(
+            "- AI 生成材料(来源: {}),供参考,**不能作为原始证据**\n",
+            d.source
+        ));
+    }
+    // extracted_fields 里挑几个关键字段摘要(避免整段 JSON 太长)
+    if let Some(json) = &d.extracted_fields {
+        if let Some(brief) = summarize_extracted_fields(json) {
+            s.push_str(&brief);
+        }
+    }
+    s
+}
+
+/// 从 extracted_fields JSON 里挑案件相关的字段简化输出。
+fn summarize_extracted_fields(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let obj = v.as_object()?;
+    let mut s = String::new();
+    let pick = |k: &str| -> Option<String> {
+        obj.get(k).and_then(|x| match x {
+            serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+    };
+    let mut push = |label: &str, v: Option<String>| {
+        if let Some(val) = v {
+            s.push_str(&format!("- {}: {}\n", label, val));
+        }
+    };
+    push("案号", pick("case_no"));
+    push("案由", pick("cause"));
+    push("立案日", pick("filed_at"));
+    push("受理法院", pick("court"));
+    push("阶段", pick("case_stage"));
+    push("金额", pick("claim_amount"));
+    push("备注", pick("case_note"));
+
+    // 当事人(取前 3 个)
+    for key in ["plaintiffs", "defendants", "third_parties"] {
+        if let Some(arr) = obj.get(key).and_then(|x| x.as_array()) {
+            let names: Vec<String> = arr
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .take(3)
+                .collect();
+            if !names.is_empty() {
+                let label = match key {
+                    "plaintiffs" => "原告",
+                    "defendants" => "被告",
+                    "third_parties" => "第三人",
+                    _ => key,
+                };
+                s.push_str(&format!("- {}: {}\n", label, names.join("、")));
+            }
+        }
+    }
+
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+// =============================================================================
+// 测试
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_doc_full(
+        id: &str,
+        category: Option<&str>,
+        is_ai_artifact: bool,
+        created_at: &str,
+        pinned_at: Option<&str>,
+    ) -> Document {
+        Document {
+            id: id.into(),
+            case_id: "c1".into(),
+            source_path: format!("/tmp/{id}"),
+            filename: format!("{id}.pdf"),
+            stage: None,
+            category: category.map(|s| s.to_string()),
+            is_ai_artifact,
+            mime_type: None,
+            size_bytes: 0,
+            modified_at: None,
+            extracted_fields: None,
+            extraction_status: "done".into(),
+            missing: false,
+            created_at: created_at.into(),
+            deleted_at: None,
+            extracted_text_path: None,
+            cache_key: None,
+            last_error: None,
+            source: "scan".into(),
+            pinned_at: pinned_at.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn lightweight_sorts_by_importance() {
+        // 🥇 置顶 > 证据(最近>较早) > 归档类 > AI 产物。乱序输入,验证截尾时重要的排前不被切。
+        let docs = vec![
+            mk_doc_full("ar", Some("谈话笔录"), false, "2026-05-31T00:00:00Z", None),
+            mk_doc_full("eo", Some("发票"), false, "2026-05-10T00:00:00Z", None),
+            mk_doc_full("ai", Some("法律意见书"), true, "2026-05-31T00:00:00Z", None),
+            mk_doc_full(
+                "p",
+                Some("合同"),
+                false,
+                "2026-05-01T00:00:00Z",
+                Some("2026-05-30T00:00:00Z"),
+            ),
+            mk_doc_full("en", Some("借条"), false, "2026-05-29T00:00:00Z", None),
+        ];
+        let (_md, ids) = lightweight_docs_md(&docs);
+        assert_eq!(ids, vec!["p", "en", "eo", "ar", "ai"]);
+    }
+
+    #[test]
+    fn task_type_round_trip() {
+        for t in [
+            TaskType::FreeChat,
+            TaskType::CompileLegalBasis,
+            TaskType::FindSimilarCases,
+            TaskType::VerifyMyDraft,
+            TaskType::SimulateOpposition,
+        ] {
+            let s = t.as_db_str();
+            let back = TaskType::from_str_loose(s);
+            assert_eq!(t, back, "round-trip 应保持一致");
+        }
+    }
+
+    #[test]
+    fn unknown_task_falls_back_to_free_chat() {
+        assert_eq!(
+            TaskType::from_str_loose(Some("unknown_garbage")),
+            TaskType::FreeChat
+        );
+        assert_eq!(TaskType::from_str_loose(None), TaskType::FreeChat);
+    }
+
+    /// 跨前后端契约(2026-05-31 加 · 配「🔍 类案检索」chip 上线):
+    /// 前端 `src/lib/api.ts` 的 `CaseChatTaskType` union 里每个字符串,都必须能被后端
+    /// `from_str_loose` 识别成非 FreeChat 的 variant,且 `as_db_str` 往返一致。
+    /// 防「前端发的 task_type 字符串与后端不匹配」—— 这类 bug 编译器抓不到(TS union
+    /// 只保证前端自洽,不保证跟 Rust 字面量一致),也无法在 headless / 自动环境点 UI 验证。
+    /// 改任一侧字符串忘了同步另一侧 → 这里红。
+    ///
+    /// ⚠️ **本测试的固有局限**:下面的字符串清单是从 api.ts **手抄**的。它只能验证它已知的
+    /// 字符串能往返;**无法发现「前端新增了第 11 个 task 但忘了同步本清单」**(那种情况测试
+    /// 照样绿,给假安全感)。前端加新 task_type 时,**必须**同步加进下面这个数组。
+    #[test]
+    fn frontend_task_type_strings_round_trip() {
+        // ⚠️ 必须与 src/lib/api.ts `CaseChatTaskType` 保持一致(V0.3.3 起 4 个工具/分析型任务,
+        //    6 个生成型 chip 已删);前端加新 task 时这里也要加,否则本测试发现不了遗漏(见上方局限说明)。
+        let frontend_task_types = [
+            "compile_legal_basis",
+            "verify_my_draft",
+            "find_similar_cases",
+            "simulate_opposition",
+        ];
+        for s in frontend_task_types {
+            let t = TaskType::from_str_loose(Some(s));
+            assert_ne!(
+                t,
+                TaskType::FreeChat,
+                "前端 task_type \"{}\" 未被后端 from_str_loose 识别(前后端字符串不匹配?)",
+                s
+            );
+            assert_eq!(
+                t.as_db_str(),
+                Some(s),
+                "task_type \"{}\" round-trip 不一致:as_db_str 回写不同",
+                s
+            );
+        }
+        // 钉死类案检索这条新链路:必须走 agent_loop(needs_tools),否则 chip 点了不调工具
+        let fsc = TaskType::from_str_loose(Some("find_similar_cases"));
+        assert_eq!(fsc, TaskType::FindSimilarCases);
+        assert!(
+            fsc.needs_tools(),
+            "find_similar_cases 必须走 agent_loop 工具链路"
+        );
+    }
+
+    #[test]
+    fn snapshot_md_omits_empty_fields() {
+        let case = test_case_minimal();
+        let md = case_snapshot_md(&case);
+        // 必填的应在
+        assert!(md.contains("张三诉李四"));
+        // 空字段不应出现
+        assert!(!md.contains("案由:") || md.contains("案由: "));
+    }
+
+    #[test]
+    fn snapshot_md_includes_agg_fields() {
+        let mut case = test_case_minimal();
+        case.agg_case_no = Some("(2024)苏02民初123号".into());
+        case.agg_court = Some("无锡市梁溪区人民法院".into());
+        case.agg_plaintiffs = Some(r#"["张三"]"#.into());
+        case.agg_defendants = Some(r#"["李四"]"#.into());
+        case.agg_claim_amount = Some(50000.0);
+
+        let md = case_snapshot_md(&case);
+        assert!(md.contains("(2024)苏02民初123号"));
+        assert!(md.contains("无锡市梁溪区人民法院"));
+        assert!(md.contains("张三"));
+        assert!(md.contains("李四"));
+        assert!(md.contains("50000") || md.contains("5.00 万"));
+    }
+
+    #[test]
+    fn snapshot_md_handles_party_contacts_with_aliases() {
+        let mut case = test_case_minimal();
+        case.agg_party_contacts =
+            Some(r#"[{"name":"张三","role":"原告","aliases":["申请人"]}]"#.into());
+        let md = case_snapshot_md(&case);
+        assert!(md.contains("张三"));
+        assert!(md.contains("申请人")); // alias 应展示
+    }
+
+    fn test_case_minimal() -> Case {
+        Case {
+            id: "test-case".into(),
+            name: "张三诉李四 买卖合同纠纷".into(),
+            case_type: "诉讼".into(),
+            cause: None,
+            case_no: None,
+            court: None,
+            judge_id: None,
+            stage: None,
+            source_folder: "/tmp/test".into(),
+            ai_summary_md: None,
+            created_at: "2026-05-26T00:00:00Z".into(),
+            updated_at: "2026-05-26T00:00:00Z".into(),
+            last_scanned_at: None,
+            agg_case_no: None,
+            agg_court: None,
+            agg_cause: None,
+            agg_plaintiffs: None,
+            agg_defendants: None,
+            agg_third_parties: None,
+            agg_judges: None,
+            agg_claim_amount: None,
+            agg_filed_at: None,
+            agg_computed_at: None,
+            next_milestone_type: None,
+            next_milestone_at: None,
+            next_milestone_status: None,
+            next_milestone_note: None,
+            case_status: "进行中".into(),
+            execution_total: None,
+            execution_total_breakdown: None,
+            execution_started_at: None,
+            execution_received: None,
+            execution_remaining: None,
+            workflow_status: None,
+            case_summary: None,
+            case_report_path: None,
+            case_report_generated_at: None,
+            agg_resolution: None,
+            agg_status_text: None,
+            agg_party_contacts: None,
+            agg_court_contacts: None,
+            agg_key_dates: None,
+            agg_fees: None,
+            risk_assessment_path: None,
+            risk_assessment_at: None,
+            deep_dive_report_path: None,
+            deep_dive_at: None,
+            full_report_path: None,
+            full_report_at: None,
+            user_overrides_json: None,
+        }
+    }
+}

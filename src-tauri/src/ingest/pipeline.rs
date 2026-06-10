@@ -1,0 +1,709 @@
+//! 案件级批处理管线:扫描完后台跑字段抽取,通过 Tauri Event 推送进度。
+//!
+//! 设计:
+//!   - 输入: case_id + 该案件所有 documents
+//!   - 流程: 对每个 doc 跑 extractor → 写入 documents.extracted_fields + extraction_status
+//!   - 每个文档处理前后都 emit 一次 Event 给前端
+//!   - 不阻塞调用方:在 tokio task 里跑
+//!
+//! 前端订阅 `extraction_progress` 事件即可看到实时进度。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use futures::stream::{self, StreamExt};
+use serde::Serialize;
+use sqlx::SqlitePool;
+use tauri::{AppHandle, Emitter};
+
+use crate::db::documents::Document;
+use crate::ingest::extractor::{extract_one, ExtractResult};
+use crate::ingest::ocr::OcrContext;
+use crate::llm;
+use crate::settings;
+
+/// 三轮动态降级:8 路 → 4 路 → 1 路
+///
+/// 2026-05-25 V0.1.8 加(替代原来固定 8 路):MinerU 精准 API 偶发限流时,
+/// 第 1 轮失败的进第 2 轮(并发减半),第 2 轮还失败进第 3 轮(单线程串行),
+/// 第 3 轮失败才算真失败,落 last_error。"要把它提取完毕"——作者原话。
+const ROUND_CONCURRENCY: [usize; 3] = [8, 4, 1];
+
+/// 每轮之间的缓冲 sleep(秒),给服务端限流计数器恢复
+const INTER_ROUND_SLEEP_SEC: u64 = 3;
+
+/// MinerU "提交任务"接口最小间隔(毫秒)
+///
+/// 官网限流:**50 文件/分钟**(提交任务接口共用频控,详见 docs/MinerU精准解析API使用整理.md 第 12 节)。
+/// 1400ms 间隔 = ~43 次/分钟,留 7 次 buffer 避免撞顶。
+/// 节流只对**云端 OCR**生效(本机 vision / pdftotext / textutil 不消耗配额)。
+const SUBMIT_MIN_INTERVAL_MS: u64 = 1400;
+
+/// 全局节流闸门 —— 控制 MinerU API 提交频率,避开 50 文件/分钟限流。
+///
+/// 跨所有 buffer_unordered task 共享(Arc 包裹),跨三轮重试也共享。
+/// 实现:Mutex 保护 last_submit 时间戳,acquire 时计算需要等多久,
+/// 释放锁后 sleep,再回去更新时间戳(避免持锁 sleep 串行化所有 task)。
+pub struct SubmitThrottle {
+    last_submit: tokio::sync::Mutex<std::time::Instant>,
+    min_interval: Duration,
+}
+
+impl Default for SubmitThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubmitThrottle {
+    pub fn new() -> Self {
+        Self {
+            // 初始化"60 秒前",首次 acquire 不等
+            last_submit: tokio::sync::Mutex::new(
+                std::time::Instant::now() - Duration::from_secs(60),
+            ),
+            min_interval: Duration::from_millis(SUBMIT_MIN_INTERVAL_MS),
+        }
+    }
+
+    pub async fn acquire(&self) {
+        loop {
+            let mut last = self.last_submit.lock().await;
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(*last);
+            if elapsed >= self.min_interval {
+                *last = now;
+                return;
+            }
+            let wait = self.min_interval - elapsed;
+            drop(last); // 关键:释放锁再 sleep,允许别的 task 排队
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+/// 判断这个文件名是否会触发**云端 OCR 提交**(走 MinerU API)。
+///
+/// 只有 PDF / 图片**且** cloud_enabled 时才占 MinerU 配额。
+/// docx / txt / md / html 走 textutil / 直接读,不消耗 MinerU 配额,不必节流。
+///
+/// 注意:PDF 可能 pdftotext 成功无需 OCR fallback,这种情况节流是"误打"——
+/// 多 sleep 1.4s 而已,可接受(简化判断,避免在调度层重复 PDF 文本探测)。
+fn might_hit_mineru(filename: &str) -> bool {
+    let f = filename.to_lowercase();
+    f.ends_with(".pdf") || super::extractor::is_ocr_image_ext(&f)
+}
+
+/// 进度事件 payload,emit 给前端的 "extraction_progress" 事件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum ProgressEvent {
+    /// 整批开始(2026-05-23 加 backend 字段,前端显示用什么后端)
+    Started {
+        case_id: String,
+        total: usize,
+        ocr_provider: String, // "local" | "cloud"
+        llm_provider: String,
+        llm_model: String, // 用具体模型名,前端展示更细
+    },
+    /// 单个文档开始处理
+    DocStarted {
+        case_id: String,
+        doc_id: String,
+        filename: String,
+        index: usize,
+        total: usize,
+        ocr_provider: String,
+        llm_provider: String,
+    },
+    /// 单个文档处理完成(成功/跳过/失败任意一种)。
+    ///
+    /// 2026-05-24 i:`index` 是 doc 在原列表里的固定序号(并发顺序不保证);
+    /// `completed_count` 是**单调递增的完成计数**(用 AtomicUsize 算),
+    /// 前端进度条 percent 应该用 `completed_count / total` 而不是 `index / total`,
+    /// 否则并发完成顺序乱会让进度回退。
+    DocFinished {
+        case_id: String,
+        doc_id: String,
+        filename: String,
+        index: usize,
+        total: usize,
+        completed_count: usize,
+        outcome: DocOutcome,
+    },
+    /// 整批完成
+    Completed {
+        case_id: String,
+        total: usize,
+        extracted: usize,
+        skipped: usize,
+        failed: usize,
+        elapsed_ms: u128,
+    },
+    /// 本机服务 / 云端 token 没就绪,整批没法开跑 — 2026-05-23 加
+    Error { case_id: String, error: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DocOutcome {
+    Extracted,
+    Skipped { reason: String },
+    Failed { error: String },
+}
+
+/// 在 tokio task 里跑批处理。调用立即返回,前端通过事件订阅进度。
+///
+/// `app`: AppHandle 用于 emit 事件;`pool`: sqlx 连接池;`case_id`: 案件 ID;
+/// `documents`: 该案件下所有要处理的文档(调用方先 list_documents_by_case)。
+pub fn spawn_extraction(
+    app: AppHandle,
+    pool: SqlitePool,
+    case_id: String,
+    documents: Vec<Document>,
+) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = run_extraction(&app, &pool, &case_id, &documents).await {
+            crate::dlog!("[pipeline] case {} 抽取 fatal error: {}", case_id, e);
+        }
+    });
+}
+
+/// 强制重抽单个文档的共享入口:重置 `extraction_status='pending'` + 清 `last_error`
+/// → 取回文档 → `spawn_extraction` 后台异步抽取(走现有 `extraction_progress` 事件通道,
+/// 前端订阅看进度 + 完成自动刷新)。返回被重抽文档的 `filename`(给调用方做提示)。
+///
+/// 由两个调用方复用,防逻辑漂移:① 源文件列表「重新抽取」按钮的 `reextract_document` 命令;
+/// ② 案件 AI 助手的 `reextract_document` chat 工具。
+/// ⚠️ 会重跑 OCR/LLM(PDF 走云端 OCR 会再烧 MinerU 积分,须用户主动选择)。
+pub async fn trigger_reextract(
+    app: AppHandle,
+    pool: &SqlitePool,
+    doc_id: &str,
+) -> Result<String, String> {
+    crate::db::documents::reset_for_reextract(pool, doc_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let doc = crate::db::documents::get_document_by_id(pool, doc_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "文档不存在或已删除".to_string())?;
+    let case_id = doc.case_id.clone();
+    let filename = doc.filename.clone();
+    spawn_extraction(app, pool.clone(), case_id, vec![doc]);
+    Ok(filename)
+}
+
+async fn run_extraction(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    case_id: &str,
+    documents: &[Document],
+) -> Result<(), String> {
+    // 2026-05-23 晚十:重扫不重抽 — 只处理 pending 状态的文档(done / skipped / failed 跳过)
+    // 如果用户想强制重抽某文档,可以手工 UPDATE extraction_status='pending'(V0.X 加按钮)
+    // 2026-05-24 g · 并发改造:收成 owned Vec<Document>,这样 buffer_unordered 的 closure 可以 move
+    let pending: Vec<Document> = documents
+        .iter()
+        .filter(|d| d.extraction_status == "pending" && d.deleted_at.is_none())
+        .cloned()
+        .collect();
+
+    let total = pending.len();
+    let total_scanned = documents.len();
+    crate::dlog!(
+        "[pipeline] case={} 扫到 {} 份,本次需抽 {} 份(其余已 done / skipped / failed)",
+        case_id,
+        total_scanned,
+        total
+    );
+
+    let start = std::time::Instant::now();
+
+    // 2026-05-23 晚六:OCR 和 LLM 独立维度 — 先读 settings 再 emit Started(便于前端显示后端)
+    let user_settings = settings::read_settings().unwrap_or_default();
+    let llm_config = llm::LlmConfig::from_settings(&user_settings);
+    let ocr_ctx = OcrContext {
+        cloud_enabled: user_settings.effective_ocr_provider() == "cloud",
+        // 云端模式必须带 token(MinerU 精准 API 强制认证)。本地模式 None。
+        mineru_token: if user_settings.effective_ocr_provider() == "cloud" {
+            user_settings.mineru_api_key.clone()
+        } else {
+            None
+        },
+    };
+    let ocr_provider = user_settings.effective_ocr_provider().to_string();
+    let llm_provider = user_settings.effective_llm_provider().to_string();
+
+    let _ = app.emit(
+        "extraction_progress",
+        ProgressEvent::Started {
+            case_id: case_id.to_string(),
+            total,
+            ocr_provider: ocr_provider.clone(),
+            llm_provider: llm_provider.clone(),
+            llm_model: llm_config.model.clone(),
+        },
+    );
+
+    crate::dlog!(
+        "[pipeline] OCR={}, LLM={} (endpoint={}, key={})",
+        user_settings.effective_ocr_provider(),
+        user_settings.effective_llm_provider(),
+        llm_config.endpoint,
+        if llm_config.api_key.is_some() {
+            "set"
+        } else {
+            "—"
+        },
+    );
+
+    // 2026-05-23 晚六:如果任一 provider 是本机,后台自动起 llama-server
+    if user_settings.needs_local_server() {
+        if let Err(e) =
+            crate::lifecycle::ensure_local_ready(user_settings.local_model_dir.as_deref()).await
+        {
+            crate::dlog!("[pipeline] 本机服务启动失败: {}", e);
+            let _ = app.emit(
+                "extraction_progress",
+                ProgressEvent::Error {
+                    case_id: case_id.to_string(),
+                    error: format!("本机模型未就绪: {}", e),
+                },
+            );
+            return Ok(());
+        }
+    }
+
+    // 2026-05-25 V0.1.8 三轮动态降级(替代原来固定 8 路):
+    //   第 1 轮 buffer_unordered(8) — 全部 pending
+    //   第 2 轮 buffer_unordered(4) — 第 1 轮失败的
+    //   第 3 轮 buffer_unordered(1) — 第 2 轮还失败的;只有第 3 轮失败才标 failed 落 last_error
+    //
+    // 进度计数:每个 doc 在它**最终**完成时(成功 / skipped / 第 3 轮失败)才递增 completed_count
+    // 并 emit DocFinished。中间轮失败静默(避免前端进度回弹)。
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    // 全局节流闸门,跨三轮 + 所有并发 task 共享(避开 MinerU 50 文件/分钟限流)
+    let throttle = Arc::new(SubmitThrottle::new());
+
+    // doc.id → 该 doc 的最终 outcome(每轮覆盖)
+    let mut final_outcomes: HashMap<String, DocOutcome> = HashMap::with_capacity(total);
+    // 待重试队列(每轮过滤失败的)
+    let mut queue: Vec<Document> = pending;
+
+    for (round_idx, &concurrency) in ROUND_CONCURRENCY.iter().enumerate() {
+        if queue.is_empty() {
+            break;
+        }
+        let round_num = round_idx + 1; // 1-indexed,日志友好
+        let is_final = round_num == ROUND_CONCURRENCY.len();
+        crate::dlog!(
+            "[pipeline] case={} 第 {}/{} 轮: {} 路并发跑 {} 份",
+            case_id,
+            round_num,
+            ROUND_CONCURRENCY.len(),
+            concurrency,
+            queue.len(),
+        );
+
+        let round_results: Vec<(Document, DocOutcome)> =
+            stream::iter(queue.into_iter().enumerate())
+                .map(|(index, doc)| {
+                    let app = app.clone();
+                    let pool = pool.clone();
+                    let case_id_owned = case_id.to_string();
+                    let llm_config = llm_config.clone();
+                    let ocr_ctx = ocr_ctx.clone();
+                    let ocr_provider = ocr_provider.clone();
+                    let llm_provider = llm_provider.clone();
+                    let completed = Arc::clone(&completed);
+                    let throttle = Arc::clone(&throttle);
+                    let filename = doc.filename.clone();
+                    let doc_id = doc.id.clone();
+                    async move {
+                        let outcome = process_one_doc(
+                            &app,
+                            &pool,
+                            &case_id_owned,
+                            &llm_config,
+                            &ocr_ctx,
+                            &ocr_provider,
+                            &llm_provider,
+                            index,
+                            total,
+                            doc.clone(),
+                            round_num,
+                            is_final,
+                            &throttle,
+                        )
+                        .await;
+
+                        // 只有最终结果(成功 / skipped / 第 3 轮失败)才递增 completed_count + emit DocFinished
+                        let is_terminal = !matches!(outcome, DocOutcome::Failed { .. }) || is_final;
+                        if is_terminal {
+                            let done_so_far = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                            let _ = app.emit(
+                                "extraction_progress",
+                                ProgressEvent::DocFinished {
+                                    case_id: case_id_owned,
+                                    doc_id,
+                                    filename,
+                                    index,
+                                    total,
+                                    completed_count: done_so_far,
+                                    outcome: outcome.clone(),
+                                },
+                            );
+                        }
+                        (doc, outcome)
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+
+        // 收集本轮结果:成功/skipped/最终失败 → 写入 final_outcomes;
+        // 非最终轮的失败 → 进下一轮 queue
+        let mut next_queue: Vec<Document> = Vec::new();
+        for (doc, outcome) in round_results {
+            match &outcome {
+                DocOutcome::Failed { .. } if !is_final => {
+                    next_queue.push(doc);
+                }
+                _ => {
+                    final_outcomes.insert(doc.id.clone(), outcome);
+                }
+            }
+        }
+        queue = next_queue;
+
+        // 还有下一轮 → 给 MinerU 限流计数器缓口气
+        if !queue.is_empty() && !is_final {
+            tokio::time::sleep(Duration::from_secs(INTER_ROUND_SLEEP_SEC)).await;
+        }
+    }
+
+    let mut extracted = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+    for outcome in final_outcomes.values() {
+        match outcome {
+            DocOutcome::Extracted => extracted += 1,
+            DocOutcome::Skipped { .. } => skipped += 1,
+            DocOutcome::Failed { .. } => failed += 1,
+        }
+    }
+
+    // 2026-05-24 h · 新架构:所有文档 OCR 完成后,**让 LLM 全局抽**(替代旧 aggregator 规则)。
+    // 拼所有 MD → DeepSeek 1M 上下文 → 两次并发 LLM call(填表 + 案件分析报告)
+    let report =
+        crate::ingest::global_pipeline::run_global_extract(pool, case_id, &llm_config).await;
+    crate::dlog!(
+        "[global_extract] case={} docs={} table_ok={} report_ok={} elapsed={}ms{}",
+        case_id,
+        report.docs_included,
+        report.table_ok,
+        report.report_ok,
+        report.elapsed_ms,
+        report
+            .error
+            .as_ref()
+            .map(|e| format!(" err={}", e))
+            .unwrap_or_default(),
+    );
+
+    let _ = app.emit(
+        "extraction_progress",
+        ProgressEvent::Completed {
+            case_id: case_id.to_string(),
+            total,
+            extracted,
+            skipped,
+            failed,
+            elapsed_ms: start.elapsed().as_millis(),
+        },
+    );
+
+    Ok(())
+}
+
+/// 单个 doc 的完整处理(emit 进度 + 调 extractor + 写 DB)。
+///
+/// 设计成 owned-by-task:所有参数 borrow,但传给它的实际值都是 task 自己 clone 的副本,
+/// 这样 buffer_unordered 的多个 task 可以独立运行不互相阻塞。
+///
+/// 2026-05-25 V0.1.8 加 `round_num` / `is_final_round`:
+///   - DocStarted 事件带轮次(前端可显示"重试中 N/3")
+///   - 失败时只有 is_final_round=true 才写 status='failed' + last_error;
+///     中间轮失败回退到 status='pending'(下一轮会重新 UPDATE 成 processing)
+#[allow(clippy::too_many_arguments)]
+async fn process_one_doc(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    case_id: &str,
+    llm_config: &llm::LlmConfig,
+    ocr_ctx: &OcrContext,
+    ocr_provider: &str,
+    llm_provider: &str,
+    index: usize,
+    total: usize,
+    doc: Document,
+    round_num: usize,
+    is_final_round: bool,
+    throttle: &SubmitThrottle,
+) -> DocOutcome {
+    // 文件名加轮次后缀(第 2/3 轮),前端能感知"在重试"
+    let display_name = if round_num > 1 {
+        format!(
+            "{} (重试 {}/{})",
+            doc.filename,
+            round_num,
+            ROUND_CONCURRENCY.len()
+        )
+    } else {
+        doc.filename.clone()
+    };
+    let _ = app.emit(
+        "extraction_progress",
+        ProgressEvent::DocStarted {
+            case_id: case_id.to_string(),
+            doc_id: doc.id.clone(),
+            filename: display_name,
+            index,
+            total,
+            ocr_provider: ocr_provider.to_string(),
+            llm_provider: llm_provider.to_string(),
+        },
+    );
+
+    let _ = sqlx::query("UPDATE documents SET extraction_status = 'processing' WHERE id = ?")
+        .bind(&doc.id)
+        .execute(pool)
+        .await;
+
+    // 2026-05-31 抽取策略改版(作者:现在所有材料都要抽,做案件分析/对抗需要证据支撑)。
+    // 三档:
+    //   A. 完整抽(字段 + 文本,进 LLM 上下文):法院文书 + 我方文书 + **证据材料**
+    //      (合同/催告函/对话记录等 —— 作者明确要进对抗分析)
+    //   B. 仅文本归档(抽文本存着,但**不进** LLM 上下文):律所规范/程序材料
+    //      (风险告知书/谈话笔录/反馈卡/送达确认书 等)+ 身份信息(隐私,无分析价值)。
+    //      上下文排除在 constitution.rs 用 is_archival_category 把关;这里只负责抽文本归档。
+    //   C. 纯跳过:AI 产物(已是结构化 .md,再抽回上下文会自证循环)。
+    let result = if doc.is_ai_artifact {
+        // C. AI 产物纯跳过
+        ExtractResult::Skipped {
+            reason: "AI 产物已是结构化总结,跳过(详情页直接渲染原文)".to_string(),
+            metrics: Vec::new(),
+        }
+    } else if is_archival_category(doc.category.as_deref())
+        || doc.stage.as_deref() == Some("身份信息")
+    {
+        // B. 律所规范/程序/身份材料:只抽文本归档(便宜直抽,扫描件不烧 OCR),不抽 LLM 字段。
+        // 文本仍写盘 → read_case_doc / 全文搜索可读;但 constitution 不把它塞进 system prompt。
+        match crate::ingest::extractor::extract_text_only_cheap(
+            Path::new(&doc.source_path),
+            &doc.filename,
+        )
+        .await
+        {
+            Ok(Some(text_md)) => ExtractResult::TextOnly {
+                text_md,
+                metrics: Vec::new(),
+            },
+            // 直抽拿不到(扫描件/图片需 OCR)或真错 → 纯跳过(无文本),归档类不值得烧 OCR
+            _ => ExtractResult::Skipped {
+                reason: "律所规范/程序/身份材料(归档,不进 AI 上下文)".to_string(),
+                metrics: Vec::new(),
+            },
+        }
+    } else {
+        // A. 其余全部完整抽(含证据 stage / 合同 / 催告函等)。证据现在要支撑对抗分析,
+        //    走完整 extract_one(字段 + 文本)。PDF/扫描件会触发云端 OCR(作者主动选择:
+        //    分析价值 > OCR 成本;扫描件直抽失败才 OCR 的既有链路保留,不浪费)。
+        // 节流闸门 —— 仅云端 OCR + PDF/图片才需要(避开 MinerU 50 文件/分钟限流)
+        if ocr_ctx.cloud_enabled && might_hit_mineru(&doc.filename) {
+            throttle.acquire().await;
+        }
+        extract_one(
+            llm_config,
+            ocr_ctx,
+            Path::new(&doc.source_path),
+            &doc.filename,
+            doc.category.as_deref(),
+        )
+        .await
+    };
+
+    // 2026-05-26 V0.1.12:抽取性能埋点 — 拿到 metrics 后批量 insert 进表,反馈通道带出来
+    let collected_metrics: Vec<crate::db::metrics::MetricEntry> = match &result {
+        ExtractResult::Extracted { metrics, .. } => metrics.clone(),
+        ExtractResult::Skipped { metrics, .. } => metrics.clone(),
+        ExtractResult::TextOnly { metrics, .. } => metrics.clone(),
+        ExtractResult::Failed { metrics, .. } => metrics.clone(),
+    };
+    if !collected_metrics.is_empty() {
+        if let Err(e) = crate::db::metrics::insert_many(pool, &collected_metrics).await {
+            crate::dlog!("[pipeline] 写 extraction_metrics 失败(不阻塞抽取): {}", e);
+        }
+    }
+
+    let outcome = match result {
+        ExtractResult::Extracted {
+            fields,
+            text_md,
+            metrics: _,
+        } => {
+            let json = serde_json::to_string(&fields).unwrap_or_else(|_| "null".into());
+            let extracted_text_path = match write_extracted_md(case_id, &doc.id, &text_md) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    crate::dlog!("[pipeline] 写 extracts/.md 失败: {}", e);
+                    None
+                }
+            };
+            // 成功 → 清掉 last_error(可能是上次失败留下的)
+            let _ = sqlx::query(
+                "UPDATE documents SET extracted_fields = ?, extracted_text_path = ?, \
+                 extraction_status = 'done', last_error = NULL WHERE id = ?",
+            )
+            .bind(&json)
+            .bind(&extracted_text_path)
+            .bind(&doc.id)
+            .execute(pool)
+            .await;
+            DocOutcome::Extracted
+        }
+        ExtractResult::Skipped { reason, metrics: _ } => {
+            let _ = sqlx::query(
+                "UPDATE documents SET extraction_status = 'skipped', last_error = NULL WHERE id = ?",
+            )
+            .bind(&doc.id)
+            .execute(pool)
+            .await;
+            DocOutcome::Skipped { reason }
+        }
+        // 只抽了文本、没抽字段:状态保持 'skipped'(透明 — 没跑 LLM 字段),但写
+        // extracted_text_path,使 read_case_doc / find_in_document / 全文搜索可读。
+        ExtractResult::TextOnly {
+            text_md,
+            metrics: _,
+        } => {
+            let extracted_text_path = match write_extracted_md(case_id, &doc.id, &text_md) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    crate::dlog!("[pipeline] TextOnly 写 extracts/.md 失败: {}", e);
+                    None
+                }
+            };
+            let _ = sqlx::query(
+                "UPDATE documents SET extracted_text_path = ?, \
+                 extraction_status = 'skipped', last_error = NULL WHERE id = ?",
+            )
+            .bind(&extracted_text_path)
+            .bind(&doc.id)
+            .execute(pool)
+            .await;
+            DocOutcome::Skipped {
+                reason: "已抽文本未抽字段(证据/低价值材料,可被 AI 读取但不占字段)".to_string(),
+            }
+        }
+        ExtractResult::Failed { error, metrics: _ } => {
+            if is_final_round {
+                // 三轮都失败 → 真的 failed,落 last_error 给用户/事后排查看
+                let _ = sqlx::query(
+                    "UPDATE documents SET extraction_status = 'failed', last_error = ? WHERE id = ?",
+                )
+                .bind(&error)
+                .bind(&doc.id)
+                .execute(pool)
+                .await;
+                crate::dlog!(
+                    "[pipeline] case={} doc={} 三轮全失败: {}",
+                    case_id,
+                    doc.filename,
+                    error
+                );
+            } else {
+                // 中间轮失败 → 回退 pending 状态,等下一轮 caller 再喂进来
+                // (不写 last_error,因为下一轮可能成功;只在最终失败才落 error)
+                let _ =
+                    sqlx::query("UPDATE documents SET extraction_status = 'pending' WHERE id = ?")
+                        .bind(&doc.id)
+                        .execute(pool)
+                        .await;
+                crate::dlog!(
+                    "[pipeline] case={} doc={} 第 {} 轮失败,排队下一轮: {}",
+                    case_id,
+                    doc.filename,
+                    round_num,
+                    error
+                );
+            }
+            DocOutcome::Failed { error }
+        }
+    };
+
+    // DocFinished emit 现在挪到调用方(stream wrapper),那里有 completed_count 计数器
+    // 且只在 doc**最终**完成时 emit(中间轮失败静默,避免前端进度回弹)
+    outcome
+}
+
+/// 把抽出的纯文本写盘到 `~/Library/Application Support/CaseBoard/extracts/<case_id>/<doc_id>.md`。
+///
+/// 2026-05-23 晚十 Q1 作者拍板:落盘,方便全文搜索、用户预览、未来加编辑。
+fn write_extracted_md(case_id: &str, doc_id: &str, text: &str) -> Result<String, String> {
+    let dir = extracts_dir_for_case(case_id)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建目录 {} 失败: {}", dir.display(), e))?;
+    let path = dir.join(format!("{}.md", doc_id));
+    std::fs::write(&path, text).map_err(|e| format!("写 {} 失败: {}", path.display(), e))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 判断这个文档类别是不是"律所规范 / 程序 / 身份归档类" —— 抽文本归档,但**不进 LLM 上下文**。
+///
+/// 2026-05-31 改版(作者):现在所有材料都要抽(证据也要,做案件分析/对抗需要证据支撑)。
+/// 但有几类材料对实体分析无价值、只占 token / 加噪音,应"抽了存着可查、但不喂给 LLM":
+///   - **律所规范材料**:风险告知书、谈话笔录、反馈卡(作者点名的三类)
+///   - **程序性材料**:送达地址确认书、送达回证、回执、介绍信、收案呈批表、收案登记表
+///   - **律师内部**:办案笔记
+///   - **身份隐私**:身份证、户口(隐私 + 无分析价值)
+///
+/// ⚠️ 关键区别(与旧 `is_low_value_category` 的根本不同):
+/// **证据材料不再在此列** —— 借条/欠条/发票/收据/票据/银行流水/营业执照/证据清单/合同 等
+/// 现在要走**完整抽取并进上下文**(作者:对抗分析需要证据支撑)。
+/// 本函数同时被 `constitution.rs` 用来把这些类别**排除出 system prompt**(归档不喂 LLM)。
+pub(crate) fn is_archival_category(cat: Option<&str>) -> bool {
+    matches!(
+        cat,
+        // 律所规范材料(作者点名)
+        Some("风险告知")
+            | Some("风险告知书")
+            | Some("反馈卡")
+            | Some("律师工作反馈卡")
+            | Some("笔录")
+            | Some("谈话笔录")
+            | Some("首次谈话笔录")
+            // 程序性材料
+            | Some("送达回证")
+            | Some("送达地址确认书")
+            | Some("回执")
+            | Some("介绍信")
+            | Some("收案呈批表")
+            | Some("收案登记表")
+            // 律师内部
+            | Some("办案笔记")
+            // 身份隐私
+            | Some("身份证")
+            | Some("户口")
+    )
+}
+
+fn extracts_dir_for_case(case_id: &str) -> Result<PathBuf, String> {
+    // 跟 caseboard.db / settings.json 同一个 app data dir(~/Library/Application Support/CaseBoard/)
+    let base = crate::db::app_data_dir().map_err(|e| format!("无法定位 app data dir: {}", e))?;
+    Ok(base.join("extracts").join(case_id))
+}

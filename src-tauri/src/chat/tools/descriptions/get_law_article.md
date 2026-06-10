@@ -1,0 +1,28 @@
+get_law_article — 拿单条法条的完整正文(必须先有 id 或 法规名+条号)
+
+适用场景:
+- `search_laws` 命中了某条,但摘要不够详细,需要拿完整内容时
+- 用户已经直接给出条号(如「民法典第 563 条」),LLM 想拿原文核实再引用
+- 写起诉状要引用某具体法条的完整表述时,确保一字不差
+- 校验对方书状里引用的条款是不是篡改了
+
+不适用:
+- 不知道条号,只知道关键词 → 先用 `search_laws` 拿到候选,再用本工具拿全文
+- 想看一部法规整体 → 用 `get_regulation_detail`(拿整部法规)
+- 想看案例 → 用 `get_case_detail`
+
+输入字段(`id` 跟 `(fgmc, ftnum)` **二选一必填**,优先 id):
+- id: 优先填,元典内部法条 ID,从 `search_laws` 结果里拿
+- fgmc: 法规名(全称或常用简称都行,如「民法典」「中华人民共和国民法典」「侵权责任法」)。**不能跟 id 同时填**
+- ftnum: 条号,纯数字字符串(如 "563" 不带「第」「条」)。配 fgmc 一起用
+- fgid: 可选但**强烈建议填**,元典法规 ID,从 `search_laws` / `law_vector_search` 结果里的 `fgid` 字段透传。配 ftnum 一起填时,走整部法规全文缓存:**首条 1 积分、同法规后续条文全部 0 积分**(比逐条拉省得多);且 fgid 锁定正确版本,避免条号错位
+- refer_date: 可选,YYYY-MM-DD,查询截止该日期生效的版本
+
+注意事项:
+- **省积分铁律**:只要 `search_laws` / `law_vector_search` 结果里有 `fgid`,查该法规的具体条文时就把 `fgid` + `ftnum` 一起传给本工具 —— 整部法规缓存一次,之后该法规所有条文 0 积分。别再无 fgid 地逐条拉(每条都花积分且难命中)
+- 优先用本地缓存(命中即返回,0 积分;miss 才调元典 1 积分)
+- 返回字段:`{id, content, ftnum, fgmc, valid, publish_date, implement_date}`
+  - `valid` 是布尔,**false 时务必告诉用户该条已失效**,不能继续用
+  - 法律修订过的条款,默认拿现行版;要查旧版本配 `refer_date`
+- 在 final answer 引用本条时,`<CITATIONS>` 标 `type: "law"`,title 写「<fgmc> 第 <ftnum> 条」
+- 如果 `valid` 是 false,LLM 应该自动调一次 `search_laws` 用同 keyword 拿现行可用版本

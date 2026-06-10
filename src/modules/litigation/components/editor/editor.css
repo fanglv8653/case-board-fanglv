@@ -1,0 +1,137 @@
+/*
+ * Milkdown 编辑器样式隔离 + 法律文书阅读优化。
+ *
+ * 为什么需要这个文件:Tailwind v4 preflight 会 reset 掉 h1-h6 的字号/字重、
+ * ul/ol 的 list-style 和缩进。nord 主题未必盖得过 preflight(取决于打包顺序),
+ * 所以这里用「.milkdown-editor .ProseMirror <tag>」(specificity 0,2,1)显式重建,
+ * 必胜 preflight 的裸标签选择器(0,0,1)—— 不依赖 CSS 加载顺序。
+ *
+ * 作用域全部锁在 .milkdown-editor 内,绝不外泄影响 app 其它部分。
+ */
+
+.milkdown-editor {
+  /* 容器:撑满中栏,内部自己滚 */
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--color-background, #fff);
+}
+
+/* Milkdown 根:去掉 nord 默认外边距/最大宽,贴合我们的容器 */
+.milkdown-editor .milkdown {
+  height: 100%;
+  background: transparent;
+}
+
+.milkdown-editor .milkdown .ProseMirror {
+  /* 文书正文排版:仿宋手感(系统中文衬线兜底),行距宽松 */
+  font-family: "Songti SC", "STSong", "SimSun", "Noto Serif SC", serif;
+  font-size: 16px;
+  line-height: 1.9;
+  color: #1a1a1a;
+  padding: 2.5rem 3rem 6rem;
+  max-width: 50rem;
+  margin: 0 auto;
+  outline: none;
+  caret-color: #1a1a1a;
+}
+
+/* 标题层级 —— 必胜 preflight */
+.milkdown-editor .ProseMirror h1 {
+  font-size: 1.45rem;
+  font-weight: 700;
+  text-align: center;
+  margin: 1.6rem 0 1.2rem;
+  line-height: 1.5;
+}
+.milkdown-editor .ProseMirror h2 {
+  font-size: 1.18rem;
+  font-weight: 700;
+  margin: 1.4rem 0 0.8rem;
+}
+.milkdown-editor .ProseMirror h3 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 1.1rem 0 0.6rem;
+}
+.milkdown-editor .ProseMirror h4,
+.milkdown-editor .ProseMirror h5,
+.milkdown-editor .ProseMirror h6 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 1rem 0 0.5rem;
+}
+
+/* 段落:首行缩进 2 字(法律文书惯例) */
+.milkdown-editor .ProseMirror p {
+  margin: 0.6rem 0;
+  text-align: justify;
+}
+
+/* 列表:恢复 marker + 缩进(preflight 会清掉) */
+.milkdown-editor .ProseMirror ul {
+  list-style: disc;
+  padding-left: 1.8rem;
+  margin: 0.6rem 0;
+}
+.milkdown-editor .ProseMirror ol {
+  list-style: decimal;
+  padding-left: 1.8rem;
+  margin: 0.6rem 0;
+}
+.milkdown-editor .ProseMirror li {
+  margin: 0.25rem 0;
+}
+
+/* 加粗 / 强调 */
+.milkdown-editor .ProseMirror strong {
+  font-weight: 700;
+}
+.milkdown-editor .ProseMirror em {
+  font-style: italic;
+}
+
+/* 表格(证据目录):清晰边框 */
+.milkdown-editor .ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.95rem;
+}
+.milkdown-editor .ProseMirror th,
+.milkdown-editor .ProseMirror td {
+  border: 1px solid #c8c8c8;
+  padding: 0.45rem 0.7rem;
+  text-align: left;
+  vertical-align: top;
+}
+.milkdown-editor .ProseMirror th {
+  background: #f4f4f4;
+  font-weight: 700;
+}
+
+/* 引用 / 分隔线 / 代码 */
+.milkdown-editor .ProseMirror blockquote {
+  border-left: 3px solid #d0d0d0;
+  padding-left: 1rem;
+  color: #555;
+  margin: 0.8rem 0;
+}
+.milkdown-editor .ProseMirror hr {
+  border: none;
+  border-top: 1px solid #d8d8d8;
+  margin: 1.5rem 0;
+}
+.milkdown-editor .ProseMirror code {
+  background: #f0f0f0;
+  border-radius: 3px;
+  padding: 0.1rem 0.3rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+}
+
+/* 选中态(ProseMirror gapcursor 等保持默认) */
+.milkdown-editor .ProseMirror ::selection {
+  background: rgba(59, 130, 246, 0.18);
+}

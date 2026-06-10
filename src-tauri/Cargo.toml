@@ -1,0 +1,60 @@
+[package]
+name = "caseboard"
+version = "0.3.9"
+description = "案件看板 · CaseBoard"
+authors = ["刘成"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "caseboard_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+walkdir = "2"
+chrono = { version = "0.4", features = ["serde"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "io-util", "process"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+directories = "5"
+thiserror = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# OCR 同步调用 + 临时 PDF 转 PNG 用(2026-05-23 加,本机 vision OCR 路径)
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+tempfile = "3"
+base64 = "0.22"
+# Markdown → HTML(报告导出用)
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+# MinerU HTTP API zip 结果解压(2026-05-25 V0.1.10 加,替代 npm 的 mineru-open-api CLI)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 2026-05-26 V0.1.11 PDF 文字抽取 + 分类(纯 Rust 零外部依赖)
+# 选 pdf-inspector 而不是 pdf-extract 的理由:
+#   - 提供 PdfType { TextBased, Scanned, ImageBased, Mixed } 分类 + confidence + pages_needing_ocr
+#   - 5 个真实法律 PDF 实测扫描件识别 100% 准,速度 2-20x 快
+#   - 输出 markdown(传票表格被正确保留为 markdown 表格)
+# 风险:git dep(crates.io 暂无,v0.1.0 新项目),cargo 会 lock 到具体 commit
+pdf-inspector = { git = "https://github.com/firecrawl/pdf-inspector", rev = "8b63ceb0" }
+# 2026-05-27 V0.2 加 · 对齐 Python yuandian-legal-search/scripts/cache.py 的 _query_hash 算法
+# 用法只有「hexdigest 前 12 位」一处,接口稳定,无安全风险。
+md5 = "0.7"
+# 2026-05-27 V0.2 D2 加 · local_kb 用
+shellexpand = "3"            # 展开 ~/Documents/知识库 这种 tilde 路径
+regex = "1"                  # search_local_kb 全库 grep + 文档内 find_in_document
+# 2026-05-27 V0.2 D2-D3 加 · Tool trait 用 dyn Tool 派发,async fn in trait 现版本 Rust
+# 还不能直接 dyn,所以走 async-trait 宏
+async-trait = "0.1"
+

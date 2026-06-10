@@ -1,0 +1,388 @@
+/**
+ * 利息 / 执行款核心计算 — 100% 移植自 lawtools.top/interest.html。
+ *
+ * 含:
+ *   - daysBetween: 两日期之间天数(Math.ceil,半天算一天)
+ *   - calculateInterestByPeriod: 按 LPR 变化点分段算利息(本金 × 年率 ÷ 365 × 天数)
+ *   - calcFiveStage: 执行款五阶段清偿(费用 → 一般利息 → 本金,迟延履行利息独立累计)
+ *   - calcExecution: 多案合并 / 单独计算的入口
+ */
+
+import { getLprForDate, LPR_DATA, type LprTerm } from "./lprData";
+
+/* ============================ 基础工具 ============================ */
+
+/** 两日期天数差(end - start),向上取整,负数返 0。 */
+export function daysBetween(startDate: string, endDate: string): number {
+  if (!startDate || !endDate) return 0;
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const diffMs = end.getTime() - start.getTime();
+  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+  return diffDays > 0 ? diffDays : 0;
+}
+
+/** Date → "YYYY-MM-DD"(本地时区) */
+function isoLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** 金额格式化(>= 1 万 → "X.XX 万元",否则 "X.XX 元") */
+export function formatMoney(amount: number): string {
+  if (Math.abs(amount) >= 10000) {
+    return (amount / 10000).toFixed(2) + " 万元";
+  }
+  return amount.toFixed(2) + " 元";
+}
+
+/* ============================ 利息计算 ============================ */
+
+export type RateType = "custom" | "lpr";
+
+export interface InterestPrincipal {
+  id: number;
+  principal: string; // 输入框值(string,parse 时转 number)
+  rateType: RateType;
+  rate: string; // 自定义利率(%),仅 rateType="custom" 时用
+  lprTerm: LprTerm; // LPR 期限,仅 rateType="lpr" 时用
+  startDate: string;
+  endDate: string;
+}
+
+/**
+ * 按 LPR 变化点分段算单笔利息。
+ *
+ * @returns 利息(元,保留 2 位小数)
+ */
+export function calculateInterestByPeriod(
+  principal: number,
+  startDate: string,
+  endDate: string,
+  rateType: RateType,
+  customRate: number,
+  lprTerm: LprTerm,
+): number {
+  if (!principal || principal <= 0 || !startDate || !endDate) return 0;
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (end <= start) return 0;
+
+  // 自定义利率:整段一个利率
+  if (rateType === "custom") {
+    if (!customRate || isNaN(customRate)) return 0;
+    const days = daysBetween(startDate, endDate);
+    const interest = (principal * customRate) / 100 / 365 * days;
+    return Math.round(interest * 100) / 100;
+  }
+
+  // LPR:按 LPR 变化点分段
+  let totalInterest = 0;
+  let currentDate = new Date(start);
+  let currentRate = getLprForDate(startDate, lprTerm) ?? 3.65;
+
+  for (let i = 0; i < LPR_DATA.length; i++) {
+    const lprDate = new Date(LPR_DATA[i].date);
+    if (lprDate <= start) continue;
+    if (lprDate > end) break;
+
+    const segStart = isoLocal(currentDate);
+    const segEnd = isoLocal(lprDate);
+    const segDays = daysBetween(segStart, segEnd);
+
+    if (segDays > 0) {
+      totalInterest += (principal * currentRate) / 100 / 365 * segDays;
+    }
+
+    currentDate = lprDate;
+    currentRate = lprTerm === "5y+" ? LPR_DATA[i].lpr5y : LPR_DATA[i].lpr1y;
+  }
+
+  // 最后一段(最后一个 LPR 点 → endDate)
+  const lastDays = daysBetween(isoLocal(currentDate), endDate);
+  if (lastDays > 0 && currentRate) {
+    totalInterest += (principal * currentRate) / 100 / 365 * lastDays;
+  }
+
+  return Math.round(totalInterest * 100) / 100;
+}
+
+/* ============================ 利息详细分段(用于"查看计算过程") ============================ */
+
+export interface InterestSegment {
+  startDate: string;
+  endDate: string;
+  days: number;
+  rate: number;
+  interest: number;
+}
+
+/** 按 LPR 变化点分段输出明细 — 给 UI 展示"计算过程"用 */
+export function calculateInterestSegments(
+  principal: number,
+  startDate: string,
+  endDate: string,
+  rateType: RateType,
+  customRate: number,
+  lprTerm: LprTerm,
+): InterestSegment[] {
+  if (!principal || principal <= 0 || !startDate || !endDate) return [];
+
+  if (rateType === "custom") {
+    const days = daysBetween(startDate, endDate);
+    return [
+      {
+        startDate,
+        endDate,
+        days,
+        rate: customRate,
+        interest: Math.round((principal * customRate / 100 / 365 * days) * 100) / 100,
+      },
+    ];
+  }
+
+  // LPR:按"利率实际变化"的点分段(连续相同利率合并)
+  const segs: InterestSegment[] = [];
+  let segStartDate = startDate;
+  let currentRate = getLprForDate(startDate, lprTerm) ?? 3.65;
+
+  for (let i = 0; i < LPR_DATA.length; i++) {
+    const lprDate = LPR_DATA[i].date;
+    if (new Date(lprDate) <= new Date(startDate)) continue;
+    if (new Date(lprDate) > new Date(endDate)) break;
+
+    const newRate = lprTerm === "5y+" ? LPR_DATA[i].lpr5y : LPR_DATA[i].lpr1y;
+    if (Math.abs(newRate - currentRate) > 0.001) {
+      const segDays = daysBetween(segStartDate, lprDate);
+      if (segDays > 0) {
+        segs.push({
+          startDate: segStartDate,
+          endDate: lprDate,
+          days: segDays,
+          rate: currentRate,
+          interest: Math.round((principal * currentRate / 100 / 365 * segDays) * 100) / 100,
+        });
+      }
+      segStartDate = lprDate;
+      currentRate = newRate;
+    }
+  }
+
+  const lastDays = daysBetween(segStartDate, endDate);
+  if (lastDays > 0) {
+    segs.push({
+      startDate: segStartDate,
+      endDate,
+      days: lastDays,
+      rate: currentRate,
+      interest: Math.round((principal * currentRate / 100 / 365 * lastDays) * 100) / 100,
+    });
+  }
+
+  return segs;
+}
+
+/* ============================ 执行款五阶段清偿 ============================ */
+
+export interface ExecCaseInput {
+  id: number;
+  name: string;
+  principal: number;
+  rate: number; // 年利率(%)
+  rateType: RateType;
+  lprTerm: LprTerm;
+  startDate: string; // 计算起始日
+  endDate: string;
+  litigationFee: number;
+  lawyerFee: number;
+  otherFee: number;
+}
+
+export interface Repayment {
+  id: number;
+  date: string;
+  amount: number;
+}
+
+export interface RepaymentStep {
+  repDate: string;
+  repAmount: number;
+  daysSinceLast: number;
+  newInterest: number;
+  principalBefore: number;
+  accumulatedInterestBefore: number;
+  deductions: { type: "费用" | "一般利息" | "本金"; amount: number }[];
+  remainingFeesAfter: number;
+  accumulatedInterestAfter: number;
+  remainingPrincipalAfter: number;
+}
+
+export interface DoubleSegment {
+  start: string;
+  end: string;
+  days: number;
+  principal: number;
+  interest: number;
+}
+
+export interface FiveStageResult {
+  remainingPrincipal: number;
+  accumulatedInterest: number;
+  accumulatedDelayed: number;
+  remainingFees: number;
+  finalDays: number;
+  finalInterest: number;
+  total: number;
+  steps: RepaymentStep[];
+  doubleSegments: DoubleSegment[];
+}
+
+/**
+ * 五阶段清偿计算(单个案件 / 多案合并后)。
+ *
+ * 还款按法定顺序抵扣:费用 → 一般利息 → 本金;
+ * 迟延履行加倍利息独立累计(基数不含已产生的一般利息)。
+ */
+export function calcFiveStage(
+  caseInfo: ExecCaseInput,
+  repayments: Repayment[],
+  includeDelayed: boolean,
+): FiveStageResult {
+  const principal0 = caseInfo.principal;
+  const annualRate = caseInfo.rate;
+  const startDate = caseInfo.startDate;
+  const endDate0 = caseInfo.endDate;
+  const totalFees = caseInfo.litigationFee + caseInfo.lawyerFee + caseInfo.otherFee;
+
+  const dailyRate = annualRate / 100 / 365;
+  const delayedDailyRate = 0.000175; // 万分之一点七五
+
+  let remainingPrincipal = principal0;
+  let accumulatedInterest = 0;
+  let remainingFees = totalFees;
+  let lastInterestDate = startDate;
+  const steps: RepaymentStep[] = [];
+
+  // ── 第三阶段:逐笔还款 ──
+  for (const rep of repayments) {
+    const daysSinceLast = daysBetween(lastInterestDate, rep.date);
+    const newInterest = remainingPrincipal * dailyRate * daysSinceLast;
+    accumulatedInterest += newInterest;
+
+    const step: RepaymentStep = {
+      repDate: rep.date,
+      repAmount: rep.amount,
+      daysSinceLast,
+      newInterest,
+      principalBefore: remainingPrincipal,
+      accumulatedInterestBefore: accumulatedInterest - newInterest,
+      deductions: [],
+      remainingFeesAfter: 0,
+      accumulatedInterestAfter: 0,
+      remainingPrincipalAfter: 0,
+    };
+
+    let remaining = rep.amount;
+
+    // 费用 → 一般利息 → 本金
+    if (remainingFees > 0 && remaining > 0) {
+      const used = Math.min(remainingFees, remaining);
+      remainingFees -= used;
+      remaining -= used;
+      step.deductions.push({ type: "费用", amount: used });
+    }
+    if (accumulatedInterest > 0 && remaining > 0) {
+      const used = Math.min(accumulatedInterest, remaining);
+      accumulatedInterest -= used;
+      remaining -= used;
+      step.deductions.push({ type: "一般利息", amount: used });
+    }
+    if (remainingPrincipal > 0 && remaining > 0) {
+      const used = Math.min(remainingPrincipal, remaining);
+      remainingPrincipal -= used;
+      remaining -= used;
+      step.deductions.push({ type: "本金", amount: used });
+    }
+
+    lastInterestDate = rep.date;
+    step.remainingFeesAfter = remainingFees;
+    step.accumulatedInterestAfter = accumulatedInterest;
+    step.remainingPrincipalAfter = remainingPrincipal;
+    steps.push(step);
+  }
+
+  // ── 第四阶段:末段利息 ──
+  const finalStartDate =
+    repayments.length > 0 ? repayments[repayments.length - 1].date : startDate;
+  const finalDays = daysBetween(finalStartDate, endDate0);
+  const finalInterest = remainingPrincipal * dailyRate * finalDays;
+  accumulatedInterest += finalInterest;
+
+  // ── 第五阶段:迟延履行加倍利息(独立累计) ──
+  let accumulatedDelayed = 0;
+  const doubleSegments: DoubleSegment[] = [];
+  if (includeDelayed) {
+    let delayedPrincipal = principal0;
+    let lastDelayedDate = startDate;
+
+    for (const rep of repayments) {
+      const segStart = lastDelayedDate;
+      const segEnd = rep.date;
+      const segDays = daysBetween(segStart, segEnd);
+      if (segDays > 0) {
+        const segInterest = delayedPrincipal * delayedDailyRate * segDays;
+        accumulatedDelayed += segInterest;
+        doubleSegments.push({
+          start: segStart,
+          end: segEnd,
+          days: segDays,
+          principal: delayedPrincipal,
+          interest: segInterest,
+        });
+      }
+
+      // 还款抵扣:简化版(仅用于折减加倍利息计算基数中的本金)
+      let remaining = rep.amount;
+      const usedFee = Math.min(totalFees, remaining);
+      remaining -= usedFee;
+      const usedInt = Math.min(accumulatedInterest, remaining);
+      remaining -= usedInt;
+      const usedPrin = Math.min(delayedPrincipal, remaining);
+      delayedPrincipal -= usedPrin;
+
+      lastDelayedDate = rep.date;
+    }
+
+    const lastRepDate =
+      repayments.length > 0 ? repayments[repayments.length - 1].date : startDate;
+    const lastDelayedDays = daysBetween(lastRepDate, endDate0);
+    if (lastDelayedDays > 0) {
+      const lastSegInterest = delayedPrincipal * delayedDailyRate * lastDelayedDays;
+      accumulatedDelayed += lastSegInterest;
+      doubleSegments.push({
+        start: lastRepDate,
+        end: endDate0,
+        days: lastDelayedDays,
+        principal: delayedPrincipal,
+        interest: lastSegInterest,
+      });
+    }
+  }
+
+  const total =
+    remainingPrincipal + accumulatedInterest + accumulatedDelayed + remainingFees;
+
+  return {
+    remainingPrincipal,
+    accumulatedInterest,
+    accumulatedDelayed,
+    remainingFees,
+    finalDays,
+    finalInterest,
+    total,
+    steps,
+    doubleSegments,
+  };
+}

@@ -1,0 +1,390 @@
+//! 整库关键词检索 + 文件读取(带路径穿越防护)。
+//!
+//! 默认搜索范围:`raw/notes/` + `raw/companies/` + `wiki/sources/` + `wiki/topics/` + `gap-log.md`
+//! **排除**:`raw/yuandian-cache/`(那是元典缓存,LLM 走 `verify_legal_citations` 等专用工具命中)
+//!
+//! `read_kb_file` 的安全约束:
+//!   1. `canonicalize` + `starts_with` 防穿越(LLM 给 `../../etc/passwd` 直接拒)
+//!   2. 文件大小上限 5MB
+//!   3. 二进制检测:open 后读头 512 字节,含 NUL 拒绝
+
+use std::path::Path;
+
+use serde::Serialize;
+use walkdir::WalkDir;
+
+use super::KbError;
+
+const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
+const BINARY_PEEK_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy)]
+pub enum KbScope {
+    Notes,         // raw/notes/
+    Companies,     // raw/companies/(企业档案 / 调查报告)
+    Sources,       // wiki/sources/
+    Topics,        // wiki/topics/
+    GapLog,        // gap-log.md(单文件)
+    YuandianCache, // raw/yuandian-cache/(默认**不**搜)
+}
+
+impl KbScope {
+    fn rel_path(&self) -> &'static str {
+        match self {
+            KbScope::Notes => "raw/notes",
+            KbScope::Companies => "raw/companies",
+            KbScope::Sources => "wiki/sources",
+            KbScope::Topics => "wiki/topics",
+            KbScope::GapLog => "gap-log.md",
+            KbScope::YuandianCache => "raw/yuandian-cache",
+        }
+    }
+    fn is_file(&self) -> bool {
+        matches!(self, KbScope::GapLog)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    /// None = 默认 [Notes, Sources, Topics, GapLog](排除 yuandian-cache)
+    pub scopes: Option<Vec<KbScope>>,
+    pub max_results: usize,
+    /// 每条命中里抽多少 char 作为预览片段
+    pub snippet_chars: usize,
+    /// 大小写敏感(false 用 `(?i)` flag)
+    pub case_sensitive: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            scopes: None,
+            max_results: 30,
+            snippet_chars: 200,
+            case_sensitive: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct KbSearchHit {
+    pub relative_path: String,
+    pub scope: String,
+    pub match_count: u32,
+    /// 第一个命中位置周围 [-snippet_chars/2, +snippet_chars/2] 文本片段
+    pub snippet: String,
+    /// 文件修改时间(秒级 Unix epoch)
+    pub modified_at: i64,
+}
+
+fn default_scopes() -> Vec<KbScope> {
+    vec![
+        KbScope::Notes,
+        KbScope::Companies,
+        KbScope::Sources,
+        KbScope::Topics,
+        KbScope::GapLog,
+    ]
+}
+
+/// 在 KB 下做整库关键词检索。
+pub fn search_kb_files(
+    kb_root: &Path,
+    keyword: &str,
+    opts: SearchOptions,
+) -> Result<Vec<KbSearchHit>, KbError> {
+    if keyword.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let root_canonical = kb_root
+        .canonicalize()
+        .map_err(|_| KbError::NoPath(kb_root.to_path_buf()))?;
+
+    let pattern = if opts.case_sensitive {
+        regex::escape(keyword)
+    } else {
+        format!("(?i){}", regex::escape(keyword))
+    };
+    let re = regex::Regex::new(&pattern).map_err(|e| {
+        KbError::Json(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            e.to_string(),
+        )))
+    })?;
+
+    let scopes = opts.scopes.clone().unwrap_or_else(default_scopes);
+    let mut hits: Vec<KbSearchHit> = Vec::new();
+
+    for scope in scopes {
+        let target = root_canonical.join(scope.rel_path());
+        if !target.exists() {
+            continue;
+        }
+        if scope.is_file() {
+            if let Some(hit) = try_match_file(&root_canonical, &target, &re, &opts, scope)? {
+                hits.push(hit);
+            }
+            continue;
+        }
+        for entry in WalkDir::new(&target)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            // 只搜 .md / .txt(避免误读 .docx 等大二进制)
+            let ext_ok = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| matches!(e.to_lowercase().as_str(), "md" | "txt"))
+                .unwrap_or(false);
+            if !ext_ok {
+                continue;
+            }
+            if let Some(hit) = try_match_file(&root_canonical, p, &re, &opts, scope)? {
+                hits.push(hit);
+            }
+        }
+    }
+
+    // 排序:命中次数高 → 修改时间新
+    hits.sort_by(|a, b| {
+        b.match_count
+            .cmp(&a.match_count)
+            .then(b.modified_at.cmp(&a.modified_at))
+    });
+    hits.truncate(opts.max_results);
+    Ok(hits)
+}
+
+fn try_match_file(
+    root_canonical: &Path,
+    path: &Path,
+    re: &regex::Regex,
+    opts: &SearchOptions,
+    scope: KbScope,
+) -> Result<Option<KbSearchHit>, KbError> {
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > MAX_FILE_SIZE {
+        return Ok(None);
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None), // 二进制或编码问题:跳过,不致命
+    };
+    let mc = re.find_iter(&content).count();
+    if mc == 0 {
+        return Ok(None);
+    }
+    let first = re.find(&content).unwrap();
+    let half = opts.snippet_chars / 2;
+    let start = first.start().saturating_sub(half);
+    let end = (first.end() + half).min(content.len());
+    let snippet = safe_char_slice(&content, start, end);
+    let relative = path
+        .strip_prefix(root_canonical)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let modified_at = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(Some(KbSearchHit {
+        relative_path: relative,
+        scope: format!("{:?}", scope),
+        match_count: mc as u32,
+        snippet,
+        modified_at,
+    }))
+}
+
+/// 字节 offset → 安全的 char 边界 slice。content 是 UTF-8,任意 [start,end) 可能
+/// 落在多字节字符中间,会 panic — 这里向外扩到最近的 char boundary。
+fn safe_char_slice(s: &str, start: usize, end: usize) -> String {
+    let start = floor_char_boundary(s, start);
+    let end = ceil_char_boundary(s, end);
+    s[start..end].to_string()
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    let len = s.len();
+    while i < len && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// 读 KB 内某个文件。路径必须**相对于 kb_root**,且 canonicalize 后仍在 kb_root 内。
+pub fn read_kb_file(
+    kb_root: &Path,
+    relative_path: &str,
+    offset: Option<usize>,
+    length: Option<usize>,
+) -> Result<String, KbError> {
+    let root_canonical = kb_root
+        .canonicalize()
+        .map_err(|_| KbError::NoPath(kb_root.to_path_buf()))?;
+    // 拒绝绝对路径 — LLM 给的路径必须是相对路径
+    if Path::new(relative_path).is_absolute() {
+        return Err(KbError::PathEscape(relative_path.to_string()));
+    }
+    let candidate = root_canonical.join(relative_path);
+    // canonicalize 必须成功(意味着文件确实存在 + 路径合法)
+    let target = candidate
+        .canonicalize()
+        .map_err(|_| KbError::PathEscape(relative_path.to_string()))?;
+    if !target.starts_with(&root_canonical) {
+        return Err(KbError::PathEscape(relative_path.to_string()));
+    }
+    let meta = std::fs::metadata(&target)?;
+    if meta.len() > MAX_FILE_SIZE {
+        return Err(KbError::FileTooBig {
+            path: target.clone(),
+            size: meta.len(),
+        });
+    }
+    // 二进制检测:读头 N 字节,看有没有 NUL
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&target)?;
+        let mut buf = vec![0u8; BINARY_PEEK_BYTES.min(meta.len() as usize)];
+        let _ = f.read(&mut buf)?;
+        if buf.contains(&0u8) {
+            return Err(KbError::BinaryFile(target));
+        }
+    }
+    let content = std::fs::read_to_string(&target)?;
+    let chars: Vec<char> = content.chars().collect();
+    let start = offset.unwrap_or(0).min(chars.len());
+    let take = length.unwrap_or(10_000).min(chars.len() - start);
+    Ok(chars[start..start + take].iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    //! D2 acceptance:
+    //!   - test_search_excludes_yuandian_cache_by_default
+    //!   - test_read_kb_file_rejects_path_traversal
+    use super::*;
+    use tempfile::TempDir;
+
+    fn setup_kb() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        for sub in [
+            "raw/notes",
+            "raw/companies",
+            "raw/yuandian-cache",
+            "wiki/sources",
+            "wiki/topics",
+        ] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::write(
+            root.join("raw/notes/note1.md"),
+            "民法典 第563条 合同解除的法定情形",
+        )
+        .unwrap();
+        std::fs::write(root.join("wiki/sources/case-a.md"), "本案适用合同解除规则").unwrap();
+        std::fs::write(
+            root.join("raw/yuandian-cache/SEARCH-rh_ft_search-xxx.md"),
+            "缓存里也有合同解除关键词,但默认应该被排除",
+        )
+        .unwrap();
+        std::fs::write(root.join("gap-log.md"), "暂无缺口,合同解除已覆盖").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_search_excludes_yuandian_cache_by_default() {
+        let tmp = setup_kb();
+        let hits = search_kb_files(tmp.path(), "合同解除", SearchOptions::default()).unwrap();
+        assert!(!hits.is_empty(), "应该命中 notes/sources/gap-log");
+        for h in &hits {
+            assert!(
+                !h.relative_path.contains("yuandian-cache"),
+                "默认 scope 不应该包含 yuandian-cache,但命中了:{}",
+                h.relative_path
+            );
+        }
+        // 显式指定 YuandianCache scope 时,应该能搜到
+        let opts2 = SearchOptions {
+            scopes: Some(vec![KbScope::YuandianCache]),
+            ..Default::default()
+        };
+        let hits2 = search_kb_files(tmp.path(), "合同解除", opts2).unwrap();
+        assert!(
+            hits2
+                .iter()
+                .any(|h| h.relative_path.contains("yuandian-cache")),
+            "显式带 YuandianCache scope 应能搜到缓存里的命中"
+        );
+    }
+
+    #[test]
+    fn test_read_kb_file_rejects_path_traversal() {
+        let tmp = setup_kb();
+        // 1. 绝对路径直接拒
+        let err = read_kb_file(tmp.path(), "/etc/passwd", None, None).unwrap_err();
+        assert!(matches!(err, KbError::PathEscape(_)));
+        // 2. ../ 越界拒
+        let err = read_kb_file(tmp.path(), "../../etc/passwd", None, None).unwrap_err();
+        assert!(matches!(err, KbError::PathEscape(_)));
+        // 3. KB 内合法路径能读
+        let ok = read_kb_file(tmp.path(), "raw/notes/note1.md", None, None).unwrap();
+        assert!(ok.contains("民法典"));
+    }
+
+    #[test]
+    fn read_kb_file_rejects_too_big() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("raw/notes")).unwrap();
+        let big = tmp.path().join("raw/notes/big.md");
+        // 5MB+1 字节(用 ASCII 填,避免 UTF-8 边界问题)
+        std::fs::write(&big, vec![b'a'; (5 * 1024 * 1024 + 1) as usize]).unwrap();
+        let err = read_kb_file(tmp.path(), "raw/notes/big.md", None, None).unwrap_err();
+        assert!(matches!(err, KbError::FileTooBig { .. }));
+    }
+
+    #[test]
+    fn read_kb_file_rejects_binary() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("raw/notes")).unwrap();
+        let bin = tmp.path().join("raw/notes/blob.bin");
+        std::fs::write(&bin, [0u8, 1, 2, 3, 0, 5]).unwrap();
+        let err = read_kb_file(tmp.path(), "raw/notes/blob.bin", None, None).unwrap_err();
+        assert!(matches!(err, KbError::BinaryFile(_)));
+    }
+
+    #[test]
+    fn read_kb_file_offset_length_works() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("raw/notes")).unwrap();
+        std::fs::write(tmp.path().join("raw/notes/t.md"), "0123456789").unwrap();
+        let got = read_kb_file(tmp.path(), "raw/notes/t.md", Some(2), Some(5)).unwrap();
+        assert_eq!(got, "23456");
+    }
+
+    #[test]
+    fn search_ranks_by_match_count_then_mtime() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("raw/notes")).unwrap();
+        std::fs::write(tmp.path().join("raw/notes/one.md"), "合同 合同 合同").unwrap();
+        std::fs::write(tmp.path().join("raw/notes/two.md"), "合同").unwrap();
+        let hits = search_kb_files(tmp.path(), "合同", SearchOptions::default()).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].match_count, 3);
+        assert_eq!(hits[1].match_count, 1);
+    }
+}

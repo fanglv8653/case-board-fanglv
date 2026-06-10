@@ -1,0 +1,356 @@
+//! 案件全局抽取(2026-05-24 h · 替代旧 aggregator 规则方案)。
+//!
+//! 思路:把案件所有文档的 extract MD 拼起来,**一次喂给 DeepSeek**(1M 上下文容易装下),
+//! 让 LLM 同时输出两个东西:
+//!
+//!   call A:**JSON 表格**(填 cases.agg_* 字段)→ 写入数据库
+//!   call B:**完整案件分析报告 MD** → 落盘到 reports/<case_id>.md
+//!
+//! 两次调用,不是单次双输出 — 单次输出大 JSON 嵌套长 MD 容易转义/截断,分开干净可靠。
+//!
+//! 替代了:
+//!   - `db/aggregator.rs` 一大堆规则(去污 / 去重 / 反诉过滤 / 优先级排序)→ 全交给 LLM
+//!   - 逐文档 `llm::extract_case_fields_with_hint` + 后聚合 → 一次全局抽
+//!
+//! 保留:
+//!   - documents.extraction_status / extracted_text_path(OCR 落盘还在,作为本 module 输入)
+//!   - 增量缓存(documents.cache_key)— mtime + size 没变就不重 OCR
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::llm::{LlmConfig, LlmError};
+
+/// LLM 全局抽出的"填表"结果(对齐 cases.agg_* 字段)。
+///
+/// 所有字段都是 Option,LLM 没看到信息时 null。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GlobalExtractTable {
+    pub case_no: Option<String>,
+    pub court: Option<String>,
+    pub cause: Option<String>,
+    pub filed_at: Option<String>, // YYYY-MM-DD
+    pub claim_amount: Option<f64>,
+    pub workflow_status: Option<String>, // 8 档之一:接案/立案中/.../已结案
+    pub plaintiffs: Vec<String>,
+    pub defendants: Vec<String>,
+    pub third_parties: Vec<String>,
+    pub judges: Vec<String>,
+    pub party_contacts: Vec<PartyContact>,
+    pub court_contacts: Vec<CourtContact>,
+    pub key_dates: Vec<KeyDate>,
+    pub fees: Vec<FeeItem>,
+    pub resolution: Option<String>,
+    pub status_text: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PartyContact {
+    /// 姓名(2026-05-26 V0.1.12:改 Option,合同里只有机构名无具体联系人时 LLM 合理返回 null)
+    pub name: Option<String>,
+    pub role: Option<String>, // 原告 / 被告 / 委托代理人 / 第三人 / ...(主诉讼地位)
+    pub id_no: Option<String>,
+    pub address: Option<String>,
+    pub phone: Option<String>,
+    pub is_our_side: Option<bool>,
+    /// 2026-05-26 V0.1.12:同人跨文档其它身份("文档类型:角色"),如 ["委托合同:委托人", "执行申请:申请人"]
+    /// 主身份(role)取最权威诉讼文书,这里收"程序角色"避免重复 entry
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CourtContact {
+    /// 2026-05-26 V0.1.12:改 Option,合议庭某人只知职务无名时 LLM 合理返回 null
+    pub name: Option<String>,
+    pub role: Option<String>, // 审判员 / 法官助理 / 书记员
+    pub phone: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeyDate {
+    /// 2026-05-26 V0.1.12:改 Option — 委托合同"签订日期"等落款未填的常 case,LLM 会返回 null
+    pub date: Option<String>, // YYYY-MM-DD
+    pub event: String,
+    pub note: Option<String>,
+    /// 2026-05-24 k-9:有"到期"概念的事件(保全 / 续封 / 上诉期 / 还款期 等)的失效日期。
+    /// LLM 应用知识自动算:动产/资金保全 1 年、不动产/股权 3 年;续封同期;判决书上诉期 15 天。
+    /// 没"到期"概念(立案 / 开庭 / 调解结案等)填 null。
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeeItem {
+    pub item: String,
+    pub amount: Option<f64>,
+    pub note: Option<String>,
+}
+
+/// 单个文档输入(给 LLM 看的)。
+pub struct DocInput {
+    pub filename: String,
+    pub category: Option<String>,
+    pub stage: Option<String>,
+    pub text_md: String,
+}
+
+/// === 单次 Prompt 同时输出表格 + 报告 ===
+///
+/// 2026-05-24 i · 合并 call:用一个 prompt + JSON output 同时输出 `table` 和 `report_md`。
+/// 优点:
+///   - 省一半 input tokens(corpus 只传一次)
+///   - 保证 table 和 report 基于同一份"思考",不会两次 call 表述不一致
+///   - 简化编排
+const SYSTEM_PROMPT_COMBINED: &str = r###"你是资深律师助理,精通法律案件信息抽取与分析。我会给你**同一个案件的所有文档全文**(按文档分段)。
+
+请你**通读所有文档后,一次性输出一个 JSON 对象**,包含两部分:
+
+1. `table`:结构化案件画像(供数据库填表)
+2. `report_md`:案件分析报告(供律师阅读的完整 Markdown 文本)
+
+# 输出格式(严格 JSON,无 markdown 围栏,无解释,直接给 JSON 对象):
+
+{
+  "table": {
+    "case_no": "案号或null",
+    "court": "受理法院或null",
+    "cause": "案由或null",
+    "filed_at": "YYYY-MM-DD或null",
+    "claim_amount": 数字或null,
+    "workflow_status": "9 档之一或null",
+    "plaintiffs": ["..."],
+    "defendants": ["..."],
+    "third_parties": ["..."],
+    "judges": ["..."],
+    "party_contacts": [{"name":"姓名或null","role":"主诉讼地位或null","id_no":null,"address":null,"phone":null,"is_our_side":true,"aliases":["委托合同:委托人","执行申请:申请人"]}],
+    "court_contacts": [{"name":"姓名或null","role":"职务或null","phone":null}],
+    "key_dates": [{"date":"YYYY-MM-DD或null","event":"事件类型","note":null,"expires_at":"YYYY-MM-DD或null"}],
+    "fees": [{"item":"费用项目","amount":数字或null,"note":null}],
+    "resolution": "调解 / 判决 / 执行结果(自由文本,200 字内)",
+    "status_text": "用一句话描述当前状态(如 2026-05 调解结案,首期款已付)",
+    "summary": "案件一句话概括(50 字内)"
+  },
+  "report_md": "## 案件概况\n...完整 Markdown 报告..."
+}
+
+# table 字段铁律
+
+1. 跨文档关联:同一信息出现在多份文档时,以最权威来源为准(判决书 > 调解书 > 受理通知 > 起诉状 > 笔录 > 申请书)
+2. 反诉过滤:有反诉文档(标题或正文明确"反诉")时,反诉视角的原被告**不要混进原诉**(plaintiffs/defendants 只填原诉视角)
+3. is_our_side:从委托合同甲方 / 起诉状抬头原告 / 答辩状抬头被告 判断 — 我方=true,对方=false,不确定=null
+4. 日期统一 YYYY-MM-DD,金额数字(元)不要"万元"
+5. workflow_status 严格从 9 档选一个:接案 / 立案中 / 待开庭 / 审理中 / 已调解 / 上诉期 / 二审中 / 执行中 / 已结案
+6. key_dates 只列办案过程节点(立案/开庭/调解/判决/上诉/二审开庭/二审判决/执行立案/申请保全/续封/还款期),不要 LPR/违约金计算/数字大写等噪音
+7. key_dates.expires_at(有"到期"概念的事件填,无则 null):
+   - **保全 / 续封**:动产 / 资金 / 银行账户 = date + 1 年;不动产 / 股权 / 其他财产权 = date + 3 年(从 note 或上下文判断保全标的类型)
+   - **判决书上诉期**:date + 15 天(民事一审)
+   - **裁定书上诉期**:date + 10 天
+   - **调解书 / 一审终审 / 二审判决**:无上诉期,填 null
+   - **还款期**(调解约定分期付款):每一期都单独列一条,expires_at = date 本身
+   - **立案 / 开庭 / 调解 / 判决书签发**:无到期,填 null
+7. 不知道就填 null,绝不编造
+8. **留空是合法答案**:任何字段不确定 / 文档中缺失 / 矛盾无法判断时,**填 null**(数组类字段填 [])。**不要硬填空字符串 ""**,不要硬编造 — 律师拿到 null 会自己补,拿到伪造数据会判错
+9. **party_contacts 同人合并铁律**(2026-05-26 V0.1.12 新加):
+   - 同一姓名(去空格/标点)在多份文档出现的,**合并成 1 个 entry**,绝不重复
+   - `role` 取**最权威诉讼地位**(判决书 > 起诉状/答辩状 > 申请书),即原告/被告/第三人
+   - `aliases` 收"程序角色"(委托人 / 申请人 / 被申请人 / 反诉原告 等),格式 `["<文档类型>:<角色>"]`
+     例:张三在委托合同是委托人、起诉状是原告、执行申请是申请人,
+     输出 → `{name:"张三", role:"原告", aliases:["委托合同:委托人","执行申请:申请人"], ...}`
+   - 同身份多次出现(如多份起诉状都是原告)只取一条主身份,不重复进 aliases
+   - 只有姓名,无机构,无任何身份关联的不要进 party_contacts(避免噪音)
+
+# report_md 结构(用 ## 二级标题,顺序固定)
+
+## 案件概况
+一句话定性 + 当前阶段。
+
+## 当事人与代理
+- 原告 / 被告 / 第三人(列基本身份信息)
+- 我方代理身份(如有委托合同)
+- 对方信息掌握程度
+
+## 时间线
+按时间倒序列出**办案过程节点**,每条标注日期 + 一句话说明。
+
+## 争议焦点与请求
+- 我方诉讼请求是什么(金额 / 标的)
+- 主要事实依据
+- 对方答辩 / 反诉(如有)
+
+## 程序进展与结果
+- 当前状态
+- 已生效法律文书核心结论
+- 履行情况
+
+## 关键日期提醒
+未来 / 近期需要关注的截止时间(开庭 / 还款期 / 上诉期 / 续封等)。
+
+## 法院联系
+承办法官 / 书记员 / 法官助理 + 电话 + 法院地址。
+
+## 收费与费用
+案件受理费 / 财产保全费 / 律师代理费 / 谁负担。
+
+## 注意事项
+律师需要特别关注的点(履行风险 / 文件缺失 / 后续程序等)。
+
+# report_md 铁律
+
+1. 只从给定文档抽信息,不编造;不知道的标"(不详)"
+2. 跨文档冲突时以最权威来源为准,并标注"来源 XX 文档"
+3. 反诉情况单独说明,不混进原诉
+4. 中文 / 专业 / 简洁,不要"根据您提供的文档"之类元话术
+5. JSON 字符串里的换行用 \n(而不是真的换行),其他符合 JSON 标准
+"###;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CombinedExtractResult {
+    pub table: GlobalExtractTable,
+    pub report_md: String,
+}
+
+/// 拼接所有文档为一个 LLM 输入。
+pub fn build_corpus(docs: &[DocInput]) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "本案件共 {} 份文档,以下逐份列出。\n\n",
+        docs.len()
+    ));
+    for (i, d) in docs.iter().enumerate() {
+        s.push_str(&format!(
+            "\n========== 文档 {}/{}: {} | 分类: {} | 阶段: {} ==========\n\n",
+            i + 1,
+            docs.len(),
+            d.filename,
+            d.category.as_deref().unwrap_or("—"),
+            d.stage.as_deref().unwrap_or("—"),
+        ));
+        s.push_str(d.text_md.trim());
+        s.push('\n');
+    }
+    s
+}
+
+/// 单次 LLM call 同时输出表格 + 报告(2026-05-24 i)。
+///
+/// 返回 `CombinedExtractResult { table, report_md }`。
+/// 设 timeout 比单次 LLM call 长(报告 output 长,有时要 30-60 秒)。
+pub async fn extract_combined(
+    config: &LlmConfig,
+    corpus: &str,
+) -> Result<CombinedExtractResult, LlmError> {
+    let body = serde_json::json!({
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT_COMBINED},
+            {"role": "user", "content": corpus},
+        ],
+        "max_tokens": 12288,  // 报告 + 表格 大约 5-10K tokens output,留余量
+        "temperature": 0.0,
+        "stream": false,
+        "response_format": {"type": "json_object"},
+    });
+
+    let mut req = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config.timeout_secs * 3))
+        .build()
+        .map_err(|e| LlmError::Network(e.to_string()))?
+        .post(&config.endpoint)
+        .json(&body);
+
+    if let Some(key) = &config.api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| LlmError::Network(e.to_string()))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(LlmError::HttpStatus(status.as_u16(), text));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| LlmError::ResponseFormat(e.to_string()))?;
+
+    let content = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| LlmError::ResponseFormat("无 choices[0].message.content".into()))?;
+
+    let cleaned = strip_markdown_fence(content);
+    serde_json::from_str::<CombinedExtractResult>(&cleaned)
+        .map_err(|e| LlmError::ContentJson(format!("{}\n---原始---\n{}", e, cleaned)))
+}
+
+/// 去掉 LLM 输出可能带的 ```json ``` 围栏(JSON output mode 不应该有,但保险)。
+fn strip_markdown_fence(s: &str) -> String {
+    let trimmed = s.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```json") {
+        return stripped
+            .trim_start()
+            .trim_end_matches("```")
+            .trim()
+            .to_string();
+    }
+    if let Some(stripped) = trimmed.strip_prefix("```") {
+        return stripped
+            .trim_start()
+            .trim_end_matches("```")
+            .trim()
+            .to_string();
+    }
+    trimmed.to_string()
+}
+
+/// 报告 MD 落盘路径:`~/Library/Application Support/CaseBoard/reports/<case_id>.md`
+pub fn report_path_for_case(case_id: &str) -> Result<PathBuf, String> {
+    let base = crate::db::app_data_dir().map_err(|e| format!("无法定位 app data dir: {}", e))?;
+    let dir = base.join("reports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建 reports 目录失败: {}", e))?;
+    Ok(dir.join(format!("{}.md", case_id)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_fence_handles_json_fence() {
+        let s = "```json\n{\"case_no\":\"x\"}\n```";
+        assert_eq!(strip_markdown_fence(s), "{\"case_no\":\"x\"}");
+    }
+
+    #[test]
+    fn strip_fence_passthrough_for_clean_json() {
+        let s = r#"{"case_no":"x"}"#;
+        assert_eq!(strip_markdown_fence(s), r#"{"case_no":"x"}"#);
+    }
+
+    #[test]
+    fn build_corpus_includes_filename_header() {
+        let docs = vec![DocInput {
+            filename: "民事起诉状.docx".into(),
+            category: Some("起诉状".into()),
+            stage: Some("立案".into()),
+            text_md: "原告张三...".into(),
+        }];
+        let c = build_corpus(&docs);
+        assert!(c.contains("民事起诉状.docx"));
+        assert!(c.contains("分类: 起诉状"));
+        assert!(c.contains("原告张三"));
+    }
+}

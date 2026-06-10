@@ -1,0 +1,405 @@
+//! 案件(`cases`)表的 CRUD。
+//!
+//! 单一职责:把案件元数据落库 / 读出来。文档相关的操作在 [`super::documents`]。
+
+use serde::{Deserialize, Serialize};
+use sqlx::{FromRow, SqlitePool};
+use uuid::Uuid;
+
+/// 案件主表的行结构。
+///
+/// 字段命名跟 SQL schema 一致(snake_case)。前端拿到的 JSON 也用 snake_case
+/// (跟 ScannedDoc 一致),保持整个 IPC 数据风格统一。
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Case {
+    pub id: String,
+    pub name: String,
+    pub case_type: String,
+    pub cause: Option<String>,
+    pub case_no: Option<String>,
+    pub court: Option<String>,
+    pub judge_id: Option<String>,
+    pub stage: Option<String>,
+    pub source_folder: String,
+    pub ai_summary_md: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_scanned_at: Option<String>,
+
+    // ====== 2026-05-23 加(migration 0002) ======
+    /// 案件级聚合字段(由 aggregator 从 documents.extracted_fields 算出)
+    pub agg_case_no: Option<String>,
+    pub agg_court: Option<String>,
+    pub agg_cause: Option<String>,
+    pub agg_plaintiffs: Option<String>,    // JSON array
+    pub agg_defendants: Option<String>,    // JSON array
+    pub agg_third_parties: Option<String>, // JSON array
+    pub agg_judges: Option<String>,        // JSON array
+    pub agg_claim_amount: Option<f64>,
+    pub agg_filed_at: Option<String>,
+    pub agg_computed_at: Option<String>,
+
+    /// 下一关键节点(驱动首页 30 天 widget)
+    pub next_milestone_type: Option<String>,
+    pub next_milestone_at: Option<String>,
+    pub next_milestone_status: Option<String>,
+    pub next_milestone_note: Option<String>,
+
+    /// 案件总状态(进行中/已结案/已归档)
+    pub case_status: String,
+
+    /// 执行款追踪聚合
+    pub execution_total: Option<f64>,
+    pub execution_total_breakdown: Option<String>, // JSON
+    pub execution_started_at: Option<String>,
+    pub execution_received: Option<f64>,
+    pub execution_remaining: Option<f64>,
+
+    /// ====== 2026-05-24 加(migration 0006)======
+    /// 案件工作流状态(看板卡片右上角的"接案/立案中/待开庭/审理中/上诉期/二审中/执行中/已结案")
+    /// NULL = 走前端自动推断;非 NULL = 用户手工选过,优先取用户值
+    pub workflow_status: Option<String>,
+
+    /// ====== 2026-05-24 h 加(migration 0008 · LLM 全局抽方案)======
+    /// LLM 全局抽出的扩展字段(替代旧 aggregator 规则)
+    /// 一句话案件概括(50 字内)
+    pub case_summary: Option<String>,
+    /// 完整案件分析报告 MD 路径(详情页「📖 案件报告」按钮渲染)
+    pub case_report_path: Option<String>,
+    pub case_report_generated_at: Option<String>,
+    /// 调解 / 判决 / 执行结果(自由文本,200 字内)
+    pub agg_resolution: Option<String>,
+    /// LLM 推断的状态文字(跟 workflow_status 8 档不同,自由描述)
+    pub agg_status_text: Option<String>,
+    /// JSON: [{name,role,id_no,address,phone,is_our_side}]
+    pub agg_party_contacts: Option<String>,
+    /// JSON: [{name,role,phone}]
+    pub agg_court_contacts: Option<String>,
+    /// JSON: [{date,event,note}]
+    pub agg_key_dates: Option<String>,
+    /// JSON: [{item,amount,note}]
+    pub agg_fees: Option<String>,
+
+    /// 2026-05-24 k 加(migration 0010 · 元典查被执行人 P1)
+    /// 风险提示报告 MD 路径(详情页「🔍 查被执行人」按钮触发,跑完落盘)
+    pub risk_assessment_path: Option<String>,
+    pub risk_assessment_at: Option<String>,
+
+    /// 2026-05-24 k-9 加(migration 0011 · P2 深挖)
+    /// 深查报告 MD 路径(详情页「🔬 深挖」按钮触发)
+    pub deep_dive_report_path: Option<String>,
+    pub deep_dive_at: Option<String>,
+
+    /// 2026-05-25 V0.1.7 加(migration 0013 · 完整报告)
+    /// 合并风险报告 + 深挖报告 → DeepSeek 出第三份完整报告
+    pub full_report_path: Option<String>,
+    pub full_report_at: Option<String>,
+
+    /// 2026-05-26 V0.1.13 加(migration 0016 · 编辑模式 user overrides)
+    /// 用户手改的 overlay(JSON),前端定义结构,后端透传。LLM 全局抽永不覆盖此列。
+    /// 渲染时叠加在 agg_* 之上,使用户改动优先级高于 LLM 抽取。
+    pub user_overrides_json: Option<String>,
+}
+
+/// 创建新案件的最小参数。
+#[derive(Debug, Clone)]
+pub struct NewCase {
+    pub name: String,
+    pub case_type: String, // "诉讼" / "非诉"
+    pub source_folder: String,
+}
+
+/// 插入新案件,返回新建的 Case。
+///
+/// 不做 upsert——如果 `source_folder` 已存在,会因为 UNIQUE 索引报错。
+/// 想要 upsert 行为请用 [`upsert_case_for_folder`]。
+pub async fn create_case(pool: &SqlitePool, new: NewCase) -> Result<Case, sqlx::Error> {
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO cases (id, name, case_type, source_folder) VALUES (?, ?, ?, ?)")
+        .bind(&id)
+        .bind(&new.name)
+        .bind(&new.case_type)
+        .bind(&new.source_folder)
+        .execute(pool)
+        .await?;
+
+    get_case(pool, &id)
+        .await?
+        .ok_or_else(|| sqlx::Error::RowNotFound)
+}
+
+/// 如果 `source_folder` 已经入库过,返回现有 Case 并刷新 `updated_at` + `last_scanned_at`;
+/// 否则按 `default_name` / `default_case_type` 新建一条。
+///
+/// 这是导入流程的标准入口:用户选个文件夹,不管是不是第一次都能正确处理。
+pub async fn upsert_case_for_folder(
+    pool: &SqlitePool,
+    source_folder: &str,
+    default_name: &str,
+    default_case_type: &str,
+) -> Result<Case, sqlx::Error> {
+    if let Some(existing) = find_case_by_folder(pool, source_folder).await? {
+        // 已存在 → 只刷新扫描时间
+        sqlx::query(
+            "UPDATE cases SET last_scanned_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&existing.id)
+        .execute(pool)
+        .await?;
+        return get_case(pool, &existing.id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound);
+    }
+
+    // 不存在 → 新建
+    let case = create_case(
+        pool,
+        NewCase {
+            name: default_name.to_string(),
+            case_type: default_case_type.to_string(),
+            source_folder: source_folder.to_string(),
+        },
+    )
+    .await?;
+
+    // 再设一下 last_scanned_at
+    sqlx::query("UPDATE cases SET last_scanned_at = datetime('now') WHERE id = ?")
+        .bind(&case.id)
+        .execute(pool)
+        .await?;
+
+    get_case(pool, &case.id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
+}
+
+/// 按 id 取案件。
+pub async fn get_case(pool: &SqlitePool, id: &str) -> Result<Option<Case>, sqlx::Error> {
+    sqlx::query_as::<_, Case>("SELECT * FROM cases WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// 按 source_folder 取案件(用于"这个文件夹是否已经入库过")。
+pub async fn find_case_by_folder(
+    pool: &SqlitePool,
+    source_folder: &str,
+) -> Result<Option<Case>, sqlx::Error> {
+    sqlx::query_as::<_, Case>("SELECT * FROM cases WHERE source_folder = ?")
+        .bind(source_folder)
+        .fetch_optional(pool)
+        .await
+}
+
+/// 列出所有案件,按 `updated_at` 倒序(最近的在前)。
+pub async fn list_cases(pool: &SqlitePool) -> Result<Vec<Case>, sqlx::Error> {
+    sqlx::query_as::<_, Case>("SELECT * FROM cases ORDER BY updated_at DESC")
+        .fetch_all(pool)
+        .await
+}
+
+/// 删除一个案件(级联删除所有关联表:documents/events/contacts/...)。
+pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM cases WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 2026-05-24 e:更新案件的工作流状态(右上角状态 chip 的手工覆盖)。
+///
+/// `status = None` → 清空,前端走自动推断;
+/// `status = Some("closed"|"intake"|"filing"|"awaiting_hearing"|"trial"|
+///                 "appeal_window"|"appeal"|"execution")` → 用户手工覆盖,优先级最高
+///
+/// 不校验 status 字面值(由前端的枚举类型约束),DB 层只做透传。
+pub async fn update_workflow_status(
+    pool: &SqlitePool,
+    id: &str,
+    status: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ?")
+        .bind(status)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 2026-05-26 V0.1.13 · 写入案件 user_overrides JSON。
+///
+/// `json = None` → 清空所有用户改动(回到纯 LLM 抽取的视图);
+/// `json = Some(...)` → 整段覆盖(前端 debounce 后整包提交)。
+///
+/// 后端不解析 / 不校验 JSON 结构,完全透传。结构定义见 migration 0016 注释。
+pub async fn update_user_overrides(
+    pool: &SqlitePool,
+    id: &str,
+    json: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE cases SET user_overrides_json = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(json)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ============================================================================
+// 测试
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_pool;
+
+    async fn fresh_pool() -> SqlitePool {
+        init_pool(":memory:").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_and_get_case() {
+        let pool = fresh_pool().await;
+        let case = create_case(
+            &pool,
+            NewCase {
+                name: "张三诉李四 买卖合同纠纷".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/test_create_get".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!case.id.is_empty());
+        assert_eq!(case.name, "张三诉李四 买卖合同纠纷");
+        assert_eq!(case.case_type, "诉讼");
+
+        let fetched = get_case(&pool, &case.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, case.id);
+    }
+
+    #[tokio::test]
+    async fn list_orders_by_updated_at_desc() {
+        let pool = fresh_pool().await;
+        let _a = create_case(
+            &pool,
+            NewCase {
+                name: "A 案".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/a".into(),
+            },
+        )
+        .await
+        .unwrap();
+        // 等 1ms 确保 updated_at 有差异
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let _b = create_case(
+            &pool,
+            NewCase {
+                name: "B 案".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/b".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let all = list_cases(&pool).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "B 案", "最新的应该排在最前");
+    }
+
+    #[tokio::test]
+    async fn upsert_creates_then_updates() {
+        let pool = fresh_pool().await;
+
+        // 第一次 upsert → 应该新建
+        let c1 = upsert_case_for_folder(&pool, "/tmp/upsert_test", "化名案件", "诉讼")
+            .await
+            .unwrap();
+        assert_eq!(c1.name, "化名案件");
+        assert!(c1.last_scanned_at.is_some());
+
+        // 等一点点
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 第二次 upsert 同一个 folder → 应该更新现有的,不新建
+        let c2 = upsert_case_for_folder(&pool, "/tmp/upsert_test", "改名了不该生效", "诉讼")
+            .await
+            .unwrap();
+        assert_eq!(c2.id, c1.id, "同一文件夹 upsert 应该返回同一个 case");
+        assert_eq!(c2.name, "化名案件", "名字不应该被覆盖");
+
+        // 总共只有一条记录
+        let all = list_cases(&pool).await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn find_by_folder_returns_none_when_missing() {
+        let pool = fresh_pool().await;
+        let found = find_case_by_folder(&pool, "/tmp/nonexistent")
+            .await
+            .unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_cascades() {
+        let pool = fresh_pool().await;
+        let case = create_case(
+            &pool,
+            NewCase {
+                name: "待删".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/del".into(),
+            },
+        )
+        .await
+        .unwrap();
+        delete_case(&pool, &case.id).await.unwrap();
+        let after = get_case(&pool, &case.id).await.unwrap();
+        assert!(after.is_none());
+    }
+
+    /// 2026-05-26 V0.1.13 · user_overrides 圆环测试。
+    /// 关键不变量:写入的 JSON 原样读回;清空(None)能擦掉之前的值。
+    #[tokio::test]
+    async fn user_overrides_round_trip() {
+        let pool = fresh_pool().await;
+        let case = create_case(
+            &pool,
+            NewCase {
+                name: "测试用户改 overlay".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/overrides".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // 初始应为 None
+        let fresh = get_case(&pool, &case.id).await.unwrap().unwrap();
+        assert!(fresh.user_overrides_json.is_none());
+
+        // 写入一段 JSON,原样读回
+        let payload =
+            r#"{"fields":{"agg_cause":"机动车交通事故责任纠纷"},"hidden_sections":["收费记录"]}"#;
+        update_user_overrides(&pool, &case.id, Some(payload))
+            .await
+            .unwrap();
+        let after = get_case(&pool, &case.id).await.unwrap().unwrap();
+        assert_eq!(after.user_overrides_json.as_deref(), Some(payload));
+
+        // 清空(None)能擦掉
+        update_user_overrides(&pool, &case.id, None).await.unwrap();
+        let cleared = get_case(&pool, &case.id).await.unwrap().unwrap();
+        assert!(cleared.user_overrides_json.is_none());
+    }
+}
