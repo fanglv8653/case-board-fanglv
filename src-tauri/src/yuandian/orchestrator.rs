@@ -633,10 +633,7 @@ mod tests {
 
     #[test]
     fn detects_enterprise_vs_person() {
-        assert_eq!(
-            SubjectKind::Enterprise,
-            classify("示例(测试)律师事务所")
-        );
+        assert_eq!(SubjectKind::Enterprise, classify("示例(测试)律师事务所"));
         assert_eq!(SubjectKind::Enterprise, classify("测试科技有限公司"));
         assert_eq!(SubjectKind::Person, classify("张三"));
         assert_eq!(SubjectKind::Person, classify("欧阳锋"));

@@ -118,11 +118,7 @@ mod tests {
         push_log("打开 /Users/alice/cases/李四/foo.pdf 失败".into());
         let snap = snapshot();
         let joined = snap.join("\n");
-        assert!(
-            !joined.contains("李四"),
-            "must drop case name: {}",
-            joined
-        );
+        assert!(!joined.contains("李四"), "must drop case name: {}", joined);
         assert!(joined.contains("<path>/foo.pdf"));
     }
 }

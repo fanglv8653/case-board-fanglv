@@ -15,7 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("YUANDIAN_API_KEY"))
         .map_err(|_| "未设置 CHINESELAW_API_KEY 或 YUANDIAN_API_KEY 环境变量")?;
 
-    let query = std::env::args().nth(1).unwrap_or_else(|| "阿里巴巴".to_string());
+    let query = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "阿里巴巴".to_string());
     println!("=== 1. enterprise_search(\"{}\") ===", query);
     let r = enterprise_search(&api_key, &query).await?;
     println!(
