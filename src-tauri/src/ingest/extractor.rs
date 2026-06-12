@@ -360,21 +360,27 @@ pub async fn extract_one(
         }
         Err(e) if e == "__NEEDS_OCR__" => {
             // text_extract 阶段没抽出来 → 走 OCR(也记一条 OCR metric)
+            // 失败时的 backend 标签:云端写主力名(实际可能主备都试过,error_short 里有全程)
             let ocr_backend = if ocr_ctx.cloud_enabled {
-                "mineru-precision"
+                if ocr_ctx.cloud_primary == "paddle-vl" {
+                    "paddle-vl"
+                } else {
+                    "mineru-precision"
+                }
             } else {
                 "local-vision"
             };
             let t_ocr = Instant::now();
             match ocr_fallback(path.to_path_buf(), ocr_ctx.clone()).await {
-                Ok(t) => {
+                Ok((t, used_backend)) => {
                     let chars = t.chars().count() as i64;
                     metrics.push(MetricEntry {
                         filename: filename.into(),
                         ext: ext.clone(),
                         file_size_bytes,
                         stage: "ocr".into(),
-                        backend: ocr_backend.into(),
+                        // 成功时记**实际用到**的后端(主力失败切备用时是备用那家)
+                        backend: used_backend.into(),
                         outcome: "ok".into(),
                         elapsed_ms: t_ocr.elapsed().as_millis() as i64,
                         text_chars: Some(chars),
@@ -505,9 +511,11 @@ fn llm_backend_label(cfg: &llm::LlmConfig) -> String {
 ///
 /// 2026-05-25 V0.1.10 改:`extract_with_ocr` 变成 async(MinerU 切到 HTTP 客户端),
 /// 直接 await 即可。本机 vision sync 调用由 ocr.rs 内部 spawn_blocking 包好。
-async fn ocr_fallback(path: PathBuf, ctx: OcrContext) -> Result<String, String> {
+/// 2026-06-12 改:返回 `(text, backend)` —— 云端有主/备自动切换后,实际用的
+/// 后端可能不是主力,metric 必须记真实那家。
+async fn ocr_fallback(path: PathBuf, ctx: OcrContext) -> Result<(String, &'static str), String> {
     match ocr::extract_with_ocr(&path, &ctx).await {
-        ocr::OcrResult::Ok { text, .. } => Ok(text),
+        ocr::OcrResult::Ok { text, backend, .. } => Ok((text, backend)),
         ocr::OcrResult::Failed { error, attempted } => {
             Err(format!("{}(尝试后端:{})", error, attempted.join(", ")))
         }

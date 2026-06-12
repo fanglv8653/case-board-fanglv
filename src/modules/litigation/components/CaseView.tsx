@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import {
   BookOpen,
   FolderSearch,
@@ -10,7 +10,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
-import { deleteDocument, reextractDocument } from "@/lib/api";
+import { deleteDocument, globalExtractCase, reextractDocument } from "@/lib/api";
 import { confirmDialog } from "@/lib/dialog";
 import { type Case, type Document } from "@/lib/types";
 import { formatRelativeTime, shortenPath } from "@/lib/format";
@@ -134,6 +134,28 @@ export function CaseView({
       onReloadCase();
     } catch (e) {
       toast(`重新抽取失败:${e}`, "error");
+    }
+  };
+
+  // 2026-06-11 · 重新分析(作者反馈:全案分析失败/没跑完后无干净重试入口)。
+  // 只重跑全案 LLM 分析(不重跑 OCR、不烧积分),完成后刷新案件数据。
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const handleReanalyze = async () => {
+    if (!selectedCase || reanalyzing) return;
+    setReanalyzing(true);
+    toast("已开始重新分析全案(通常 1~3 分钟),期间可继续其他操作", "info");
+    try {
+      const r = await globalExtractCase(selectedCase.id);
+      if (r.table_ok) {
+        toast("✓ 全案分析完成,画像已更新", "success");
+        onReloadCase();
+      } else {
+        toast(`全案分析失败:${r.error ?? "未知原因"}`, "error");
+      }
+    } catch (e) {
+      toast(`全案分析失败:${e}`, "error");
+    } finally {
+      setReanalyzing(false);
     }
   };
 
@@ -322,6 +344,8 @@ export function CaseView({
                     onReextract={handleReextract}
                     onRefresh={onRefreshFiles}
                     refreshing={refreshingFiles}
+                    onReanalyze={handleReanalyze}
+                    reanalyzing={reanalyzing}
                   />
                 </div>
               )}

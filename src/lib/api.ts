@@ -11,8 +11,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   Case,
+  CaseInstance,
   CaseWithDocs,
   ExtractedFields,
+  NewCaseInstance,
   ImportPlan,
   ImportResult,
   ScannedDoc,
@@ -121,6 +123,11 @@ export function verifyMinerUKey(token: string): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_mineru_key", { token });
 }
 
+/** 2026-06-12:在线验证 PaddleOCR VL(AI Studio)访问令牌。 */
+export function verifyPaddleVlKey(token: string): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_paddle_vl_key", { token });
+}
+
 /** 2026-05-25 V0.1.6:onboarding 完成时调一次,如果案件表为空就 seed 示例案件。 */
 export function seedDemoCaseIfEmpty(): Promise<boolean> {
   return invoke<boolean>("seed_demo_case_if_empty");
@@ -162,6 +169,91 @@ export function getSettings(): Promise<Settings> {
 /** 写入用户设置(全量覆盖)。 */
 export function saveSettings(payload: Settings): Promise<void> {
   return invoke<void>("save_settings", { payload });
+}
+
+/** 智能粘贴:把平台接入文档复制来的配置文本解析成 MCP server 列表(本地解析,不联网)。 */
+export function parseMcpPaste(text: string): Promise<import("./types").ParsedMcpPaste> {
+  return invoke("parse_mcp_paste", { text });
+}
+
+/** MCP 连接测试:真连一次(握手 + 列工具)。失败 reject 真实原因(401/403 等)。 */
+export function testMcpServer(
+  config: import("./types").McpServerConfig
+): Promise<import("./types").McpTestReport> {
+  return invoke("test_mcp_server", { config });
+}
+
+/* ------------------------------------------------------------------ */
+/* 团队版 Phase 1(LAN 接力同步)                                      */
+/* ------------------------------------------------------------------ */
+
+export function teamStatus(): Promise<import("./types").TeamStatus> {
+  return invoke("team_status");
+}
+
+export function teamCreate(
+  teamName: string,
+  myName: string
+): Promise<import("./types").TeamStatus> {
+  return invoke("team_create", { teamName, myName });
+}
+
+/** 扫描局域网内可加入的团队(约 3 秒)。 */
+export function teamDiscover(): Promise<import("./types").DiscoveredTeam[]> {
+  return invoke("team_discover");
+}
+
+export function teamJoin(
+  teamId: string,
+  code: string,
+  myName: string
+): Promise<import("./types").TeamStatus> {
+  return invoke("team_join", { teamId, code, myName });
+}
+
+export function teamLeave(): Promise<void> {
+  return invoke("team_leave");
+}
+
+export function teamKick(memberId: string): Promise<import("./types").TeamRoster> {
+  return invoke("team_kick", { memberId });
+}
+
+/** 团队长配置成员权限:view=null 表示全队可见;edit=可编辑哪些成员。 */
+export function teamSetPermissions(
+  memberId: string,
+  view: string[] | null,
+  edit: string[]
+): Promise<import("./types").TeamRoster> {
+  return invoke("team_set_permissions", { memberId, view, edit });
+}
+
+export function teamRefreshCode(): Promise<string> {
+  return invoke("team_refresh_code");
+}
+
+export function teamSyncNow(): Promise<import("./types").TeamSyncReport> {
+  return invoke("team_sync_now");
+}
+
+export function teamView(): Promise<import("./types").TeamView> {
+  return invoke("team_view");
+}
+
+/** 提交对队友案件的编辑(需编辑权;接力转交,所有人应用后生效)。field: workflow_status | note。 */
+export function teamSubmitEdit(
+  targetMemberId: string,
+  caseId: string,
+  caseName: string,
+  field: string,
+  value: string
+): Promise<void> {
+  return invoke("team_submit_edit", { targetMemberId, caseId, caseName, field, value });
+}
+
+/** 案件所有人撤销一条已生效的队友改动。 */
+export function teamRevertEdit(editId: string): Promise<void> {
+  return invoke("team_revert_edit", { editId });
 }
 
 /** 检测本机模型 + llama-server 状态(给 onboarding/Settings 用)。 */
@@ -399,6 +491,32 @@ export function listPayments(caseId: string): Promise<Payment[]> {
 
 export function deletePayment(id: string): Promise<number> {
   return invoke<number>("delete_payment", { id });
+}
+
+/* ------------------------------------------------------------------ */
+/* 审级实例(2026-06-11 · case_instances)                             */
+/* ------------------------------------------------------------------ */
+
+export function listCaseInstances(caseId: string): Promise<CaseInstance[]> {
+  return invoke<CaseInstance[]>("list_case_instances", { caseId });
+}
+
+export function addCaseInstance(
+  caseId: string,
+  inst: NewCaseInstance,
+): Promise<CaseInstance> {
+  return invoke<CaseInstance>("add_case_instance", { caseId, new: inst });
+}
+
+export function updateCaseInstance(
+  id: string,
+  inst: NewCaseInstance,
+): Promise<number> {
+  return invoke<number>("update_case_instance", { id, new: inst });
+}
+
+export function deleteCaseInstance(id: string): Promise<number> {
+  return invoke<number>("delete_case_instance", { id });
 }
 
 /** V0.2.2 · 软删一个文档(从材料列表移除,主要给 AI artifact 用)。返回受影响行数。 */
@@ -696,6 +814,14 @@ export interface CourtSmsPreview {
   matched_case_id: string | null;
   matched_case_name: string | null;
   note: string | null;
+  /** 2026-06-11:案号没匹配上时按当事人姓名匹配的候选(命中名多的在前),前端预选第一个让用户确认 */
+  name_matches: CourtSmsNameMatch[];
+}
+
+export interface CourtSmsNameMatch {
+  case_id: string;
+  case_name: string;
+  matched_names: string[];
 }
 
 export interface CourtSmsIngestResult {

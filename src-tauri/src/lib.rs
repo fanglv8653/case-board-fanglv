@@ -13,6 +13,7 @@ pub mod lifecycle;
 pub mod llm;
 pub mod local_kb;
 pub mod settings;
+pub mod team;
 pub mod telemetry;
 pub mod update;
 pub mod verify;
@@ -430,6 +431,12 @@ async fn verify_mineru_key(token: String) -> verify::VerifyResult {
     verify::verify_mineru_key(&token).await
 }
 
+/// 2026-06-12 · 验证 PaddleOCR VL(AI Studio)访问令牌,前端「验证」按钮触发。
+#[tauri::command]
+async fn verify_paddle_vl_key(token: String) -> verify::VerifyResult {
+    verify::verify_paddle_vl_key(&token).await
+}
+
 /// 2026-05-25 V0.1.6 · 验证 DeepSeek API key,前端「验证」按钮触发。
 #[tauri::command]
 async fn verify_deepseek_key(api_key: String, endpoint: Option<String>) -> verify::VerifyResult {
@@ -460,8 +467,14 @@ fn app_version() -> &'static str {
 }
 
 /// 写入用户设置(全量覆盖,前端发来什么就存什么)。
+///
+/// **例外:`team` 字段以磁盘现值为准。** 团队身份只能通过 team_* 命令改(后台直写),
+/// 设置页表单从打开到保存之间团队状态可能已变(建团/退团/被踢),全量覆盖会用打开时的
+/// 旧值把团队身份冲掉/复活 —— 结构上掐死这条路,不依赖前端记得同步镜像。
 #[tauri::command]
 fn save_settings(payload: settings::Settings) -> Result<(), String> {
+    let mut payload = payload;
+    payload.team = settings::read_settings().ok().and_then(|s| s.team);
     settings::write_settings(&payload)
 }
 
@@ -563,6 +576,52 @@ async fn list_payments(
 #[tauri::command]
 async fn delete_payment(pool: tauri::State<'_, SqlitePool>, id: String) -> Result<u64, String> {
     db::payments::delete(pool.inner(), &id)
+        .await
+        .map_err(db_err)
+}
+
+/* ============================================================
+ * 2026-06-11 · 审级实例 (case_instances) commands
+ * ============================================================ */
+
+#[tauri::command]
+async fn list_case_instances(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::case_instances::CaseInstance>, String> {
+    db::case_instances::list_by_case(pool.inner(), &case_id)
+        .await
+        .map_err(db_err)
+}
+
+#[tauri::command]
+async fn add_case_instance(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    new: db::case_instances::NewInstance,
+) -> Result<db::case_instances::CaseInstance, String> {
+    db::case_instances::add_user_instance(pool.inner(), &case_id, &new)
+        .await
+        .map_err(db_err)
+}
+
+#[tauri::command]
+async fn update_case_instance(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+    new: db::case_instances::NewInstance,
+) -> Result<u64, String> {
+    db::case_instances::update_instance(pool.inner(), &id, &new)
+        .await
+        .map_err(db_err)
+}
+
+#[tauri::command]
+async fn delete_case_instance(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, String> {
+    db::case_instances::delete(pool.inner(), &id)
         .await
         .map_err(db_err)
 }
@@ -1085,6 +1144,19 @@ struct CourtSmsPreview {
     matched_case_id: Option<String>,
     matched_case_name: Option<String>,
     note: Option<String>,
+    /// 2026-06-11 反馈修复:案号没匹配上时(典型:短信是执行案号,库里存诉讼案号),
+    /// 按当事人姓名反向匹配的候选案件(命中名多的在前)。前端预选第一个并让用户确认。
+    #[serde(default)]
+    name_matches: Vec<CourtSmsNameMatch>,
+}
+
+/// 按当事人姓名匹配到的候选案件。
+#[derive(serde::Serialize)]
+struct CourtSmsNameMatch {
+    case_id: String,
+    case_name: String,
+    /// 在短信原文里命中的当事人姓名(给用户看"凭什么匹配上")
+    matched_names: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1094,7 +1166,8 @@ struct CourtSmsIngestResult {
     sync: documents_db::SyncStats,
 }
 
-/// 案号归一化后比对 `agg_case_no`,返回首个匹配案件 (id, 展示名)。
+/// 案号归一化后比对 `agg_case_no` **以及 case_instances 全部审级案号**(2026-06-11:
+/// 短信里是一审案号、库里 agg 已是二审时也要能匹配),返回首个匹配案件 (id, 展示名)。
 async fn find_case_by_case_no(
     pool: &SqlitePool,
     case_no: &str,
@@ -1107,15 +1180,78 @@ async fn find_case_by_case_no(
         Ok(c) => c,
         Err(_) => return (None, None),
     };
-    for c in cases {
+    for c in &cases {
         if let Some(no) = &c.agg_case_no {
             if court_sms::normalize_case_no(no) == target {
                 let name = c.agg_cause.clone().unwrap_or_else(|| c.name.clone());
-                return (Some(c.id), Some(name));
+                return (Some(c.id.clone()), Some(name));
+            }
+        }
+    }
+    // 审级表兜底:任何审级的案号命中都算(仲裁案号/一审案号/二审案号)
+    let inst_rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT case_id, case_no FROM case_instances WHERE case_no IS NOT NULL")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    for (cid, no) in inst_rows {
+        if court_sms::normalize_case_no(&no) == target {
+            if let Some(c) = cases.iter().find(|c| c.id == cid) {
+                let name = c.agg_cause.clone().unwrap_or_else(|| c.name.clone());
+                return (Some(cid), Some(name));
             }
         }
     }
     (None, None)
+}
+
+/// 2026-06-11 反馈修复:按**当事人姓名**反向匹配案件 —— 拿每个案件的当事人名
+/// (agg_plaintiffs / agg_defendants / agg_party_contacts)去短信原文里做包含检查。
+/// 典型场景:执行立案短信只有执行案号「(2026)苏0205执2376号」,库里存的是诉讼案号,
+/// 案号匹配必失败;但短信里有「张三、李四」当事人名,反向包含即可命中。
+/// 返回按命中名数量降序的候选(全部返回,由前端预选第一个 + 用户确认)。
+fn find_cases_by_party_names(cases: &[cases_db::Case], sms_text: &str) -> Vec<CourtSmsNameMatch> {
+    let parse_names = |json: &Option<String>| -> Vec<String> {
+        let Some(s) = json else { return vec![] };
+        serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
+    };
+    let mut out: Vec<CourtSmsNameMatch> = Vec::new();
+    for c in cases {
+        // 示例案件不参与匹配(张三/李四撞名真实短信会闹笑话)
+        if c.source_folder == "__DEMO__" {
+            continue;
+        }
+        let mut names: Vec<String> = vec![];
+        names.extend(parse_names(&c.agg_plaintiffs));
+        names.extend(parse_names(&c.agg_defendants));
+        // party_contacts JSON: [{name,role,...}]
+        if let Some(s) = &c.agg_party_contacts {
+            if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str(s) {
+                for item in arr {
+                    if let Some(n) = item.get("name").and_then(|v| v.as_str()) {
+                        names.push(n.to_string());
+                    }
+                }
+            }
+        }
+        let mut matched: Vec<String> = names
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| n.chars().count() >= 2 && sms_text.contains(n.as_str()))
+            .collect();
+        matched.sort();
+        matched.dedup();
+        if !matched.is_empty() {
+            out.push(CourtSmsNameMatch {
+                case_id: c.id.clone(),
+                case_name: c.agg_cause.clone().unwrap_or_else(|| c.name.clone()),
+                matched_names: matched,
+            });
+        }
+    }
+    // 命中名多的在前(两个名都中的比只中一个的可信)
+    out.sort_by_key(|m| std::cmp::Reverse(m.matched_names.len()));
+    out
 }
 
 fn sanitize_filename(s: &str) -> String {
@@ -1170,6 +1306,7 @@ async fn preview_court_sms(
                  目前只支持一张网;其它平台(江苏微解纷等)暂不支持自动下载。"
                     .into(),
             ),
+            name_matches: vec![],
         });
     };
     let docs = court_sms::fetch_zxfw_doc_list(&link).await?;
@@ -1184,10 +1321,24 @@ async fn preview_court_sms(
             ext: d.ext.clone(),
         })
         .collect();
-    let note = if matched_id.is_none() {
-        Some("没自动匹配到在办案件,请手动选择要归档到哪个案件。".into())
+    // 案号没匹配上 → 按当事人姓名反向匹配(短信是执行案号时的兜底)
+    let name_matches = if matched_id.is_none() {
+        match cases_db::list_cases(pool.inner()).await {
+            Ok(cases) => find_cases_by_party_names(&cases, &sms_text),
+            Err(_) => vec![],
+        }
     } else {
+        vec![]
+    };
+    let note = if matched_id.is_some() {
         None
+    } else if !name_matches.is_empty() {
+        Some(format!(
+            "案号没直接匹配上,按当事人姓名「{}」匹配到候选案件,请确认是不是下面选中的案件。",
+            name_matches[0].matched_names.join("、")
+        ))
+    } else {
+        Some("没自动匹配到在办案件,请手动选择要归档到哪个案件。".into())
     };
     Ok(CourtSmsPreview {
         court: parsed
@@ -1200,6 +1351,7 @@ async fn preview_court_sms(
         matched_case_id: matched_id,
         matched_case_name: matched_name,
         note,
+        name_matches,
     })
 }
 
@@ -1373,6 +1525,458 @@ async fn clear_chat_history(
     case_id: String,
 ) -> Result<u64, String> {
     chat::clear_chat_history_impl(pool.inner(), &case_id).await
+}
+
+// ============================================================================
+// MCP 数据源接入(智能粘贴识别 + 连接测试)
+// ============================================================================
+
+/// 智能粘贴:把平台「接入指南」复制来的配置文本解析成 MCP server 列表。
+/// 纯本地确定性解析(JSON / claude mcp add 命令行),不联网、不调 LLM。
+#[tauri::command]
+fn parse_mcp_paste(text: String) -> Result<chat::mcp_paste::ParsedPaste, String> {
+    chat::mcp_paste::parse_pasted_config(&text)
+}
+
+/// MCP 连接测试结果(给设置页「测试连接」按钮)。
+#[derive(serde::Serialize)]
+struct McpTestReport {
+    tool_count: usize,
+    /// 前若干个工具名(给用户确认接对了;不全量,防几十个工具刷屏)。
+    tool_names: Vec<String>,
+}
+
+/// 连接测试:真连一次 server(initialize 握手 + tools/list),返回工具清单。
+/// 失败透传真实原因(401=令牌不对/过期、403=服务未购买等,已知坑 #8)。
+#[tauri::command]
+async fn test_mcp_server(
+    config: chat::mcp_bridge::McpServerConfig,
+) -> Result<McpTestReport, String> {
+    config.validate()?;
+    let client = chat::mcp_bridge::McpClient::connect(&config).await?;
+    let tools = client.list_tools().await?;
+    Ok(McpTestReport {
+        tool_count: tools.len(),
+        tool_names: tools.iter().take(8).map(|t| t.name.clone()).collect(),
+    })
+}
+
+// ============================================================================
+// 团队版 Phase 1(LAN 接力同步,docs/提案-团队版-2026-06-10.md §6)
+// ============================================================================
+
+/// 团队网络运行时句柄(监听+广播+周期同步),随团队配置启停。
+pub struct TeamNetState(tokio::sync::Mutex<Option<team::net::TeamNet>>);
+
+impl Default for TeamNetState {
+    fn default() -> Self {
+        Self(tokio::sync::Mutex::new(None))
+    }
+}
+
+/// 按当前 settings.team 重启团队网络(入团→启动;退团→停止)。
+async fn team_net_restart(pool: &SqlitePool, state: &TeamNetState) -> Result<(), String> {
+    let mut guard = state.0.lock().await;
+    if let Some(old) = guard.take() {
+        old.shutdown();
+    }
+    if settings::read_settings()?.team.is_some() {
+        *guard = Some(team::net::start(pool.clone()).await?);
+    }
+    Ok(())
+}
+
+/// 清掉本机团队身份与数据(退出/解散/被踢共用)。
+async fn team_clear_local(pool: &SqlitePool, state: &TeamNetState) -> Result<(), String> {
+    let mut guard = state.0.lock().await;
+    if let Some(old) = guard.take() {
+        old.shutdown();
+    }
+    drop(guard);
+    team::store::clear_team_data(pool).await?;
+    let mut s = settings::read_settings()?;
+    s.team = None;
+    settings::write_settings(&s)?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct TeamStatusDto {
+    in_team: bool,
+    /// 被踢出的团队名(一次性提示;返回即已自动清理本机团队配置)。
+    kicked_from: Option<String>,
+    identity: Option<team::TeamIdentity>,
+    roster: Option<team::Roster>,
+}
+
+/// 团队状态(设置页团队卡数据源)。顺带处理「被踢」:发现自己不在名单 → 自动清理并告知。
+#[tauri::command]
+async fn team_status(
+    pool: tauri::State<'_, SqlitePool>,
+    state: tauri::State<'_, TeamNetState>,
+) -> Result<TeamStatusDto, String> {
+    let Some(identity) = settings::read_settings()?.team else {
+        return Ok(TeamStatusDto {
+            in_team: false,
+            kicked_from: None,
+            identity: None,
+            roster: None,
+        });
+    };
+    let roster = match team::store::load_signed_roster(pool.inner()).await? {
+        Some(sr) => sr.verify(&identity.team_secret).ok(),
+        None => None,
+    };
+    // 被踢检测:同步时留的通知,或当前名单里已没有我(团队长除外)
+    let kicked_notice = team::store::take_kicked_notice(pool.inner()).await?;
+    let not_in_roster = roster
+        .as_ref()
+        .is_some_and(|r| r.find(&identity.member_id).is_none());
+    if !identity.is_leader() && (kicked_notice.is_some() || not_in_roster) {
+        let team_name = kicked_notice.unwrap_or_else(|| identity.team_name.clone());
+        team_clear_local(pool.inner(), state.inner()).await?;
+        return Ok(TeamStatusDto {
+            in_team: false,
+            kicked_from: Some(team_name),
+            identity: None,
+            roster: None,
+        });
+    }
+    Ok(TeamStatusDto {
+        in_team: true,
+        kicked_from: None,
+        identity: Some(identity),
+        roster,
+    })
+}
+
+/// 创建团队(我成为团队长):生成密钥/配对码,roster 只有我,启动网络。
+#[tauri::command]
+async fn team_create(
+    pool: tauri::State<'_, SqlitePool>,
+    state: tauri::State<'_, TeamNetState>,
+    team_name: String,
+    my_name: String,
+) -> Result<TeamStatusDto, String> {
+    let team_name = team_name.trim().to_string();
+    let my_name = my_name.trim().to_string();
+    if team_name.is_empty() || my_name.is_empty() {
+        return Err("团队名和你的姓名都不能为空".into());
+    }
+    let mut settings = settings::read_settings()?;
+    if settings.team.is_some() {
+        return Err("已在团队中,请先退出当前团队".into());
+    }
+    let identity = team::TeamIdentity {
+        team_id: uuid::Uuid::new_v4().to_string(),
+        team_name: team_name.clone(),
+        team_secret: team::gen_secret(),
+        member_id: uuid::Uuid::new_v4().to_string(),
+        my_name: my_name.clone(),
+        role: "leader".into(),
+        pairing_code: Some(team::gen_pairing_code()),
+    };
+    let roster = team::Roster {
+        team_id: identity.team_id.clone(),
+        team_name,
+        seq: 1,
+        members: vec![team::RosterMember {
+            member_id: identity.member_id.clone(),
+            name: my_name,
+            role: "leader".into(),
+            view: None,
+            edit: vec![],
+        }],
+        updated_at: chrono::Local::now().to_rfc3339(),
+    };
+    let signed = team::SignedRoster::sign(&roster, &identity.team_secret)?;
+    team::store::save_signed_roster(pool.inner(), &signed).await?;
+    settings.team = Some(identity.clone());
+    settings::write_settings(&settings)?;
+    team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
+    team_net_restart(pool.inner(), state.inner()).await?;
+    Ok(TeamStatusDto {
+        in_team: true,
+        kicked_from: None,
+        identity: Some(identity),
+        roster: Some(roster),
+    })
+}
+
+/// 扫描局域网内可加入的团队(约 3 秒)。
+#[tauri::command]
+async fn team_discover() -> Result<Vec<team::net::DiscoveredTeam>, String> {
+    team::net::discover_teams().await
+}
+
+/// 加入团队(需团队长在线 + 配对码),成功即启动网络并跑一轮同步。
+#[tauri::command]
+async fn team_join(
+    pool: tauri::State<'_, SqlitePool>,
+    state: tauri::State<'_, TeamNetState>,
+    team_id: String,
+    code: String,
+    my_name: String,
+) -> Result<TeamStatusDto, String> {
+    if my_name.trim().is_empty() {
+        return Err("请先填你的姓名(团队里显示用)".into());
+    }
+    if settings::read_settings()?.team.is_some() {
+        return Err("已在团队中,请先退出当前团队".into());
+    }
+    team::net::join_team(pool.inner(), &team_id, &code, &my_name).await?;
+    team_net_restart(pool.inner(), state.inner()).await?;
+    // 入队后立即拉一轮(拿到全队现状);失败不拦断,周期同步会补
+    let _ = team::net::sync_round(pool.inner()).await;
+    team_status(pool, state).await
+}
+
+/// 退出团队(成员)/ 解散团队(团队长)。
+/// 团队长解散 = 先签发"空名单"墓碑并尽力广播给**当前在场**的成员(他们收到即走被踢
+/// 流程自动清理);不在局域网的成员收不到墓碑,只能回所后从在场队友处接力收到,
+/// 或自己手动「退出团队」—— 无服务器架构的诚实边界。最后清本机。
+#[tauri::command]
+async fn team_leave(
+    pool: tauri::State<'_, SqlitePool>,
+    state: tauri::State<'_, TeamNetState>,
+) -> Result<(), String> {
+    if let Some(identity) = settings::read_settings()?.team {
+        if identity.is_leader() {
+            let ok = team::net::mutate_roster(pool.inner(), &identity, |r| {
+                r.members.clear();
+            })
+            .await
+            .is_ok();
+            if ok {
+                // 尽力广播(等几秒值得:在场成员当场收到当场清);失败不拦断解散
+                let _ = team::net::sync_round(pool.inner()).await;
+            }
+        }
+    }
+    team_clear_local(pool.inner(), state.inner()).await
+}
+
+/// 团队长移出成员:roster 删人 seq+1,随同步下发;被踢成员 App 端自动清理。
+#[tauri::command]
+async fn team_kick(
+    pool: tauri::State<'_, SqlitePool>,
+    member_id: String,
+) -> Result<team::Roster, String> {
+    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    if member_id == identity.member_id {
+        return Err("不能移出自己(要散伙请用「退出团队」)".into());
+    }
+    let signed = team::net::mutate_roster(pool.inner(), &identity, |r| {
+        r.members.retain(|m| m.member_id != member_id);
+    })
+    .await?;
+    // 尽快把新名单传出去(后台跑,不阻塞 UI)
+    let p = pool.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = team::net::sync_round(&p).await;
+    });
+    signed.verify(&identity.team_secret)
+}
+
+/// 团队长配置某成员权限:可见范围(null=全队)+ 可编辑哪些人(Phase 1 配置下发,动作 1.5)。
+#[tauri::command]
+async fn team_set_permissions(
+    pool: tauri::State<'_, SqlitePool>,
+    member_id: String,
+    view: Option<Vec<String>>,
+    edit: Vec<String>,
+) -> Result<team::Roster, String> {
+    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    let signed = team::net::mutate_roster(pool.inner(), &identity, |r| {
+        if let Some(m) = r.members.iter_mut().find(|m| m.member_id == member_id) {
+            m.view = view;
+            m.edit = edit;
+        }
+    })
+    .await?;
+    let p = pool.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = team::net::sync_round(&p).await;
+    });
+    signed.verify(&identity.team_secret)
+}
+
+/// 团队长刷新配对码(旧码立即作废)。
+#[tauri::command]
+fn team_refresh_code() -> Result<String, String> {
+    let mut settings = settings::read_settings()?;
+    let Some(identity) = settings.team.as_mut() else {
+        return Err("未加入团队".into());
+    };
+    if !identity.is_leader() {
+        return Err("仅团队长有配对码".into());
+    }
+    let code = team::gen_pairing_code();
+    identity.pairing_code = Some(code.clone());
+    settings::write_settings(&settings)?;
+    Ok(code)
+}
+
+/// 立即同步(老板说的"发信号"):扫描在场队友并互换。
+#[tauri::command]
+async fn team_sync_now(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<team::net::SyncReport, String> {
+    team::net::sync_round(pool.inner()).await
+}
+
+#[derive(Serialize)]
+struct TeamMemberViewDto {
+    member_id: String,
+    name: String,
+    role: String,
+    is_me: bool,
+    /// 我对他有无编辑权(Phase 1 仅驱动按钮占位显示)。
+    can_edit: bool,
+    /// 还没收到过他的快照时为 None。
+    updated_at: Option<String>,
+    cases: Vec<team::SnapshotCase>,
+}
+
+#[derive(Serialize)]
+struct TeamViewDto {
+    team_name: String,
+    my_member_id: String,
+    my_role: String,
+    members: Vec<TeamMemberViewDto>,
+    /// 编辑请求/改动记录(备注展示、待生效标记、所有人撤销列表共用这一份)。
+    edits: Vec<team::TeamEdit>,
+}
+
+/// 团队看板数据:按 roster 顺序(团队长在前),**按我的可见权限过滤后**返回。
+#[tauri::command]
+async fn team_view(pool: tauri::State<'_, SqlitePool>) -> Result<TeamViewDto, String> {
+    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    // 自己的快照现重建,保证看板里"我"永远是最新的
+    team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
+    let roster = match team::store::load_signed_roster(pool.inner()).await? {
+        Some(sr) => sr.verify(&identity.team_secret)?,
+        None => return Err("本地没有团队名单(数据异常,请退出后重新加入)".into()),
+    };
+    let snapshots = team::store::load_all_snapshots(pool.inner()).await?;
+    let snap_of = |mid: &str| snapshots.iter().find(|s| s.member_id == mid);
+
+    let mut members: Vec<&team::RosterMember> = roster.members.iter().collect();
+    members.sort_by_key(|m| (m.role != "leader", m.name.clone()));
+
+    let me = &identity.member_id;
+    let mut out = Vec::new();
+    for m in members {
+        if !roster.can_view(me, &m.member_id) {
+            continue; // 权限过滤 = 默认不显示(老板拍板口径)
+        }
+        let snap = snap_of(&m.member_id);
+        let cases = snap
+            .and_then(|s| serde_json::from_str::<team::SnapshotPayload>(&s.payload).ok())
+            .map(|p| p.cases)
+            .unwrap_or_default();
+        out.push(TeamMemberViewDto {
+            member_id: m.member_id.clone(),
+            name: m.name.clone(),
+            role: m.role.clone(),
+            is_me: &m.member_id == me,
+            can_edit: roster.can_edit(me, &m.member_id) && &m.member_id != me,
+            updated_at: snap.map(|s| s.updated_at.clone()),
+            cases,
+        });
+    }
+    // 改动记录:只给「我能看到的目标」或「我自己发起的」(同可见权限口径)
+    let edits = team::store::load_recent_edits(pool.inner())
+        .await?
+        .into_iter()
+        .filter(|e| e.editor_id == identity.member_id || roster.can_view(me, &e.target_member_id))
+        .collect();
+    Ok(TeamViewDto {
+        team_name: roster.team_name.clone(),
+        my_member_id: identity.member_id.clone(),
+        my_role: identity.role.clone(),
+        members: out,
+        edits,
+    })
+}
+
+/// 提交一条对队友案件的编辑请求(需有编辑权;经接力转交,所有人应用后生效)。
+#[tauri::command]
+async fn team_submit_edit(
+    pool: tauri::State<'_, SqlitePool>,
+    target_member_id: String,
+    case_id: String,
+    case_name: String,
+    field: String,
+    value: String,
+) -> Result<(), String> {
+    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    if !team::EDITABLE_FIELDS.contains(&field.as_str()) {
+        return Err("只允许改案件登记层字段(状态/备注)".into());
+    }
+    let value = value.trim().to_string();
+    if value.is_empty() || value.chars().count() > 500 {
+        return Err("内容不能为空且不超过 500 字".into());
+    }
+    let roster = match team::store::load_signed_roster(pool.inner()).await? {
+        Some(sr) => sr.verify(&identity.team_secret)?,
+        None => return Err("本地没有团队名单".into()),
+    };
+    // 备注 = 可见即可写(老板拍板);改状态才要编辑权
+    let allowed = match field.as_str() {
+        "note" => roster.can_view(&identity.member_id, &target_member_id),
+        _ => roster.can_edit(&identity.member_id, &target_member_id),
+    };
+    if !allowed {
+        return Err("你没有编辑这位成员案件的权限(找团队长开)".into());
+    }
+    let edit = team::TeamEdit {
+        id: uuid::Uuid::new_v4().to_string(),
+        team_id: identity.team_id.clone(),
+        editor_id: identity.member_id.clone(),
+        editor_name: identity.my_name.clone(),
+        target_member_id,
+        case_id,
+        case_name,
+        field,
+        value,
+        prev_value: None,
+        status: "pending".into(),
+        created_at: chrono::Local::now().to_rfc3339(),
+        applied_at: None,
+    };
+    let self_target = edit.target_member_id == identity.member_id;
+    team::store::insert_pending_edit(pool.inner(), &edit).await?;
+    if self_target {
+        // 给自己案件留备注/改状态:立即应用,不等下一轮接力
+        let applied = team::store::apply_my_pending_edits(pool.inner(), &identity, &roster).await?;
+        if applied > 0 {
+            team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
+        }
+    }
+    // 尽快送出去(后台跑;对方不在线就等下一轮接力)
+    let p = pool.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = team::net::sync_round(&p).await;
+    });
+    Ok(())
+}
+
+/// 案件所有人撤销一条已生效的队友改动(状态恢复原值/备注隐藏)。
+#[tauri::command]
+async fn team_revert_edit(
+    pool: tauri::State<'_, SqlitePool>,
+    edit_id: String,
+) -> Result<(), String> {
+    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    team::store::revert_edit(pool.inner(), &identity, &edit_id).await?;
+    // 撤销后重建快照 + 传播
+    team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
+    let p = pool.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = team::net::sync_round(&p).await;
+    });
+    Ok(())
 }
 
 // ============================================================================
@@ -1831,9 +2435,27 @@ pub fn run() {
                 });
             }
 
+            // 团队版:已配置团队 → 后台启动监听+广播+周期同步(失败只记日志不阻启动)
+            let team_pool = pool.clone();
             app.manage(pool);
             // chat 模块全局 cancel 注册表(V0.1.13+)
             app.manage(chat::ChatCancelRegistry::default());
+            app.manage(TeamNetState::default());
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let has_team = settings::read_settings()
+                        .ok()
+                        .and_then(|s| s.team)
+                        .is_some();
+                    if has_team {
+                        let state = app_handle.state::<TeamNetState>();
+                        if let Err(e) = team_net_restart(&team_pool, state.inner()).await {
+                            crate::dlog!("[startup] 团队网络启动失败: {e}");
+                        }
+                    }
+                });
+            }
             // 匿名使用遥测(只在编译期注入了 key 的 release 构建启用;dev/test 静默)。
             // fire-and-forget,失败不影响启动。
             telemetry::start();
@@ -1880,6 +2502,10 @@ pub fn run() {
             add_payment,
             list_payments,
             delete_payment,
+            list_case_instances,
+            add_case_instance,
+            update_case_instance,
+            delete_case_instance,
             delete_document,
             reextract_document,
             export_report_html,
@@ -1899,6 +2525,7 @@ pub fn run() {
             save_feedback_md,
             send_feedback_email,
             verify_mineru_key,
+            verify_paddle_vl_key,
             verify_deepseek_key,
             verify_yuandian_key,
             check_for_update,
@@ -1913,6 +2540,22 @@ pub fn run() {
             list_chat_history,
             cancel_chat,
             clear_chat_history,
+            // MCP 数据源接入(粘贴识别 + 连接测试)
+            parse_mcp_paste,
+            test_mcp_server,
+            // 团队版 Phase 1(LAN 接力同步)
+            team_status,
+            team_create,
+            team_discover,
+            team_join,
+            team_leave,
+            team_kick,
+            team_set_permissions,
+            team_refresh_code,
+            team_sync_now,
+            team_view,
+            team_submit_edit,
+            team_revert_edit,
             // V0.2 D7 · 本地知识库 + 元典积分
             detect_kb_status,
             create_local_kb,

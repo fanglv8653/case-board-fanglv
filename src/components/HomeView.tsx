@@ -345,6 +345,32 @@ function CaseCard({
   const judges = parseJsonArray(caseData.agg_judges);
   const isClosed = status.id === "closed";
 
+  // 2026-06-11 反馈修复:详情页编辑模式手改的平字段(user_overrides_json overlay)
+  // 此前只在详情页渲染层生效,首页卡读裸 agg_* → 用户"手动修改了,首页没跟着调整"。
+  // 这里把首页卡展示的平字段 overlay 叠上(undefined=没改用 LLM 值,null=用户清空)。
+  const ovFields: Record<string, string | null> = (() => {
+    if (!caseData.user_overrides_json) return {};
+    try {
+      const parsed = JSON.parse(caseData.user_overrides_json) as {
+        fields?: Record<string, string | null>;
+      };
+      return parsed.fields ?? {};
+    } catch {
+      return {};
+    }
+  })();
+  const ovStr = (path: string, base: string | null): string | null =>
+    path in ovFields ? ovFields[path] : base;
+  const displayCaseNo = ovStr("agg_case_no", caseData.agg_case_no);
+  const displayCourt = ovStr("agg_court", caseData.agg_court);
+  const displayCause = ovStr("agg_cause", caseData.agg_cause);
+  const displayClaimAmount = (() => {
+    const ov = ovFields["agg_claim_amount"];
+    if (ov === undefined) return caseData.agg_claim_amount;
+    const n = ov != null ? parseFloat(ov) : NaN;
+    return Number.isFinite(n) ? n : null;
+  })();
+
   // 当事人对峙简写
   const partySummary = (() => {
     const left = plaintiffs[0] || "—";
@@ -354,9 +380,7 @@ function CaseCard({
     return `${left}${leftMore} vs ${right}${rightMore}`;
   })();
 
-  const amountText = caseData.agg_claim_amount
-    ? formatYuan(caseData.agg_claim_amount)
-    : null;
+  const amountText = displayClaimAmount ? formatYuan(displayClaimAmount) : null;
 
   return (
     <div
@@ -374,7 +398,7 @@ function CaseCard({
       }}
       role="button"
       tabIndex={0}
-      aria-label={`打开案件 ${caseData.agg_cause || caseData.name}`}
+      aria-label={`打开案件 ${displayCause || caseData.name}`}
     >
       {/* 左上角拖把手 — hover 才显色;按住才能拖,点卡片其他位置正常打开案件 */}
       {dragHandleProps && (
@@ -405,17 +429,23 @@ function CaseCard({
             📌 示例
           </span>
         )}
-        {caseData.agg_cause || caseData.name}
+        {displayCause || caseData.name}
       </h3>
 
       {/* 当事人 */}
       <p className="mt-1 text-sm text-muted-foreground">{partySummary}</p>
 
-      {/* 详细字段(2 列) */}
+      {/* 详细字段(2 列)。机关/承办人 label 随 agg_court_type 动态(2026-06-11 审级模型:仲裁案件不再写死"法院") */}
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-        <Item label="案号" value={caseData.agg_case_no} mono />
-        <Item label="法院" value={caseData.agg_court} />
-        <Item label="承办法官" value={judges.length > 0 ? judges.join("、") : null} />
+        <Item label="案号" value={displayCaseNo} mono />
+        <Item
+          label={caseData.agg_court_type === "仲裁委" ? "仲裁委" : "法院"}
+          value={displayCourt}
+        />
+        <Item
+          label={caseData.agg_court_type === "仲裁委" ? "仲裁员" : "承办法官"}
+          value={judges.length > 0 ? judges.join("、") : null}
+        />
         <Item label="诉讼金额" value={amountText} mono highlight />
       </dl>
 

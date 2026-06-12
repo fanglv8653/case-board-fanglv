@@ -31,6 +31,8 @@ export function SourceFilesSection({
   onReextract,
   onRefresh,
   refreshing,
+  onReanalyze,
+  reanalyzing,
 }: {
   total: number;
   aiArtifacts: Document[];
@@ -42,6 +44,9 @@ export function SourceFilesSection({
   onReextract: (doc: Document) => void;
   onRefresh: () => void;
   refreshing: boolean;
+  /** 2026-06-11 · 重新分析:只重跑全案 LLM 分析(不重跑 OCR),分析失败后的重试入口 */
+  onReanalyze: () => void;
+  reanalyzing: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const toggle = () => setExpanded((v) => !v);
@@ -76,6 +81,22 @@ export function SourceFilesSection({
           </span>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onReanalyze();
+            }}
+            disabled={reanalyzing}
+            title="重新跑全案 AI 分析(更新画像/报告;不重跑 OCR、不烧积分)— 分析失败或没更新时用这个"
+            className={cn(
+              "inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1 text-xs text-foreground transition-colors hover:bg-muted",
+              reanalyzing && "cursor-wait opacity-60",
+            )}
+          >
+            <Sparkles className={cn("size-3", reanalyzing && "animate-pulse")} />
+            {reanalyzing ? "分析中…" : "重新分析"}
+          </button>
           <button
             type="button"
             onClick={(e) => {

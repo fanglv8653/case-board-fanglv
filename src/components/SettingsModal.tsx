@@ -33,9 +33,12 @@ import {
   pruneYuandianCache,
   openInDefaultApp,
   openUrl,
+  parseMcpPaste,
   saveSettings,
+  testMcpServer,
   verifyDeepSeekKey,
   verifyMinerUKey,
+  verifyPaddleVlKey,
   verifyEmbeddingKey,
   verifyYuandianKey,
   type KbConflictStrategy,
@@ -94,6 +97,9 @@ export function SettingsModal({
   // 2026-05-25 V0.1.6 · token 在线验证状态
   const [mineruStatus, setMineruStatus] = useState<VerifyStatus>("idle");
   const [mineruMsg, setMineruMsg] = useState<string>("");
+  // 2026-06-12 · PaddleOCR VL(AI Studio)访问令牌验证状态
+  const [paddleStatus, setPaddleStatus] = useState<VerifyStatus>("idle");
+  const [paddleMsg, setPaddleMsg] = useState<string>("");
   const [deepseekStatus, setDeepseekStatus] = useState<VerifyStatus>("idle");
   const [deepseekMsg, setDeepseekMsg] = useState<string>("");
   // 2026-05-25 V0.1.8 · 元典 API key 在线验证状态
@@ -108,6 +114,9 @@ export function SettingsModal({
     if (settings.mineru_verified_at && mineruStatus === "idle") {
       setMineruStatus("ok");
     }
+    if (settings.paddle_vl_verified_at && paddleStatus === "idle") {
+      setPaddleStatus("ok");
+    }
     if (settings.deepseek_verified_at && deepseekStatus === "idle") {
       setDeepseekStatus("ok");
     }
@@ -121,6 +130,7 @@ export function SettingsModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     settings?.mineru_verified_at,
+    settings?.paddle_vl_verified_at,
     settings?.deepseek_verified_at,
     settings?.yuandian_verified_at,
   ]);
@@ -148,6 +158,32 @@ export function SettingsModal({
       setMineruStatus("fail");
       setMineruMsg(String(e));
       updateField("mineru_verified_at", null);
+    }
+  }
+
+  async function handleVerifyPaddle() {
+    if (!settings?.paddle_vl_api_key?.trim()) {
+      setPaddleStatus("fail");
+      setPaddleMsg("请先填入访问令牌");
+      return;
+    }
+    setPaddleStatus("verifying");
+    setPaddleMsg("");
+    try {
+      const r = await verifyPaddleVlKey(settings.paddle_vl_api_key);
+      if (r.ok) {
+        setPaddleStatus("ok");
+        setPaddleMsg("");
+        updateField("paddle_vl_verified_at", new Date().toISOString());
+      } else {
+        setPaddleStatus("fail");
+        setPaddleMsg(r.message);
+        updateField("paddle_vl_verified_at", null);
+      }
+    } catch (e) {
+      setPaddleStatus("fail");
+      setPaddleMsg(String(e));
+      updateField("paddle_vl_verified_at", null);
     }
   }
 
@@ -420,6 +456,106 @@ export function SettingsModal({
                     </Field>
                   </Section>
 
+                  {/* 2026-06-12:PaddleOCR VL-1.6(AI Studio)。填了 key 即自动成为
+                      MinerU 的备用(失败/超时/额度用完自动切换);也可切为主力。
+                      实测:精度与 MinerU 打平,速度约快一倍,免费 2 万页/天(MinerU 1 千页/天);
+                      单文件 >100 页会自动落回 MinerU。 */}
+                  <Section
+                    title="PaddleOCR(云端 OCR 备用)"
+                    link={{
+                      label: "点这里申请访问令牌",
+                      href: "https://aistudio.baidu.com/account/accessToken",
+                    }}
+                  >
+                    <Field
+                      label="访问令牌"
+                      hint="选填。填了即自动成为 MinerU 的备用线路;免费额度 2 万页/天"
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="password"
+                          value={settings.paddle_vl_api_key ?? ""}
+                          onChange={(e) => {
+                            updateField(
+                              "paddle_vl_api_key",
+                              e.target.value || null,
+                            );
+                            // 改 token 就重置验证状态;清空 token 时主力退回 MinerU
+                            if (paddleStatus !== "idle") {
+                              setPaddleStatus("idle");
+                              setPaddleMsg("");
+                              updateField("paddle_vl_verified_at", null);
+                            }
+                            if (!e.target.value) {
+                              updateField("ocr_cloud_primary", null);
+                            }
+                          }}
+                          placeholder="AI Studio 访问令牌"
+                          className={cn(inputCls, "flex-1")}
+                          autoComplete="off"
+                        />
+                        <VerifyStatusIcon status={paddleStatus} />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="disabled:cursor-not-allowed"
+                          onClick={handleVerifyPaddle}
+                          disabled={
+                            paddleStatus === "verifying" ||
+                            !settings.paddle_vl_api_key?.trim()
+                          }
+                        >
+                          {paddleStatus === "verifying" ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            "验证"
+                          )}
+                        </Button>
+                      </div>
+                      {paddleStatus === "fail" && paddleMsg && (
+                        <p className="mt-1.5 text-xs text-red-600">
+                          ✗ {paddleMsg}
+                        </p>
+                      )}
+                      {paddleStatus === "ok" && (
+                        <p className="mt-1.5 text-xs text-green-700">
+                          ✓ 已验证通过,可以使用
+                        </p>
+                      )}
+                    </Field>
+                    {settings.paddle_vl_api_key?.trim() && (
+                      <Field
+                        label="云端 OCR 主力"
+                        hint="主力失败、排队超时或额度用完时,自动切换到另一家;无需手动干预"
+                      >
+                        <select
+                          value={
+                            settings.ocr_cloud_primary === "paddle-vl"
+                              ? "paddle-vl"
+                              : "mineru"
+                          }
+                          onChange={(e) =>
+                            updateField(
+                              "ocr_cloud_primary",
+                              e.target.value === "paddle-vl"
+                                ? "paddle-vl"
+                                : null,
+                            )
+                          }
+                          className={inputCls}
+                        >
+                          <option value="mineru">
+                            MinerU 主力,PaddleOCR 备用(默认)
+                          </option>
+                          <option value="paddle-vl">
+                            PaddleOCR 主力,MinerU 备用(更快、额度更高)
+                          </option>
+                        </select>
+                      </Field>
+                    )}
+                  </Section>
+
                   <Section
                     title="DeepSeek"
                     link={{
@@ -683,6 +819,7 @@ export function SettingsModal({
                 onChange={(next) => updateField("mcp_servers", next)}
               />
 
+
               {/* 错误展示 */}
               {error && (
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 lg:col-span-2">
@@ -921,7 +1058,20 @@ function McpServersCard({
   function patchRow(id: string, cfg: McpServerConfig) {
     commit(rows.map((r) => (r.id === id ? { ...r, cfg } : r)));
   }
-  function addServer() {
+  function addHttpServer() {
+    commit([
+      ...rows,
+      {
+        id: nextMcpRowId(),
+        cfg: {
+          name: "",
+          transport: { type: "http", url: "", headers: {} },
+          enabled: true,
+        },
+      },
+    ]);
+  }
+  function addStdioServer() {
     commit([
       ...rows,
       {
@@ -938,6 +1088,35 @@ function McpServersCard({
     commit(rows.filter((r) => r.id !== id));
   }
 
+  // ---- 智能粘贴识别(把平台接入文档的配置整段粘进来,自动拆成 server)----
+  const [pasteText, setPasteText] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteMsg, setPasteMsg] = useState<{ kind: "ok" | "warn" | "err"; lines: string[] } | null>(
+    null,
+  );
+  async function recognizePaste() {
+    if (!pasteText.trim() || pasteBusy) return;
+    setPasteBusy(true);
+    setPasteMsg(null);
+    try {
+      const r = await parseMcpPaste(pasteText);
+      const existing = new Set(rows.map((x) => x.cfg.name));
+      const fresh = r.servers.filter((s) => !existing.has(s.name));
+      const skipped = r.servers.length - fresh.length;
+      commit([...rows, ...fresh.map((cfg) => ({ id: nextMcpRowId(), cfg }))]);
+      setPasteText("");
+      const lines = [
+        `已识别 ${r.servers.length} 个 server${skipped > 0 ? `(${skipped} 个同名已存在,跳过)` : ""}，请逐个点「测试连接」确认能用。`,
+        ...r.warnings,
+      ];
+      setPasteMsg({ kind: r.warnings.length > 0 ? "warn" : "ok", lines });
+    } catch (e) {
+      setPasteMsg({ kind: "err", lines: [String(e)] });
+    } finally {
+      setPasteBusy(false);
+    }
+  }
+
   return (
     <div className="lg:col-span-2">
       <section>
@@ -948,7 +1127,8 @@ function McpServersCard({
               外部工具（MCP）
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              让 AI 助手调外部 MCP server 的工具（加能力不必更新 App）。当前支持本地命令（stdio）。
+              让 AI 助手调外部数据平台的工具（加能力不必更新 App）。元典 / 企查查 / 万得 / 北大法宝等
+              平台的云端 MCP 都是「远程 HTTP」型：粘服务地址 + 访问令牌即可，无需安装任何环境。
               <br />
               不配 = 关闭，零影响。配错或连不上的 server 会被自动跳过，不影响 AI 助手正常使用。
             </p>
@@ -969,9 +1149,53 @@ function McpServersCard({
         </div>
 
         <div className="space-y-3 rounded-lg border border-border bg-background/50 p-4">
+          {/* 智能粘贴:推荐入口,平台文档配置整段粘进来自动识别 */}
+          <div className="rounded-md border border-sky-200 bg-sky-50/50 p-3">
+            <p className="mb-1.5 text-xs font-medium text-sky-900">
+              ⚡ 快捷接入：把平台「接入指南」里的配置整段粘进来（JSON 或 claude mcp add
+              命令都认），自动识别填好
+            </p>
+            <textarea
+              rows={3}
+              value={pasteText}
+              onChange={(e) => setPasteText(e.target.value)}
+              placeholder={'例如平台文档里的:\n{ "mcpServers": { "xxx": { "type": "http", "url": "https://...", "headers": { "Authorization": "Bearer 你的密钥" } } } }'}
+              className={mcpTextareaCls}
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={recognizePaste}
+                disabled={pasteBusy || !pasteText.trim()}
+                className="inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {pasteBusy ? "识别中…" : "识别并添加"}
+              </button>
+              <span className="text-caption text-muted-foreground">
+                本地解析，不联网；令牌只存本机
+              </span>
+            </div>
+            {pasteMsg && (
+              <div
+                className={cn(
+                  "mt-2 space-y-0.5 text-xs",
+                  pasteMsg.kind === "ok" && "text-emerald-700",
+                  pasteMsg.kind === "warn" && "text-amber-700",
+                  pasteMsg.kind === "err" && "text-red-600",
+                )}
+              >
+                {pasteMsg.lines.map((l, i) => (
+                  <p key={i}>{l}</p>
+                ))}
+              </div>
+            )}
+          </div>
+
           {rows.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              还没有配置外部工具。点下方按钮添加一个，例如文件系统、网页抓取等 MCP server。
+              还没有配置外部工具。把平台给的配置粘到上方识别，或点下方按钮手动添加。
             </p>
           )}
 
@@ -984,14 +1208,24 @@ function McpServersCard({
             />
           ))}
 
-          <button
-            type="button"
-            onClick={addServer}
-            className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
-          >
-            <Plus className="size-3.5" />
-            添加 MCP server
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={addHttpServer}
+              className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-sky-300 bg-sky-50/60 px-3 py-1.5 text-xs font-medium text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50"
+            >
+              <Plus className="size-3.5" />
+              添加远程 server（HTTP，推荐）
+            </button>
+            <button
+              type="button"
+              onClick={addStdioServer}
+              className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
+            >
+              <Plus className="size-3.5" />
+              添加本地命令（stdio）
+            </button>
+          </div>
         </div>
       </section>
     </div>
@@ -1018,6 +1252,32 @@ function McpServerRow({
   const [envText, setEnvText] = useState(() =>
     cfg.transport.type === "stdio" ? envToText(cfg.transport.env) : "",
   );
+  // http 的 headers 跟 env 同形(KEY=VALUE),同样需要本行编辑缓冲(见组件 doc)
+  const [headersText, setHeadersText] = useState(() =>
+    cfg.transport.type === "http" ? envToText(cfg.transport.headers ?? {}) : "",
+  );
+
+  // ---- 连接测试:真连一次(握手+列工具),结果就地显示;配置一改就归零 ----
+  const [test, setTest] = useState<{ s: "idle" | "busy" | "ok" | "err"; msg?: string }>({
+    s: "idle",
+  });
+  useEffect(() => {
+    setTest({ s: "idle" });
+  }, [cfg]);
+  async function runTest() {
+    if (test.s === "busy") return;
+    setTest({ s: "busy" });
+    try {
+      const r = await testMcpServer(cfg);
+      const names = r.tool_names.slice(0, 5).join("、");
+      setTest({
+        s: "ok",
+        msg: `已连上，发现 ${r.tool_count} 个工具${names ? `：${names}${r.tool_count > 5 ? " …" : ""}` : ""}`,
+      });
+    } catch (e) {
+      setTest({ s: "err", msg: String(e) });
+    }
+  }
   // name 会拼进 `mcp__<name>__<tool>`(= DeepSeek 函数名);非 [A-Za-z0-9_-] 后端会清洗成 `_`
   // (兜底不让整个 tools 数组被拒),但仍提示用户用规范名,避免不同名清洗后撞车。
   const nameInvalid = cfg.name.length > 0 && !/^[A-Za-z0-9_-]+$/.test(cfg.name);
@@ -1047,6 +1307,14 @@ function McpServerRow({
           />
           启用
         </label>
+        <button
+          type="button"
+          onClick={runTest}
+          disabled={test.s === "busy"}
+          className="shrink-0 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 transition-colors hover:border-sky-300 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {test.s === "busy" ? "测试中…" : "测试连接"}
+        </button>
         <button
           type="button"
           onClick={onRemove}
@@ -1123,9 +1391,56 @@ function McpServerRow({
           </Field>
         </div>
       ) : (
-        <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
-          这是 HTTP 类型的 server，当前版本暂未实现 HTTP 传输，会被自动跳过。如需使用请删除后改配本地命令（stdio）。
+        <div className="space-y-2.5">
+          <Field label="服务地址（URL）" hint="平台接入文档给的 MCP 服务地址，https 开头">
+            <input
+              type="text"
+              value={cfg.transport.type === "http" ? cfg.transport.url : ""}
+              onChange={(e) =>
+                cfg.transport.type === "http" &&
+                onChange({
+                  ...cfg,
+                  transport: { ...cfg.transport, url: e.target.value },
+                })
+              }
+              placeholder="https://open.平台域名.com/mcp/xxx/stream"
+              className={inputCls}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+          <Field
+            label="请求头（一行一个 KEY=VALUE）"
+            hint="放访问令牌，例：Authorization=Bearer 你的密钥；只存本机，不进 git / 日志"
+          >
+            <textarea
+              rows={2}
+              value={headersText}
+              onChange={(e) => {
+                const t = e.target.value;
+                setHeadersText(t);
+                if (cfg.transport.type === "http") {
+                  onChange({ ...cfg, transport: { ...cfg.transport, headers: textToEnv(t) } });
+                }
+              }}
+              placeholder={"Authorization=Bearer sk-xxxx"}
+              className={mcpTextareaCls}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </Field>
         </div>
+      )}
+
+      {test.s === "ok" && <p className="mt-2 text-xs text-emerald-700">✓ {test.msg}</p>}
+      {test.s === "err" && (
+        <p className="mt-2 text-xs text-red-600">
+          ✗ 连接失败：{test.msg}
+          <span className="block text-caption text-muted-foreground">
+            提示：401 = 令牌不对或已过期（去平台重新生成）；403 = 该服务未开通或已到期；超时 =
+            地址不对或网络不通。
+          </span>
+        </p>
       )}
     </div>
   );

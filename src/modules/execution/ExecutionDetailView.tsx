@@ -48,6 +48,7 @@ import {
   yuandianFullReport,
 } from "@/lib/api";
 import { useRunningTask } from "@/contexts/RunningTaskContext";
+import type { InterestPrefill } from "@/modules/tools/calculators/InterestCalculator";
 
 export function ExecutionDetailView({
   caseData,
@@ -56,12 +57,7 @@ export function ExecutionDetailView({
 }: {
   caseData: Case;
   onBack: () => void;
-  onCalculateInterest?: (prefill: {
-    principal?: string;
-    startDate?: string;
-    endDate?: string;
-    note?: string;
-  }) => void;
+  onCalculateInterest?: (prefill: InterestPrefill) => void;
 }) {
   const [current, setCurrent] = useState<Case>(caseData);
   const [reportOpen, setReportOpen] = useState(false);
@@ -442,31 +438,40 @@ export function ExecutionDetailView({
                   </div>
                 </div>
               )}
-              {onCalculateInterest && current.agg_claim_amount != null && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="mt-3"
-                  onClick={() => {
-                    // 起算日:优先用判决书 / 调解书签发日(从 key_dates 找),次选立案日
-                    const enforceableDate =
-                      keyDates.find((d) =>
-                        /调解|判决|裁定/.test(d.event ?? ""),
-                      )?.date ??
-                      current.agg_filed_at ??
-                      "";
-                    onCalculateInterest({
-                      principal: String(current.agg_claim_amount),
-                      startDate: enforceableDate,
-                      note: `${current.name} · ${current.agg_case_no ?? ""}`,
-                    });
-                  }}
-                  title="跳到「利息 / 执行款」工具,自动预填本金和起算日"
-                >
-                  <Calculator className="size-3.5" />
-                  算利息 / 执行款
-                </Button>
-              )}
+              {onCalculateInterest &&
+                (current.execution_total ?? current.agg_claim_amount) != null && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    onClick={() => {
+                      // 起算日:优先用判决书 / 调解书签发日(从 key_dates 找),次选立案日
+                      const enforceableDate =
+                        keyDates.find((d) =>
+                          /调解|判决|裁定/.test(d.event ?? ""),
+                        )?.date ??
+                        current.agg_filed_at ??
+                        "";
+                      // 2026-06-11:直达执行款 tab,本金/起算日/还款记录全部预填
+                      onCalculateInterest({
+                        mode: "execution",
+                        principal: String(
+                          current.execution_total ?? current.agg_claim_amount,
+                        ),
+                        startDate: enforceableDate,
+                        note: `${current.name} · ${current.agg_case_no ?? ""}`,
+                        repayments: payments.map((p) => ({
+                          date: p.paid_at,
+                          amount: p.amount,
+                        })),
+                      });
+                    }}
+                    title="跳到「执行款计算」,自动预填执行标的、起算日和已录入的还款记录"
+                  >
+                    <Calculator className="size-3.5" />
+                    算执行款
+                  </Button>
+                )}
             </Card>
 
             <Card title="当事人">
@@ -873,7 +878,7 @@ function PaymentsCard({
 
       {payments.length === 0 ? (
         <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
-          还没有还款记录 — 点「录入还款」加第一笔
+          还没有还款记录 — 点「录入还款」加第一笔;案件文件夹里放转账截图/汇款凭证,重新抽取后会自动识别入账
         </div>
       ) : (
         <table className="w-full text-sm">
@@ -893,7 +898,17 @@ function PaymentsCard({
                   {formatYuan(p.amount)}
                 </td>
                 <td className="px-2 py-2 text-xs text-muted-foreground">
-                  {p.note ?? "—"}
+                  {/* 2026-06-11:AI 从转账截图/凭证自动识别入账的,标 chip 提示可核对、识别错可删 */}
+                  {p.note?.startsWith("[AI识别]") ? (
+                    <span className="inline-flex flex-wrap items-center gap-1">
+                      <span className="rounded bg-sky-50 px-1.5 py-0.5 text-caption font-medium text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">
+                        AI 识别
+                      </span>
+                      {p.note.slice("[AI识别]".length).trim() || "—"}
+                    </span>
+                  ) : (
+                    (p.note ?? "—")
+                  )}
                 </td>
                 <td className="px-2 py-2 text-right">
                   <button

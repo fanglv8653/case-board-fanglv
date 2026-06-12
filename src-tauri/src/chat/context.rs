@@ -690,6 +690,7 @@ mod tests {
             full_report_path: None,
             full_report_at: None,
             user_overrides_json: None,
+            agg_court_type: None,
         }
     }
 }

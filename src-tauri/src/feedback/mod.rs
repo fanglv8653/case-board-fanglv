@@ -170,6 +170,13 @@ pub struct SettingsSnapshot {
     pub mineru_api_key: String,
     pub mineru_endpoint: Option<String>,
     pub mineru_verified: bool,
+    /// 2026-06-12:PaddleOCR VL key 状态 + 云端 OCR 主力选择(老快照缺字段 → serde 默认)
+    #[serde(default)]
+    pub paddle_vl_api_key: String,
+    #[serde(default)]
+    pub paddle_vl_verified: bool,
+    #[serde(default)]
+    pub ocr_cloud_primary: String,
     pub deepseek_api_key: String,
     pub deepseek_endpoint: Option<String>,
     pub deepseek_verified: bool,
@@ -275,6 +282,9 @@ fn build_settings_snapshot(s: &crate::settings::Settings) -> SettingsSnapshot {
         mineru_api_key: key_status(&s.mineru_api_key),
         mineru_endpoint: s.mineru_endpoint.as_deref().map(strip_endpoint_auth),
         mineru_verified: s.mineru_verified_at.is_some(),
+        paddle_vl_api_key: key_status(&s.paddle_vl_api_key),
+        paddle_vl_verified: s.paddle_vl_verified_at.is_some(),
+        ocr_cloud_primary: s.effective_ocr_cloud_primary().to_string(),
         deepseek_api_key: key_status(&s.cloud_llm_api_key),
         deepseek_endpoint: s.cloud_llm_endpoint.as_deref().map(strip_endpoint_auth),
         deepseek_verified: s.deepseek_verified_at.is_some(),
@@ -1175,6 +1185,15 @@ fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
         s.mineru_endpoint.as_deref().unwrap_or("(默认)"),
     ));
     md.push_str(&format!(
+        "- PaddleOCR key:{} · 云端 OCR 主力:{}\n",
+        key_state_display(&s.paddle_vl_api_key, s.paddle_vl_verified),
+        if s.ocr_cloud_primary.is_empty() {
+            "mineru"
+        } else {
+            &s.ocr_cloud_primary
+        },
+    ));
+    md.push_str(&format!(
         "- DeepSeek key:{} · endpoint:{}\n",
         key_state_display(&s.deepseek_api_key, s.deepseek_verified),
         s.deepseek_endpoint.as_deref().unwrap_or("(默认)"),
@@ -1567,6 +1586,9 @@ mod tests {
                 mineru_api_key: "[SET]".into(),
                 mineru_endpoint: Some("https://mineru.net/api/v4".into()),
                 mineru_verified: true,
+                paddle_vl_api_key: "[EMPTY]".into(),
+                paddle_vl_verified: false,
+                ocr_cloud_primary: "mineru".into(),
                 deepseek_api_key: "[SET]".into(),
                 deepseek_endpoint: Some("https://api.deepseek.com".into()),
                 deepseek_verified: true,

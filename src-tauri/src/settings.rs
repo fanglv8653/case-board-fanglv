@@ -4,7 +4,8 @@
 //!   - **每个用户填自己的 token**,工具不内置任何人的 key
 //!   - 配置落本机 `~/Library/Application Support/CaseBoard/settings.json`
 //!   - V0.1 明文存(本机用户文件保护即可);V0.2 升 macOS Keychain
-//!   - 反馈通道不内置任何上报端点:反馈生成本地 MD 文件,由用户手动发送
+//!   - 飞书反馈 webhook 不在这里(它是编译时常量,所有用户共用,
+//!     接收方是作者;放在 task #8 单独处理)
 //!
 //! 文件结构(扁平,V0.1 简单优先):
 //! ```json
@@ -25,7 +26,7 @@ use crate::db::app_data_dir;
 
 /// 用户配置。字段全部 Option<String>,因为初始全是空的。
 ///
-/// 这里**只放每个用户私有的配置**。
+/// 这里**只放每个用户私有的配置**——不放飞书 webhook 这种"全局共享"的常量。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -63,6 +64,16 @@ pub struct Settings {
     pub mineru_api_key: Option<String>,
     /// MinerU endpoint(一般不用改,默认值)
     pub mineru_endpoint: Option<String>,
+
+    /// 2026-06-12:PaddleOCR VL-1.6(百度 AI Studio 星河社区)访问令牌。
+    /// 申请:https://aistudio.baidu.com/account/accessToken,免费 20,000 页/天。
+    /// 作者实测与 MinerU 精度打平、速度约快一倍;详 ingest/paddle_vl_http.rs 头注释。
+    pub paddle_vl_api_key: Option<String>,
+    /// PaddleOCR key 验证通过时间(坑#11:新 cloud key 必配 verified_at,改 key 重置)
+    pub paddle_vl_verified_at: Option<String>,
+    /// 云端 OCR 主力选择:`"mineru"`(默认,老用户零感知)/ `"paddle-vl"`。
+    /// 另一个自动成为备用:主力失败 / 超时 / 额度用完时,**备用 key 已填**才自动切换。
+    pub ocr_cloud_primary: Option<String>,
 
     /// 本机 llama-server endpoint(默认 http://127.0.0.1:8899)
     /// 字段名是历史包袱 "ollama_*",实际用的是 llama.cpp 的 llama-server
@@ -151,6 +162,10 @@ pub struct Settings {
     /// V0.3.6 · 外部 MCP server 白名单(CaseBoard 当客户端消费其工具)。默认空 = 桥接关闭、零行为变化。
     /// 每项 `{name, transport:{type:"stdio",command,args,env}|{type:"http",url}, enabled}`,详 ADR-0008。
     pub mcp_servers: Vec<McpServerConfig>,
+
+    /// 2026-06-10 团队版 Phase 1(LAN 接力同步,详 docs/提案-团队版-2026-06-10.md §6)。
+    /// None = 未加入团队,团队功能整体关闭零开销。secret/配对码跟 API key 同级:只存本机不进 git。
+    pub team: Option<crate::team::TeamIdentity>,
 }
 
 impl Settings {
@@ -164,6 +179,19 @@ impl Settings {
     /// feedback 诊断 / detect_local_readiness 引导)+ 前端 UI 入口即可。
     pub fn effective_ocr_provider(&self) -> &str {
         "cloud"
+    }
+
+    /// 云端 OCR 主力(2026-06-12)。`"paddle-vl"` 仅当用户显式选择**且** key 已填才生效,
+    /// 否则一律 `"mineru"`(老用户 / key 被清掉后零感知回到原行为)。
+    pub fn effective_ocr_cloud_primary(&self) -> &str {
+        let paddle_key_set = self
+            .paddle_vl_api_key
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty());
+        match self.ocr_cloud_primary.as_deref() {
+            Some("paddle-vl") if paddle_key_set => "paddle-vl",
+            _ => "mineru",
+        }
     }
 
     /// 获取**真实生效**的 LLM provider。**V0.3 暂时隐藏本地模型 → 强制云端(DeepSeek)。**
@@ -308,12 +336,21 @@ mod tests {
                     "env": { "API_KEY": "secret" }
                 },
                 "enabled": true
+            }, {
+                // http(Streamable HTTP)形状:前端 headers 走 textToEnv,同 env 形
+                "name": "yuandian-law",
+                "transport": {
+                    "type": "http",
+                    "url": "https://open.chineselaw.com/mcp/law/stream",
+                    "headers": { "Authorization": "Bearer sk-test" }
+                },
+                "enabled": true
             }]
         });
         // 整个 Settings 严格反序列化(模拟 save_settings 入参解析)
         let s: Settings =
             serde_json::from_value(frontend_json).expect("前端形状应能反序列化进 Settings");
-        assert_eq!(s.mcp_servers.len(), 1);
+        assert_eq!(s.mcp_servers.len(), 2);
         assert_eq!(s.mcp_servers[0].name, "filesystem");
         assert!(s.mcp_servers[0].enabled);
         // 再序列化回去应保持同形(read_settings → 前端读回不丢)
@@ -324,6 +361,11 @@ mod tests {
         assert_eq!(
             back["mcp_servers"][0]["transport"]["env"]["API_KEY"],
             "secret"
+        );
+        assert_eq!(back["mcp_servers"][1]["transport"]["type"], "http");
+        assert_eq!(
+            back["mcp_servers"][1]["transport"]["headers"]["Authorization"],
+            "Bearer sk-test"
         );
     }
 
@@ -376,6 +418,41 @@ mod tests {
         let s: Settings = serde_json::from_str(empty).unwrap();
         assert!(s.mineru_api_key.is_none());
         assert!(s.ollama_endpoint.is_none());
+    }
+
+    /// 2026-06-12:云端 OCR 主力选择 —— paddle-vl 仅当显式选择且 key 已填才生效,
+    /// 其余一律 mineru(老用户配置不含新字段 → 默认 mineru,行为零变化)。
+    #[test]
+    fn ocr_cloud_primary_requires_explicit_choice_and_key() {
+        // 老配置(无新字段)→ mineru
+        let s = Settings::default();
+        assert_eq!(s.effective_ocr_cloud_primary(), "mineru");
+        // 选了 paddle-vl 但没填 key → 仍 mineru(动态主备:key 是上场前提)
+        let s = Settings {
+            ocr_cloud_primary: Some("paddle-vl".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_ocr_cloud_primary(), "mineru");
+        // 只填了 key 没切换 → 仍 mineru(只是多一个备用)
+        let s = Settings {
+            paddle_vl_api_key: Some("tok".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_ocr_cloud_primary(), "mineru");
+        // 选了 + key 已填 → paddle-vl
+        let s = Settings {
+            ocr_cloud_primary: Some("paddle-vl".into()),
+            paddle_vl_api_key: Some("tok".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_ocr_cloud_primary(), "paddle-vl");
+        // key 是空白串 → 视为没填
+        let s = Settings {
+            ocr_cloud_primary: Some("paddle-vl".into()),
+            paddle_vl_api_key: Some("   ".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.effective_ocr_cloud_primary(), "mineru");
     }
 
     #[test]

@@ -132,6 +132,9 @@ pub enum ProgressEvent {
         completed_count: usize,
         outcome: DocOutcome,
     },
+    /// 2026-06-11:逐文档 OCR 完成后、全案 LLM 分析开始(这步几十秒到几分钟,
+    /// 没这事件前端浮层会停在"已完成 N/N 100%"转圈,被用户当成卡死)
+    Analyzing { case_id: String },
     /// 整批完成
     Completed {
         case_id: String,
@@ -140,6 +143,10 @@ pub enum ProgressEvent {
         skipped: usize,
         failed: usize,
         elapsed_ms: u128,
+        /// 2026-06-11:全案 LLM 分析是否成功(失败时 agg_*/详情页不会更新,
+        /// 此前静默吞掉、浮层照样显示"全部完成",用户以为成功)
+        analysis_ok: bool,
+        analysis_error: Option<String>,
     },
     /// 本机服务 / 云端 token 没就绪,整批没法开跑 — 2026-05-23 加
     Error { case_id: String, error: String },
@@ -224,14 +231,17 @@ async fn run_extraction(
     // 2026-05-23 晚六:OCR 和 LLM 独立维度 — 先读 settings 再 emit Started(便于前端显示后端)
     let user_settings = settings::read_settings().unwrap_or_default();
     let llm_config = llm::LlmConfig::from_settings(&user_settings);
+    let cloud_ocr = user_settings.effective_ocr_provider() == "cloud";
     let ocr_ctx = OcrContext {
-        cloud_enabled: user_settings.effective_ocr_provider() == "cloud",
-        // 云端模式必须带 token(MinerU 精准 API 强制认证)。本地模式 None。
-        mineru_token: if user_settings.effective_ocr_provider() == "cloud" {
-            user_settings.mineru_api_key.clone()
-        } else {
-            None
-        },
+        cloud_enabled: cloud_ocr,
+        // 云端模式带两家 token(2026-06-12 主/备动态切换,见 ocr.rs)。本地模式 None。
+        mineru_token: cloud_ocr
+            .then(|| user_settings.mineru_api_key.clone())
+            .flatten(),
+        paddle_vl_token: cloud_ocr
+            .then(|| user_settings.paddle_vl_api_key.clone())
+            .flatten(),
+        cloud_primary: user_settings.effective_ocr_cloud_primary().to_string(),
     };
     let ocr_provider = user_settings.effective_ocr_provider().to_string();
     let llm_provider = user_settings.effective_llm_provider().to_string();
@@ -400,6 +410,13 @@ async fn run_extraction(
 
     // 2026-05-24 h · 新架构:所有文档 OCR 完成后,**让 LLM 全局抽**(替代旧 aggregator 规则)。
     // 拼所有 MD → DeepSeek 1M 上下文 → 两次并发 LLM call(填表 + 案件分析报告)
+    // 2026-06-11:这步耗时几十秒~几分钟,先 emit Analyzing 让前端浮层显示"通读全案分析中"
+    let _ = app.emit(
+        "extraction_progress",
+        ProgressEvent::Analyzing {
+            case_id: case_id.to_string(),
+        },
+    );
     let report =
         crate::ingest::global_pipeline::run_global_extract(pool, case_id, &llm_config).await;
     crate::dlog!(
@@ -425,6 +442,8 @@ async fn run_extraction(
             skipped,
             failed,
             elapsed_ms: start.elapsed().as_millis(),
+            analysis_ok: report.table_ok,
+            analysis_error: report.error.clone(),
         },
     );
 

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Pencil } from "lucide-react";
 import {
   DndContext,
@@ -13,7 +14,8 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 
-import { type Case, type Document } from "@/lib/types";
+import { type Case, type CaseInstance, type Document } from "@/lib/types";
+import { listCaseInstances } from "@/lib/api";
 import { formatYuan } from "@/lib/format";
 import { computeCaseSnapshot } from "@/lib/caseSnapshot";
 import {
@@ -60,6 +62,23 @@ export function CaseSnapshotView({
   isEditMode?: boolean;
 }) {
   const ov = useCaseOverrides(caseData.id, caseData.user_overrides_json);
+
+  // 2026-06-11 审级模型:多审级案件([仲裁]→一审→二审→[再审])加载审级实例,
+  // ≥2 个审级时渲染「审级历程」卡(最新在上)。重抽后(agg_computed_at 变)自动刷新。
+  const [instances, setInstances] = useState<CaseInstance[]>([]);
+  useEffect(() => {
+    let alive = true;
+    listCaseInstances(caseData.id)
+      .then((l) => {
+        if (alive) setInstances(l);
+      })
+      .catch(() => {
+        /* 加载失败静默 — 卡片不渲染即可 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [caseData.id, caseData.agg_computed_at]);
 
   // LLM snapshot + 用户 overlay
   const rawSnap = computeCaseSnapshot(caseData, documents);
@@ -147,6 +166,7 @@ export function CaseSnapshotView({
   // 卡片标题(用于 hidden_sections 匹配)
   const TITLES = {
     BASIC: "案件基本信息",
+    INSTANCES: "审级历程",
     COURT: "办案机关人员",
     PARTY: "当事人联系人",
     FEE: "收费记录",
@@ -188,6 +208,8 @@ export function CaseSnapshotView({
   /* ---------- 6 张卡片渲染器,按 ov.resolveOrder 顺序排版 ---------- */
   const defaultSectionOrder = [
     TITLES.BASIC,
+    // ≥2 个审级才显示历程卡(单审级时与基本信息重复);紧跟基本信息,最新审级在上
+    ...(instances.length >= 2 ? [TITLES.INSTANCES] : []),
     TITLES.COURT,
     TITLES.PARTY,
     TITLES.FEE,
@@ -361,6 +383,97 @@ export function CaseSnapshotView({
       },
     },
   ];
+  if (instances.length >= 2) {
+    sections.push({
+      id: TITLES.INSTANCES,
+      render: (dragHandle) => (
+        <CardSection
+          title={TITLES.INSTANCES}
+          subtitle="各审级的案号/承办机关/当事人称谓(最新审级在上;AI 按各审级文书分别抽取)"
+          isEditMode={isEditMode}
+          hidden={ov.overrides.hidden_sections?.includes(TITLES.INSTANCES)}
+          onToggleHidden={() => ov.toggleHidden(TITLES.INSTANCES)}
+          dragHandle={dragHandle}
+        >
+          <div className="space-y-3">
+            {instances.map((ins) => {
+              const handlers = parseJsonObjects<{
+                name?: string | null;
+                role?: string | null;
+                phone?: string | null;
+              }>(ins.handlers);
+              const partyRoles = parseJsonObjects<{
+                name?: string | null;
+                role?: string | null;
+                note?: string | null;
+              }>(ins.party_roles);
+              const isArb = ins.authority_type === "仲裁委";
+              const handlerText =
+                handlers
+                  .map((h) =>
+                    [h.name, h.role && `(${h.role})`].filter(Boolean).join(""),
+                  )
+                  .filter(Boolean)
+                  .join("、") || null;
+              return (
+                <div
+                  key={ins.id}
+                  className={
+                    "rounded-md border p-4 " +
+                    (ins.is_current
+                      ? "border-foreground/30 bg-foreground/[0.02]"
+                      : "border-border")
+                  }
+                >
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <span
+                      className={
+                        "rounded px-2 py-0.5 text-xs font-medium " +
+                        (ins.is_current
+                          ? "bg-foreground text-background"
+                          : "bg-muted text-muted-foreground")
+                      }
+                    >
+                      {ins.level}
+                      {ins.is_current ? " · 当前" : ""}
+                    </span>
+                    {ins.note && (
+                      <span className="text-xs text-muted-foreground">{ins.note}</span>
+                    )}
+                  </div>
+                  <dl className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2 md:grid-cols-3">
+                    <FactRow label="案号" value={ins.case_no} mono />
+                    <FactRow
+                      label={isArb ? "仲裁机构" : "承办法院"}
+                      value={ins.authority}
+                    />
+                    <FactRow
+                      label={isArb ? "仲裁员" : "承办人"}
+                      value={handlerText}
+                    />
+                    <FactRow label="受理日期" value={ins.filed_at} mono />
+                    <FactRow label="结果" value={ins.result} />
+                  </dl>
+                  {partyRoles.length > 0 && (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      当事人:
+                      {partyRoles
+                        .map((p) =>
+                          `${p.name || "—"}(${[p.role, p.note]
+                            .filter(Boolean)
+                            .join(",")})`,
+                        )
+                        .join(" · ")}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </CardSection>
+      ),
+    });
+  }
   if (snap.preservations.length > 0) {
     sections.push({
       id: TITLES.PRESERVATION,
@@ -559,4 +672,15 @@ function SortableCards({
       </SortableContext>
     </DndContext>
   );
+}
+
+/** JSON 数组字符串 → 对象数组(解析失败/null → [])。case_instances.handlers/party_roles 用。 */
+function parseJsonObjects<T>(s: string | null): T[] {
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s);
+    return Array.isArray(v) ? (v as T[]) : [];
+  } catch {
+    return [];
+  }
 }

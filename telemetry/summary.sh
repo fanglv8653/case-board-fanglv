@@ -20,9 +20,26 @@ if [ -z "$CASEBOARD_TELEMETRY_SECRET" ]; then
   echo "✗ .env.telemetry 里没有 CASEBOARD_TELEMETRY_SECRET(读后台需要 secret key)"; exit 1
 fi
 
-# 拉全部事件(分页上限 PostgREST 默认 1000 行,够用很久;真超了再加 Range 翻页)
-RAW=$(curl -s "$CASEBOARD_TELEMETRY_URL/rest/v1/usage_events?select=*&order=created_at.asc" \
-  -H "apikey: $CASEBOARD_TELEMETRY_SECRET" \
-  -H "Authorization: Bearer $CASEBOARD_TELEMETRY_SECRET")
+# 拉全部事件(Range 翻页拉全量。曾因 PostgREST 默认单次 1000 行上限只看到最老
+# 1000 条,报告把最新数据全截掉了 —— 2026-06-10 修复,别再退回单次 curl)
+RAW=$(python3 - <<'PYEOF'
+import json, os, urllib.request
+url = os.environ["CASEBOARD_TELEMETRY_URL"]
+key = os.environ["CASEBOARD_TELEMETRY_SECRET"]
+rows, page = [], 0
+while True:
+    req = urllib.request.Request(
+        url + "/rest/v1/usage_events?select=*&order=created_at.asc",
+        headers={"apikey": key, "Authorization": "Bearer " + key,
+                 "Range-Unit": "items",
+                 "Range": f"{page*1000}-{page*1000+999}"})
+    batch = json.load(urllib.request.urlopen(req, timeout=30))
+    rows += batch
+    if len(batch) < 1000:
+        break
+    page += 1
+print(json.dumps(rows))
+PYEOF
+)
 
 echo "$RAW" | python3 telemetry/summarize.py

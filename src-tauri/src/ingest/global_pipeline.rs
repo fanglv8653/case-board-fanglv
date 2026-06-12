@@ -13,8 +13,10 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+use crate::db::case_instances::NewInstance;
 use crate::llm::global_extract::{
     build_corpus, extract_combined, report_path_for_case, DocInput, GlobalExtractTable,
+    InstanceExtract, RepaymentExtract,
 };
 use crate::llm::LlmConfig;
 
@@ -174,6 +176,14 @@ pub async fn run_global_extract(
             {
                 crate::dlog!("[global_extract] 写 cases 失败:{}", e);
             }
+            // 2026-06-11 审级模型:instances 落库 + 当前审级快照回写 agg_*
+            if let Err(e) = write_instances(pool, case_id, &r.table.instances).await {
+                crate::dlog!("[global_extract] 写 case_instances 失败:{}", e);
+            }
+            // 还款自动入账(幂等,标 [AI识别])
+            if let Err(e) = write_repayments(pool, case_id, &r.table.repayments).await {
+                crate::dlog!("[global_extract] 写还款记录失败:{}", e);
+            }
             (true, report_path.is_some(), report_path, None)
         }
         Err(e) => {
@@ -221,6 +231,120 @@ pub async fn rerun_all_cases(
     })
 }
 
+/// 2026-06-11 审级模型:LLM instances → case_instances 表 + 当前审级快照回写 cases.agg_*。
+/// 空列表 = LLM 没识别出审级 → 不动现有行(与 D3-1 防空覆盖同哲学,user 行永远保留)。
+async fn write_instances(
+    pool: &SqlitePool,
+    case_id: &str,
+    items: &[InstanceExtract],
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<NewInstance> = items
+        .iter()
+        .filter_map(|it| {
+            let level = it.level.as_deref()?.trim().to_string();
+            let seq = level_seq(&level)?;
+            Some(NewInstance {
+                level,
+                seq,
+                case_no: it.case_no.clone(),
+                authority: it.authority.clone(),
+                authority_type: it.authority_type.clone(),
+                handlers: non_empty_json(&it.handlers),
+                party_roles: non_empty_json(&it.party_roles),
+                filed_at: it.filed_at.clone(),
+                result: it.result.clone(),
+                note: it.note.clone(),
+            })
+        })
+        .collect();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let list = crate::db::case_instances::replace_llm_instances(pool, case_id, &rows).await?;
+    // 当前审级(seq 最大)快照回写首页卡读的 agg_* —— 识别到二审,首页就显二审
+    if let Some(cur) = list.first() {
+        sqlx::query(
+            "UPDATE cases SET \
+                agg_case_no = COALESCE(?, agg_case_no), \
+                agg_court = COALESCE(?, agg_court), \
+                agg_court_type = COALESCE(?, agg_court_type) \
+             WHERE id = ?",
+        )
+        .bind(&cur.case_no)
+        .bind(&cur.authority)
+        .bind(&cur.authority_type)
+        .bind(case_id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// level → 约定排序号(仲裁1 / 一审2 / 二审3 / 再审4);未知 level 不入库。
+fn level_seq(level: &str) -> Option<i64> {
+    match level {
+        "仲裁" => Some(1),
+        "一审" => Some(2),
+        "二审" => Some(3),
+        "再审" => Some(4),
+        _ => None,
+    }
+}
+
+/// 2026-06-11:LLM 识别的还款幂等落 case_payments(标 [AI识别],识别错用户可删)。
+/// (case_id, amount, paid_at) 已存在则跳过 —— 防重抽重复入账;无金额或无日期跳过
+/// (法律数据不编造日期,摘要文本里仍可见,律师手补)。
+async fn write_repayments(
+    pool: &SqlitePool,
+    case_id: &str,
+    items: &[RepaymentExtract],
+) -> Result<(), sqlx::Error> {
+    for it in items {
+        let Some(amount) = it.amount else { continue };
+        if amount <= 0.0 {
+            continue;
+        }
+        let Some(paid_at) = it.paid_at.as_deref().filter(|s| !s.trim().is_empty()) else {
+            crate::dlog!(
+                "[global_extract] 还款 {} 元无日期,跳过自动入账(摘要里仍可见)",
+                amount
+            );
+            continue;
+        };
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM case_payments WHERE case_id = ? AND amount = ? AND paid_at = ?",
+        )
+        .bind(case_id)
+        .bind(amount)
+        .bind(paid_at)
+        .fetch_one(pool)
+        .await?;
+        if exists > 0 {
+            continue;
+        }
+        let mut note = String::from("[AI识别]");
+        if let Some(p) = it.payer.as_deref().filter(|s| !s.trim().is_empty()) {
+            note.push(' ');
+            note.push_str(p);
+        }
+        if let Some(n) = it.note.as_deref().filter(|s| !s.trim().is_empty()) {
+            note.push_str(" · ");
+            note.push_str(n);
+        }
+        crate::db::payments::add(
+            pool,
+            crate::db::payments::NewPayment {
+                case_id: case_id.to_string(),
+                amount,
+                paid_at: paid_at.to_string(),
+                note: Some(note),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// D3-1:空集合 → None(配合 SQL COALESCE 跳过覆盖),非空才序列化为 JSON。
 fn non_empty_json<T: serde::Serialize>(v: &[T]) -> Option<String> {
     if v.is_empty() {
@@ -236,11 +360,13 @@ pub fn workflow_status_zh_to_en(zh: &str) -> Option<&'static str> {
     match zh.trim() {
         "接案" => Some("intake"),
         "立案中" => Some("filing"),
+        "仲裁中" => Some("arbitration"),
         "待开庭" => Some("awaiting_hearing"),
         "审理中" => Some("trial"),
         "已调解" => Some("mediated"),
         "上诉期" => Some("appeal_window"),
         "二审中" => Some("appeal"),
+        "再审中" => Some("retrial"),
         "执行中" => Some("execution"),
         "已结案" => Some("closed"),
         _ => None,
@@ -253,11 +379,13 @@ pub fn workflow_status_en_to_zh(en: &str) -> &str {
     match en.trim() {
         "intake" => "接案",
         "filing" => "立案中",
+        "arbitration" => "仲裁中",
         "awaiting_hearing" => "待开庭",
         "trial" => "审理中",
         "mediated" => "已调解",
         "appeal_window" => "上诉期",
         "appeal" => "二审中",
+        "retrial" => "再审中",
         "execution" => "执行中",
         "closed" => "已结案",
         other => other,
@@ -354,17 +482,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workflow_status_zh_en_roundtrip_all_9() {
-        // D9-1:9 档中英映射必须双向一致(写库 zh→en,喂 LLM en→zh)。
+    fn workflow_status_zh_en_roundtrip_all_11() {
+        // D9-1:11 档中英映射必须双向一致(写库 zh→en,喂 LLM en→zh)。
         // 英文侧必须与前端 src/modules/litigation/lib/inferStatus.ts::StatusId 严格相同。
+        // 2026-06-11 审级模型加 仲裁中/再审中 → 9 档变 11 档。
         let pairs = [
             ("接案", "intake"),
             ("立案中", "filing"),
+            ("仲裁中", "arbitration"),
             ("待开庭", "awaiting_hearing"),
             ("审理中", "trial"),
             ("已调解", "mediated"),
             ("上诉期", "appeal_window"),
             ("二审中", "appeal"),
+            ("再审中", "retrial"),
             ("执行中", "execution"),
             ("已结案", "closed"),
         ];
@@ -458,5 +589,131 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(plaintiffs2.as_deref(), Some(r#"["王五"]"#));
+    }
+
+    /// 2026-06-11 审级模型:instances 落库 + 当前审级快照回写 agg_*(首页显最新审级)。
+    #[tokio::test]
+    async fn write_instances_marks_current_and_snapshots_agg() {
+        use crate::db::cases::{create_case, NewCase};
+        use crate::db::init_pool;
+
+        let pool = init_pool(":memory:").await.unwrap();
+        let case = create_case(
+            &pool,
+            NewCase {
+                name: "二审测试".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/test-instances-pipeline".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let items = vec![
+            InstanceExtract {
+                level: Some("一审".into()),
+                case_no: Some("(2025)苏0205民初100号".into()),
+                authority: Some("无锡市锡山区人民法院".into()),
+                authority_type: Some("法院".into()),
+                ..Default::default()
+            },
+            InstanceExtract {
+                level: Some("二审".into()),
+                case_no: Some("(2026)苏02民终200号".into()),
+                authority: Some("无锡市中级人民法院".into()),
+                authority_type: Some("法院".into()),
+                ..Default::default()
+            },
+            // 未知 level 不入库
+            InstanceExtract {
+                level: Some("天命审".into()),
+                ..Default::default()
+            },
+        ];
+        write_instances(&pool, &case.id, &items).await.unwrap();
+
+        let list = crate::db::case_instances::list_by_case(&pool, &case.id)
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 2, "未知 level 应被过滤");
+        assert_eq!(list[0].level, "二审");
+        assert!(list[0].is_current);
+
+        // 当前审级快照回写 agg_* —— 首页卡显二审
+        let (no, court, ctype): (Option<String>, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT agg_case_no, agg_court, agg_court_type FROM cases WHERE id = ?")
+                .bind(&case.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(no.as_deref(), Some("(2026)苏02民终200号"));
+        assert_eq!(court.as_deref(), Some("无锡市中级人民法院"));
+        assert_eq!(ctype.as_deref(), Some("法院"));
+
+        // 空列表 = LLM 没识别 → 不动现有行(D3-1 哲学)
+        write_instances(&pool, &case.id, &[]).await.unwrap();
+        assert_eq!(
+            crate::db::case_instances::list_by_case(&pool, &case.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// 2026-06-11:还款幂等落库 —— 重抽不重复入账;无金额/无日期跳过;note 带 [AI识别]。
+    #[tokio::test]
+    async fn write_repayments_is_idempotent_and_tagged() {
+        use crate::db::cases::{create_case, NewCase};
+        use crate::db::init_pool;
+
+        let pool = init_pool(":memory:").await.unwrap();
+        let case = create_case(
+            &pool,
+            NewCase {
+                name: "还款测试".into(),
+                case_type: "诉讼".into(),
+                source_folder: "/tmp/test-repayments".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let items = vec![
+            RepaymentExtract {
+                amount: Some(100000.0),
+                paid_at: Some("2026-02-15".into()),
+                payer: Some("李四".into()),
+                note: Some("银行转账截图".into()),
+            },
+            // 无日期 → 跳过(不编造日期)
+            RepaymentExtract {
+                amount: Some(50000.0),
+                paid_at: None,
+                payer: None,
+                note: None,
+            },
+            // 无金额 → 跳过
+            RepaymentExtract {
+                amount: None,
+                paid_at: Some("2026-03-01".into()),
+                payer: None,
+                note: None,
+            },
+        ];
+        write_repayments(&pool, &case.id, &items).await.unwrap();
+        // 重抽同一批 → 不重复
+        write_repayments(&pool, &case.id, &items).await.unwrap();
+
+        let list = crate::db::payments::list_by_case(&pool, &case.id)
+            .await
+            .unwrap();
+        assert_eq!(list.len(), 1, "只有金额+日期齐的那笔入账,且幂等");
+        assert_eq!(list[0].amount, 100000.0);
+        assert_eq!(list[0].paid_at, "2026-02-15");
+        assert_eq!(
+            list[0].note.as_deref(),
+            Some("[AI识别] 李四 · 银行转账截图")
+        );
     }
 }

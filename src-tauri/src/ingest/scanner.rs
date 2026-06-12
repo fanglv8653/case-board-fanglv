@@ -46,7 +46,7 @@ const IGNORED_DIRS: &[&str] = &[
 /// 根据**路径**(注意是路径,不是文件名)识别阶段。
 ///
 /// 规则:遍历路径的每一段,首次命中即返回。顺序按"具体优先"排:
-/// 再审 > 二审 > 一审 > 立案 > 执行 > 证据 > 身份
+/// 再审 > 二审 > 一审 > 仲裁 > 立案 > 执行 > 证据 > 身份
 fn classify_stage(path: &Path) -> Option<String> {
     // 路径里的中文段
     let segments: Vec<String> = path
@@ -64,6 +64,10 @@ fn classify_stage(path: &Path) -> Option<String> {
     }
     if joined.contains("一审") || joined.contains("1审") {
         return Some("一审".into());
+    }
+    // 2026-06-11 审级模型:劳动仲裁等(诉讼前置程序),放一审后立案前
+    if joined.contains("仲裁") {
+        return Some("仲裁".into());
     }
     if joined.contains("立案") || joined.contains("起诉材料") {
         return Some("立案".into());
@@ -85,6 +89,30 @@ fn classify_category(filename: &str) -> Option<String> {
     let f = filename;
     // 顺序很重要:更具体/优先级高的放前面
     // 注释里的 [R&D] 标记来自 2026-05-23 跑 5 个真实案件发现的命名习惯
+
+    // 仲裁类(2026-06-11 审级模型加)— 放最前:"仲裁申请书"含"申请",
+    // "仲裁裁决书"含"裁决",必须先于诉讼类规则匹配,避免被吞
+    if f.contains("仲裁") {
+        if f.contains("裁决") {
+            return Some("仲裁裁决书".into());
+        }
+        if f.contains("申请") {
+            return Some("仲裁申请书".into());
+        }
+        if f.contains("答辩") {
+            return Some("仲裁答辩状".into());
+        }
+        if f.contains("受理") {
+            return Some("仲裁受理通知".into());
+        }
+        if f.contains("开庭") {
+            return Some("仲裁开庭通知".into());
+        }
+        if f.contains("笔录") {
+            return Some("仲裁庭审笔录".into());
+        }
+        return Some("仲裁文书".into());
+    }
 
     // 诉状类
     if f.contains("民事诉状") || f.contains("起诉状") || f.contains("要素式诉状") {

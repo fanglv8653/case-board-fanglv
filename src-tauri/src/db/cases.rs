@@ -99,6 +99,11 @@ pub struct Case {
     /// 用户手改的 overlay(JSON),前端定义结构,后端透传。LLM 全局抽永不覆盖此列。
     /// 渲染时叠加在 agg_* 之上,使用户改动优先级高于 LLM 抽取。
     pub user_overrides_json: Option<String>,
+
+    /// 2026-06-11 加(migration 0022 · 审级模型)
+    /// 当前承办机关类型('法院'/'仲裁委'/'其他'),驱动前端 label。
+    /// agg_court/agg_case_no 自此语义=「当前审级」快照,全部审级明细在 case_instances 表。
+    pub agg_court_type: Option<String>,
 }
 
 /// 创建新案件的最小参数。
