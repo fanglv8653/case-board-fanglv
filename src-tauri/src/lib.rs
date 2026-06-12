@@ -2156,6 +2156,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // 启动时同步初始化数据库连接池 + 跑 migrations
             // 用 tauri::async_runtime::block_on 避免前端在 pool 就绪前发命令

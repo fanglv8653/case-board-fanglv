@@ -14,6 +14,8 @@ import { HomeDropZone } from "@/components/HomeDropZone";
 import { RunningTaskOverlay } from "@/components/RunningTaskOverlay";
 import { RunningTaskProvider } from "@/contexts/RunningTaskContext";
 import { UpdateAvailableDialog } from "@/components/UpdateAvailableDialog";
+import { UpdateSuccessDialog } from "@/components/UpdateSuccessDialog";
+import { consumeJustUpdated, type PendingUpdate } from "@/lib/updater";
 import { VersionChip } from "@/components/VersionChip";
 import { toast, dismissToast, ToastViewport } from "@/components/ui/toast";
 import { TransactionModule } from "@/modules/transaction";
@@ -88,6 +90,8 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   /** 2026-05-25 V0.1.8 · 是否弹「发现新版本」对话框 */
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
+  // 应用内更新重启后弹一次「升级成功」
+  const [justUpdated, setJustUpdated] = useState<PendingUpdate | null>(null);
   /** 后台抽取进度(每个 case_id 对应一份独立进度) */
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   /** 视图模式:home = 案件看板首页, detail = 单案件详情。默认 home。(仅诉讼模块用) */
@@ -150,6 +154,12 @@ function App() {
   useEffect(() => {
     getVersion()
       .then(setAppVer)
+      .catch(() => {});
+    // 应用内更新重启后:命中则弹「升级成功 + 更新内容」(只弹一次)
+    consumeJustUpdated()
+      .then((p) => {
+        if (p) setJustUpdated(p);
+      })
       .catch(() => {});
     checkForUpdate()
       .then((info) => {
@@ -902,6 +912,13 @@ function App() {
         <UpdateAvailableDialog
           info={updateInfo}
           onClose={() => setShowUpdateDialog(false)}
+        />
+      )}
+      {justUpdated && (
+        <UpdateSuccessDialog
+          version={justUpdated.version}
+          notes={justUpdated.notes}
+          onClose={() => setJustUpdated(null)}
         />
       )}
       {/* 进度条:只在诉讼模块详情页 + 当前案件匹配时显示 */}
