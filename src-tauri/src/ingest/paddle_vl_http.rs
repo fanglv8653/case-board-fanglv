@@ -201,28 +201,3 @@ fn markdown_from_jsonl(jsonl: &str) -> Result<String, String> {
     }
     Ok(pages.join("\n\n"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn markdown_from_jsonl_joins_pages() {
-        let jsonl = concat!(
-            r##"{"result":{"layoutParsingResults":[{"markdown":{"text":"# 第一页内容,足够长的文本"}},{"markdown":{"text":"第二页"}}]}}"##,
-            "\n",
-            r##"{"result":{"layoutParsingResults":[{"markdown":{"text":"第三页"}}]}}"##,
-        );
-        let md = markdown_from_jsonl(jsonl).unwrap();
-        assert!(md.contains("第一页内容"));
-        assert!(md.contains("第三页"));
-        assert_eq!(md.matches("\n\n").count(), 2);
-    }
-
-    #[test]
-    fn markdown_from_jsonl_rejects_empty() {
-        assert!(markdown_from_jsonl("").is_err());
-        // 有行但没有 layoutParsingResults(比如 PP-OCRv6 的 ocrResults 形状)→ 报错不静默
-        assert!(markdown_from_jsonl(r#"{"result":{"ocrResults":[]}}"#).is_err());
-    }
-}

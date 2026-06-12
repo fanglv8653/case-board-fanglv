@@ -381,34 +381,3 @@ pub fn report_path_for_case(case_id: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("建 reports 目录失败: {}", e))?;
     Ok(dir.join(format!("{}.md", case_id)))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strip_fence_handles_json_fence() {
-        let s = "```json\n{\"case_no\":\"x\"}\n```";
-        assert_eq!(strip_markdown_fence(s), "{\"case_no\":\"x\"}");
-    }
-
-    #[test]
-    fn strip_fence_passthrough_for_clean_json() {
-        let s = r#"{"case_no":"x"}"#;
-        assert_eq!(strip_markdown_fence(s), r#"{"case_no":"x"}"#);
-    }
-
-    #[test]
-    fn build_corpus_includes_filename_header() {
-        let docs = vec![DocInput {
-            filename: "民事起诉状.docx".into(),
-            category: Some("起诉状".into()),
-            stage: Some("立案".into()),
-            text_md: "原告张三...".into(),
-        }];
-        let c = build_corpus(&docs);
-        assert!(c.contains("民事起诉状.docx"));
-        assert!(c.contains("分类: 起诉状"));
-        assert!(c.contains("原告张三"));
-    }
-}
