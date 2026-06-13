@@ -35,10 +35,14 @@ jobs:
 
       # 应用内更新签名:私钥来自仓库 Actions secret(加密存储,fork 的 PR 拿不到)。
       # 注入后 createUpdaterArtifacts 会为 NSIS 安装包生成同名 .sig 签名文件。
+      # 匿名使用统计:注入 anon/publishable key(低权限,只能写 usage_events;
+      # 缺失时代码里 option_env! 取不到 → 统计自动禁用)。fork 的 PR 拿不到这些 secret。
       - name: Build Windows installer (NSIS .exe)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CASEBOARD_TELEMETRY_URL: ${{ secrets.CASEBOARD_TELEMETRY_URL }}
+          CASEBOARD_TELEMETRY_KEY: ${{ secrets.CASEBOARD_TELEMETRY_KEY }}
         run: pnpm tauri build --bundles nsis
 
       # 启动期冒烟:release 是 panic=abort,启动 panic 会立即退出并把信息打到 stderr。
