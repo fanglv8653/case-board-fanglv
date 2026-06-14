@@ -43,6 +43,7 @@ import {
 } from "@/lib/api";
 import {
   type Case,
+  type DocOcrStatusEvent,
   type Document,
   type ImportPlan,
   type ProgressEvent,
@@ -94,6 +95,8 @@ function App() {
   const [justUpdated, setJustUpdated] = useState<PendingUpdate | null>(null);
   /** 后台抽取进度(每个 case_id 对应一份独立进度) */
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  // 单文档云端 OCR 轮询子状态(独立 state,不混进 progress 以免每拍重算把进度条闪回 0%)
+  const [ocrSub, setOcrSub] = useState<DocOcrStatusEvent | null>(null);
   /** 视图模式:home = 案件看板首页, detail = 单案件详情。默认 home。(仅诉讼模块用) */
   const [view, setView] = useState<"home" | "detail">("home");
   /** 是否正在跑 reaggregate_all_cases(详情页"重新计算画像"按钮触发) */
@@ -231,7 +234,14 @@ function App() {
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     listen<ProgressEvent>("extraction_progress", (event) => {
+      // OCR 轮询子状态:单独存,不替换 progress(否则主进度条 percent 每拍重算闪回 0%)
+      if (event.payload.stage === "doc_ocr_status") {
+        setOcrSub(event.payload);
+        return;
+      }
       setProgress(event.payload);
+      // 任何主进度事件到来都清掉上一份 OCR 子状态(那份只在某文档轮询期间有意义)
+      setOcrSub(null);
       // 处理完成后:刷新当前案件(case 表的 agg_* + documents 列表)+ 5 秒后清进度条
       if (event.payload.stage === "completed") {
         // ⭐ 2026-05-23 晚十 修 bug:之前只刷 documents 没刷 case,导致 selectedCase.agg_computed_at 一直空,详情页"正在抽取"占位不消失
@@ -928,9 +938,13 @@ function App() {
         progress.case_id === selectedId && (
           <ProgressBanner
             progress={progress}
+            ocrSub={ocrSub && ocrSub.case_id === selectedId ? ocrSub : null}
             minimized={progressMinimized}
             onToggleMinimize={() => setProgressMinimized((v) => !v)}
-            onClose={() => setProgress(null)}
+            onClose={() => {
+              setProgress(null);
+              setOcrSub(null);
+            }}
           />
         )}
       <OnboardingWizard

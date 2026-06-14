@@ -79,6 +79,7 @@ fn parse_scopes(raw: Option<&Value>, include_yuandian_cache: bool) -> Vec<KbScop
             .filter_map(|s| match s {
                 "notes" => Some(KbScope::Notes),
                 "companies" => Some(KbScope::Companies),
+                "cases_experience" | "cases-experience" => Some(KbScope::CasesExperience),
                 "sources" => Some(KbScope::Sources),
                 "topics" => Some(KbScope::Topics),
                 "gap_log" | "gap-log" => Some(KbScope::GapLog),
@@ -88,6 +89,7 @@ fn parse_scopes(raw: Option<&Value>, include_yuandian_cache: bool) -> Vec<KbScop
         _ => vec![
             KbScope::Notes,
             KbScope::Companies,
+            KbScope::CasesExperience,
             KbScope::Sources,
             KbScope::Topics,
             KbScope::GapLog,

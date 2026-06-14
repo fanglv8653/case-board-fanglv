@@ -707,6 +707,21 @@ export type ProgressEvent =
       llm_provider: "local" | "cloud";
     }
   | {
+      /** 2026-06-14:单文档云端 OCR 轮询中的实时状态(治大图扫描件"看着卡死")。
+       *  不进主进度线;前端作为附加子状态单独渲染(不动百分比),每 ~3 秒来一拍。 */
+      stage: "doc_ocr_status";
+      case_id: string;
+      doc_id: string;
+      filename: string;
+      index: number;
+      total: number;
+      /** queued(排队)/ processing(识别中)/ converting(转换中) */
+      phase: "queued" | "processing" | "converting";
+      elapsed_secs: number;
+      pages_done: number | null;
+      pages_total: number | null;
+    }
+  | {
       stage: "doc_finished";
       case_id: string;
       doc_id: string;
@@ -735,3 +750,9 @@ export type ProgressEvent =
       analysis_error: string | null;
     }
   | { stage: "error"; case_id: string; error: string };
+
+/** 单文档云端 OCR 轮询子状态(从 ProgressEvent 抽出,App.tsx 单独存一份 state 用)。 */
+export type DocOcrStatusEvent = Extract<
+  ProgressEvent,
+  { stage: "doc_ocr_status" }
+>;
