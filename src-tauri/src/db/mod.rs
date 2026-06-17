@@ -96,7 +96,13 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     // 详见 docs/反馈问题排查-2026-06-15.md。
     reconcile_migration_checksums(&pool).await?;
 
+    // 2026-06-18(整合外部 PR #13 @zzf516988659-del):容忍「DB 里已 applied 但本二进制 resolved
+    // 里没有」的迁移行(sqlx 0.8 默认遇此 panic)。病根 = 跨 fork/跨仓发布节奏漂移:用户先装了某
+    // fork binary(内嵌更多迁移、apply 过)、再装主仓 binary(内嵌较少)→ 启动报「migration N
+    // previously applied but missing」直接闪退。已 applied 的不会重跑,schema 不受影响。
+    // 配合上面的 reconcile_migration_checksums,是跨仓发布漂移的最后一道兜底。
     sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
         .run(&pool)
         .await
         .map_err(|e| DbError::Migrate(e.to_string()))?;

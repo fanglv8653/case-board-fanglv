@@ -1124,13 +1124,15 @@ export function dbHealth(): Promise<DbHealth> {
  *  - find_similar_cases:找相似案例对比
  *  - simulate_opposition:站对方立场推演抗辩/进攻 + 我方应对
  *  - deep_analysis:请求权基础+鉴定式深度分析(两闸交互确认后逐要件论证,落深度分析报告)
+ *  - criminal_deep_analysis:三阶层犯罪论+鉴定式刑事深度分析(仅刑事 tab AI 助手用)
  */
 export type CaseChatTaskType =
   | "compile_legal_basis"
   | "verify_my_draft"
   | "find_similar_cases"
   | "simulate_opposition"
-  | "deep_analysis";
+  | "deep_analysis"
+  | "criminal_deep_analysis";
 
 /** chat_messages 表一行(后端 db::chat::ChatMessage 对应)。 */
 export interface ChatMessage {
@@ -1491,4 +1493,109 @@ export function verifyEmbeddingKey(
   apiKey: string,
 ): Promise<number> {
   return invoke<number>("verify_embedding_key", { endpoint, model, apiKey });
+}
+
+/* ============================================================
+ * 合同审查(非诉 tab · 2026-06-17)
+ * 后端 contract_review 模块:上传 docx → LLM 三层审查 → 风险清单 + 结论 + 审查意见书 docx。
+ * 字段与 Rust serde 一致(snake_case)。
+ * ============================================================ */
+
+/** 单条风险点(对应 Rust `contract_review::analyze::ReviewRisk`)。 */
+export interface ReviewRisk {
+  level: string; // P0 / P1 / P2
+  title: string;
+  clause_ref: string;
+  paragraph_index: number | null;
+  anchor_text: string;
+  consequence: string;
+  basis: string;
+  suggestion: string;
+  recommended_text: string;
+  action: string; // revise / comment
+}
+
+/** 审查结论(对应 Rust `ReviewConclusion`)。 */
+export interface ReviewConclusion {
+  verdict: string; // 可签 / 有条件可签 / 不建议签
+  preconditions: string[];
+  summary: string;
+}
+
+/** 完整审查结果(对应 Rust `ContractReviewResult`)。 */
+export interface ContractReviewResult {
+  contract_type: string;
+  conclusion: ReviewConclusion;
+  risks: ReviewRisk[];
+}
+
+/** 审查命令返回(对应 Rust `ContractReviewResponse`)。 */
+export interface ContractReviewResponse {
+  contract_name: string;
+  paragraph_count: number;
+  result: ContractReviewResult;
+  opinion_md: string;
+}
+
+/** 审查一份合同 .docx。stance: party_a/party_b/neutral;strictness: lenient/normal/aggressive。 */
+export function reviewContractDocx(
+  docxPath: string,
+  stance: string,
+  strictness: string,
+  contractTypeHint: string,
+): Promise<ContractReviewResponse> {
+  return invoke<ContractReviewResponse>("review_contract_docx", {
+    docxPath,
+    stance,
+    strictness,
+    contractTypeHint,
+  });
+}
+
+/**
+ * 把旧版 .doc / .rtf / .odt 合同转成 .docx,返回转换后(临时目录)路径。
+ * macOS 用系统 textutil;其他平台尝试 LibreOffice,没装则透传错误引导另存为 .docx。
+ */
+export function convertDocToDocx(srcPath: string): Promise<string> {
+  return invoke<string>("convert_doc_to_docx", { srcPath });
+}
+
+/** 导出审查意见书 Word(把 review 拿到的 result 原样回传)。返回写盘路径。 */
+export function exportContractOpinionDocx(
+  result: ContractReviewResult,
+  contractName: string,
+  stance: string,
+  strictness: string,
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("export_contract_opinion_docx", {
+    result,
+    contractName,
+    stance,
+    strictness,
+    savePath,
+  });
+}
+
+/** 导出修订批注版 docx 的结果摘要(对应 Rust `RedlineSummary`)。 */
+export interface RedlineSummary {
+  applied_inline: number;
+  applied_comment: number;
+  skipped: string[];
+  saved_path: string;
+}
+
+/** 导出修订批注版 Word(在原合同 docx 上落 P2 整段批注 + P3 行内修订痕迹)。 */
+export function exportContractRedlineDocx(
+  srcDocxPath: string,
+  result: ContractReviewResult,
+  author: string,
+  savePath: string,
+): Promise<RedlineSummary> {
+  return invoke<RedlineSummary>("export_contract_redline_docx", {
+    srcDocxPath,
+    result,
+    author,
+    savePath,
+  });
 }

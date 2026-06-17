@@ -79,7 +79,9 @@ export function LawyerProfilesCard() {
         id_number: editing.id_number.trim() || null,
         phone: editing.phone.trim() || null,
         address: editing.address.trim() || null,
-        is_default: 0,
+        // 整合 PR #17 @zzf516988659-del:Rust 端 is_default: Option<bool>,
+        // 传 integer 0 会 IPC 反序列化失败「expected a boolean」→ 新增档案 100% 报错。
+        is_default: false,
       };
       if (editing.id) {
         await updateLawyerProfile(editing.id, payload);

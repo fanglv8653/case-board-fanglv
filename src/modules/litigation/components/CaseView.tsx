@@ -61,6 +61,7 @@ export function CaseView({
   editingDoc,
   onCloseEditor,
   onArtifactCreated,
+  domain = "civil",
 }: {
   cases: Case[];
   selectedCase: Case | null;
@@ -88,6 +89,11 @@ export function CaseView({
   onCloseEditor: () => void;
   /** V0.3 D2 · chat 落了 save_artifact 文书后的回调:reload + 自动进编辑器打开(docId 空=仅 reload) */
   onArtifactCreated: (docId: string) => void;
+  /**
+   * 案件领域(2026-06-17)。"criminal" = 刑事 tab:snapshot 标签按刑事适配
+   * (罪名 / 被告人 / 检察院·公安 …),AI 助手只保留「刑事深度分析」单 chip。默认 "civil"。
+   */
+  domain?: "civil" | "criminal";
 }) {
   const groups = groupByStage(documents);
   const aiArtifacts = documents.filter((d) => d.is_ai_artifact);
@@ -395,6 +401,7 @@ export function CaseView({
                     caseData={selectedCase}
                     documents={documents}
                     isEditMode={isEditMode}
+                    domain={domain}
                   />
 
                   {/* 原文件(默认折叠) */}
@@ -431,6 +438,7 @@ export function CaseView({
           editingDocId={editingDoc?.id ?? null}
           onBeforeSend={flushEditorBeforeSend}
           onArtifactEdited={handleArtifactEdited}
+          domain={domain}
         />
       </div>
     </main>

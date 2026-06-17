@@ -315,7 +315,7 @@ export function CourtFilingSection({ caseData }: { caseData: Case }) {
 
   async function handleStart() {
     if (selectedAgents.length === 0) {
-      setProgressMsg("请先选择代理律师（设置→律师档案）");
+      setProgressMsg("请先选择代理律师（法律工具→辅助在线立案→代理律师档案）");
       return;
     }
     setPrepOpen(true);
@@ -418,9 +418,12 @@ export function CourtFilingSection({ caseData }: { caseData: Case }) {
         </div>
       )}
       {lawyers.length === 0 && (
-        <p className="text-xs text-amber-600">
-          未配置律师档案，请先在「设置→律师档案」中添加。
-        </p>
+        <div className="space-y-0.5 text-xs text-amber-600">
+          <p>未配置律师档案，请先在「法律工具→辅助在线立案→代理律师档案」中添加。</p>
+          <p className="text-muted-foreground">
+            同处还需填一张网账号/密码；本功能为实验性，依赖本机 Python 运行时(需自行安装)。
+          </p>
+        </div>
       )}
 
       {/* 开始按钮 */}

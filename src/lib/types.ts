@@ -525,7 +525,7 @@ export interface LawyerProfile {
   id_number: string | null;
   phone: string | null;
   address: string | null;
-  is_default: number;
+  is_default: boolean; // Rust 端 Option<bool>(整合 PR #17),跟契约对齐
   created_at: string;
   updated_at: string;
 }
