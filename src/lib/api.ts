@@ -1631,6 +1631,52 @@ export interface ContractReviewResponse {
   opinion_md: string;
 }
 
+/** 合同审查页内嵌法律检索的入参(FL-C2 MVP)。 */
+export interface TransactionLegalResearchInput {
+  question: string;
+  contract_name?: string | null;
+  contract_type?: string | null;
+  stance?: string | null;
+  risk_title?: string | null;
+  clause_ref?: string | null;
+  anchor_text?: string | null;
+}
+
+export interface TransactionResearchAuthority {
+  authority_type: string;
+  title: string;
+  locator: string;
+  snippet: string;
+  relevance: string;
+}
+
+export interface TransactionResearchCitation {
+  source_type: string;
+  source_name: string;
+  locator: string;
+}
+
+export interface TransactionResearchToolTrace {
+  tool: string;
+  success: boolean;
+  kb_hit: boolean;
+  credits_used: number;
+  error_short: string | null;
+}
+
+export interface TransactionLegalResearchResponse {
+  question: string;
+  normalized_issue: string;
+  scope_note: string;
+  summary: string;
+  authorities: TransactionResearchAuthority[];
+  risk_analysis: string[];
+  recommended_actions: string[];
+  citations: TransactionResearchCitation[];
+  tool_trace: TransactionResearchToolTrace[];
+  follow_up_questions: string[];
+}
+
 /** 审查一份合同 .docx。stance: party_a/party_b/neutral;strictness: lenient/normal/aggressive。 */
 export function reviewContractDocx(
   docxPath: string,
@@ -1644,6 +1690,13 @@ export function reviewContractDocx(
     strictness,
     contractTypeHint,
   });
+}
+
+/** FL-C2 MVP:非案件型合同法律检索(复用法律/法规/类案/本地 KB 工具层,不写聊天历史)。 */
+export function transactionLegalResearch(
+  input: TransactionLegalResearchInput,
+): Promise<TransactionLegalResearchResponse> {
+  return invoke<TransactionLegalResearchResponse>("transaction_legal_research", { input });
 }
 
 /**

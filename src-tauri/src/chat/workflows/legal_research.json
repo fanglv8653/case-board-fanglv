@@ -1,0 +1,66 @@
+{
+  "scene_id": "legal_research",
+  "label": "法律检索",
+  "preferred_task_types": [
+    "compile_legal_basis",
+    "free_chat"
+  ],
+  "entry_points": [
+    "case_chat_panel",
+    "transaction_research",
+    "general_legal_query"
+  ],
+  "intent_signals": [
+    "法律依据",
+    "法律检索",
+    "法条",
+    "法规",
+    "司法解释",
+    "裁判规则",
+    "请检索",
+    "适用依据"
+  ],
+  "route_priority": 20,
+  "default_task_type": "compile_legal_basis",
+  "allowed_tools": [
+    "search_laws",
+    "get_law_article",
+    "search_regulations",
+    "get_regulation_detail",
+    "law_vector_search",
+    "search_cases_normal",
+    "search_cases_authority",
+    "get_case_detail",
+    "case_vector_search",
+    "search_local_kb",
+    "semantic_search_local_kb",
+    "read_kb_file",
+    "verify_legal_citations",
+    "ask_user",
+    "save_artifact"
+  ],
+  "blocked_tools": [
+    "enterprise_search",
+    "enterprise_aggregation_summary",
+    "enterprise_base_info",
+    "enterprise_change_info",
+    "enterprise_writ_list",
+    "enterprise_annual_report",
+    "list_case_docs",
+    "read_case_doc",
+    "find_in_document",
+    "semantic_search_case_docs",
+    "edit_artifact",
+    "reextract_document",
+    "save_company_report"
+  ],
+  "output_modes": [
+    "chat_answer",
+    "markdown_note"
+  ],
+  "prompt_preamble": "【场景约束｜法律检索｜legal_research】\n- 优先给出法律依据、条文定位、适用边界和不确定点。\n- 先区分已检到的条文/类案事实与分析判断，再给结论。\n- 查不到明确依据时，必须直接写“未检到明确依据”，不要编造法条、司法解释或案号。\n- 若问题仍缺关键检索要素，可以先用 `ask_user` 追问一次，再继续检索。",
+  "fallback_policy": [
+    "无法定位具体条文全文时，至少返回法规名称、关键词命中位置和待核校提示。",
+    "若类案支持不足，明确写“类案支持不足”，不要把一般性经验包装成已核验结论。"
+  ]
+}

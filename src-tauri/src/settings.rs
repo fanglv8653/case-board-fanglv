@@ -243,6 +243,8 @@ pub struct Settings {
     pub chat_loop_max_iters: Option<u32>,
     /// chat 单条消息最多引用文档数(默认 5)
     pub chat_max_attached: Option<u32>,
+    /// 2026-06-21 方律场景路由总开关。默认 false,关闭时聊天主链保持原行为。
+    pub enable_fanglv_router: bool,
     /// V0.3.6 · 外部 MCP server 白名单(CaseBoard 当客户端消费其工具)。默认空 = 桥接关闭、零行为变化。
     /// 每项 `{name, transport:{type:"stdio",command,args,env}|{type:"http",url}, enabled}`,详 ADR-0008。
     pub mcp_servers: Vec<McpServerConfig>,
@@ -415,6 +417,10 @@ impl Settings {
     /// V0.3 隐藏本地后 `effective_*` 恒 cloud → 本函数恒 false(pipeline 不再自动起本机服务)。
     pub fn needs_local_server(&self) -> bool {
         self.effective_ocr_provider() == "local" || self.effective_llm_provider() == "local"
+    }
+
+    pub fn fanglv_router_enabled(&self) -> bool {
+        self.enable_fanglv_router
     }
 }
 

@@ -218,6 +218,8 @@ export function CaseChatPanel({
   // V0.3 · 模型调 ask_user 发起的选项式追问;非 null 时在末尾渲染选项卡片。
   // 任何新消息(点选项 / 自己发)开头即清,切案件也清。
   const [pendingAsk, setPendingAsk] = useState<AskQuestion[] | null>(null);
+  // FL-D3: surface routed scene info without changing backend contracts.
+  const [activeStrategy, setActiveStrategy] = useState<string | null>(null);
   // 2026-05-31 · 流式状态来自模块级 registry(跨面板卸载存活)。forceRerender 强制重渲染。
   const [, forceRerender] = useState(0);
   const run = getRun(caseId);
@@ -247,6 +249,10 @@ export function CaseChatPanel({
         is_ai_artifact: d.is_ai_artifact,
       }));
   }, [caseDocs, attachedDocIds]);
+  const activeSceneHint = useMemo(
+    () => describeSceneStrategy(activeStrategy),
+    [activeStrategy],
+  );
 
   // localStorage 持久化折叠状态 + 广播事件给 FeedbackButton 避让
   useEffect(() => {
@@ -274,6 +280,7 @@ export function CaseChatPanel({
     setPickerOpen(false);
     // V0.3 · 切案件清掉上一个案件遗留的选项卡片
     setPendingAsk(null);
+    setActiveStrategy(null);
     if (!caseId || collapsed) return;
     let abort = false;
     setHistoryLoading(true);
@@ -373,6 +380,7 @@ export function CaseChatPanel({
       // 拿最新历史(后端已经 INSERT 完两条);registry 的 done 订阅也会刷,这里立即刷一次
       const fresh = await listChatHistory(caseId);
       setHistory(fresh);
+      setActiveStrategy(result.strategy ?? null);
       // V0.3 · 模型这轮发起了选项式追问 → 末尾渲染选项卡片,等用户点选/填写
       setPendingAsk(result.ask_user ?? null);
       // V0.3 · **只有「写文书」(save_artifact)才自动进编辑器**。分析类任务(类案检索/法律依据
@@ -434,6 +442,7 @@ export function CaseChatPanel({
       await clearChatHistory(caseId);
       setHistory([]);
       setError(null);
+      setActiveStrategy(null);
     } catch (e) {
       setError(formatError(e));
     }
@@ -501,6 +510,16 @@ export function CaseChatPanel({
           </button>
         </div>
       </header>
+      {activeSceneHint && (
+        <div className="border-b border-amber-200/60 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-200">
+          <div className="flex items-center gap-2">
+            <span className="rounded-full border border-amber-300/80 bg-background/80 px-2 py-0.5 font-medium dark:border-amber-800/80 dark:bg-background/20">
+              {activeSceneHint.badge}
+            </span>
+            <span className="min-w-0 flex-1">{activeSceneHint.summary}</span>
+          </div>
+        </div>
+      )}
 
       {/* Messages 区:外层 relative 容器承载「回到底部」浮钮(不随内容滚动);min-h-0 保证 flex 子项可滚 */}
       <div className="relative flex min-h-0 flex-1 flex-col">
@@ -892,6 +911,27 @@ function ChatSegments({
       )}
     </>
   );
+}
+
+function describeSceneStrategy(strategy: string | null): {
+  badge: string;
+  summary: string;
+} | null {
+  if (!strategy) return null;
+  if (strategy === "agent-loop/fanglv:litigation_analysis") {
+    return {
+      badge: "诉讼分析场景",
+      summary:
+        "本轮已切到争点/证据/法条/类案联动分析模式,会优先按诉讼分析结构组织输出。",
+    };
+  }
+  if (strategy.startsWith("agent-loop/fanglv:")) {
+    return {
+      badge: "方律场景",
+      summary: "本轮已命中预设法律工作流场景约束。",
+    };
+  }
+  return null;
 }
 
 function formatError(e: unknown): string {

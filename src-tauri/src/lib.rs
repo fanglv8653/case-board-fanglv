@@ -26,6 +26,7 @@ pub mod settings;
 pub mod team;
 pub mod telemetry;
 pub mod ticktick;
+pub mod transaction_research;
 pub mod update;
 pub mod verify;
 pub mod yuandian;
@@ -5403,6 +5404,7 @@ pub fn run() {
             contract_review::convert_doc_to_docx,
             contract_review::export_contract_opinion_docx,
             contract_review::export_contract_redline_docx,
+            transaction_research::transaction_legal_research,
             contract_draft::plan_contract_draft,
             contract_draft::generate_contract_draft,
             contract_draft::export_contract_draft_docx,

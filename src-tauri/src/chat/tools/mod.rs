@@ -44,6 +44,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use thiserror::Error;
+use std::collections::HashSet;
 
 use crate::local_kb::cache::LocalKb;
 use crate::settings::Settings;
@@ -227,6 +228,26 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    pub fn count_matching_names(&self, allowed: &[String], blocked: &[String]) -> usize {
+        let allowed = normalize_name_set(allowed);
+        let blocked = normalize_name_set(blocked);
+        self.tools
+            .iter()
+            .filter(|tool| should_keep_tool(tool.name(), &allowed, &blocked))
+            .count()
+    }
+
+    pub fn filter_by_names(self, allowed: &[String], blocked: &[String]) -> Self {
+        let allowed = normalize_name_set(allowed);
+        let blocked = normalize_name_set(blocked);
+        let tools = self
+            .tools
+            .into_iter()
+            .filter(|tool| should_keep_tool(tool.name(), &allowed, &blocked))
+            .collect();
+        Self { tools }
+    }
+
     /// V0.3.6 · 把外部 MCP server 发现的转发工具并入注册表(由 `mcp_bridge::connect_mcp_servers`
     /// 产出)。空 vec = 无变化。MCP 工具与内置工具一视同仁走 `find` / `execute` / schemas。
     pub fn with_mcp(mut self, extra: Vec<Box<dyn Tool>>) -> Self {
@@ -267,6 +288,21 @@ pub(crate) fn opt_u32(args: &Value, key: &str) -> Option<u32> {
 /// 可选 bool。
 pub(crate) fn opt_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(|v| v.as_bool())
+}
+
+fn normalize_name_set(items: &[String]) -> HashSet<String> {
+    items
+        .iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn should_keep_tool(name: &str, allowed: &HashSet<String>, blocked: &HashSet<String>) -> bool {
+    if blocked.contains(name) {
+        return false;
+    }
+    allowed.is_empty() || allowed.contains(name)
 }
 
 /// 拿元典 API key,空串 / 缺失返回 `NoYuandianKey`。

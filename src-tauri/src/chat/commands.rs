@@ -33,6 +33,7 @@ use crate::chat::model_router::route_model;
 use crate::chat::prompts::task_user_prompt;
 use crate::chat::stream::{ChatStreamEvent, ChatUsage};
 use crate::chat::tools::{ToolContext, ToolRegistry};
+use crate::chat::workflows::{build_scene_execution_plan, SceneRouteInput};
 use crate::db::chat::{insert_chat_message, list_chat_messages, ChatMessage, NewChatMessage};
 use crate::llm::LlmConfig;
 use crate::local_kb::cache::LocalKb;
@@ -165,6 +166,44 @@ pub async fn case_chat_impl(
         }
     }
     let mut llm_config = LlmConfig::from_settings(&settings);
+    let attached_doc_ids_for_route: &[String] = input.attached_doc_ids.as_deref().unwrap_or(&[]);
+    let scene_plan = build_scene_execution_plan(
+        &settings,
+        SceneRouteInput {
+            task,
+            user_message: &input.user_message,
+            attached_doc_ids: attached_doc_ids_for_route,
+            editing_doc_id: input.editing_doc_id.as_deref(),
+        },
+    );
+    for warning in &scene_plan.warnings {
+        crate::dlog!("[chat] fanglv router: {}", warning);
+    }
+    let registry_tools = ToolRegistry::default_v0_2();
+    let registry_tools = if settings.mcp_servers.is_empty() {
+        registry_tools
+    } else {
+        let mcp_tools = crate::chat::mcp_bridge::connect_mcp_servers(&settings.mcp_servers).await;
+        registry_tools.with_mcp(mcp_tools)
+    };
+    let mut active_scene_plan = scene_plan.clone();
+    let registry_tools = if scene_plan.has_tool_filters() {
+        let matched = registry_tools
+            .count_matching_names(&scene_plan.allowed_tools, &scene_plan.blocked_tools);
+        if matched == 0 {
+            crate::dlog!(
+                "[chat] fanglv router 工具过滤后为空,回退旧链路(strategy={})",
+                scene_plan.strategy_label()
+            );
+            active_scene_plan = scene_plan.with_runtime_fallback(task, "fanglv-tools-empty");
+            registry_tools
+        } else {
+            registry_tools.filter_by_names(&scene_plan.allowed_tools, &scene_plan.blocked_tools)
+        }
+    } else {
+        registry_tools
+    };
+    let effective_task = active_scene_plan.effective_task_type;
 
     // ── 3. 读最近聊天历史(最近 6 对 = 12 条) ────────────────────────
     let history_rows = list_chat_messages(pool, &input.case_id, Some(12))
@@ -187,7 +226,7 @@ pub async fn case_chat_impl(
             case_id: &input.case_id,
             role: "user",
             content: &input.user_message,
-            task_type: task.as_db_str(),
+            task_type: effective_task.as_db_str(),
             model: None,
             prompt_tokens: None,
             completion_tokens: None,
@@ -224,7 +263,7 @@ pub async fn case_chat_impl(
     });
 
     // ── 7. 拼 user_prompt(固定任务前缀 + 用户原话) ──────────────────
-    let user_message_final = match task_user_prompt(task) {
+    let user_message_final = match task_user_prompt(effective_task) {
         Some(template) => {
             if input.user_message.trim().is_empty() {
                 template.to_string()
@@ -243,7 +282,7 @@ pub async fn case_chat_impl(
     // V0.3 · model_router 统一读 cloud_llm_model 档位(全局 flash/pro 或 auto 自动挡);
     // 把选中的模型回写进 llm_config,**agent_loop 和 stream 两条路径都用同一个模型**(不再分叉)。
     // ⚠️ 只在云端档覆盖:本地档(ollama)的 model 是本机模型名,绝不能被 DeepSeek 档位名覆盖。
-    let choice = route_model(task, &input.user_message, &settings);
+    let choice = route_model(effective_task, &input.user_message, &settings);
     if settings.effective_llm_provider() == "cloud" {
         llm_config.model = choice.model.clone();
     }
@@ -257,7 +296,7 @@ pub async fn case_chat_impl(
     // 每次 chat 都建 chat_task(落 tool_calls / citations / finish);失败不阻断聊天,task_id=null。
     let chat_task_id: Option<String> = {
         let tid = uuid::Uuid::new_v4().to_string();
-        let task_type_for_chat = task.as_db_str().unwrap_or("free_chat");
+        let task_type_for_chat = effective_task.as_db_str().unwrap_or("free_chat");
         let attached_doc_ids_json = attached_doc_ids_clone
             .as_ref()
             .filter(|v| !v.is_empty())
@@ -295,18 +334,12 @@ pub async fn case_chat_impl(
     let attached_ids: Vec<String> = attached_doc_ids_clone.clone().unwrap_or_default();
     // based_on:本轮喂进上下文的「材料文档」id(写 chat_messages.based_on);原由 build_context 返回
     let based_on_doc_ids = crate::chat::constitution::material_doc_ids(&docs, &attached_ids);
-    let constitution_prompt =
-        build_system_prompt(&case, &docs, &attached_ids, input.editing_doc_id.as_deref());
-
-    let registry_tools = ToolRegistry::default_v0_2();
-    // V0.3.6 · 外部 MCP server(白名单,默认空 = 零开销零变化)。连/列失败的 server 跳过+dlog,不拖垮 chat。
-    // 连接生命周期绑本次调用:registry_tools(持 Arc<McpClient>)在本函数末尾 drop → 子进程被 kill_on_drop 杀。
-    let registry_tools = if settings.mcp_servers.is_empty() {
-        registry_tools
-    } else {
-        let mcp_tools = crate::chat::mcp_bridge::connect_mcp_servers(&settings.mcp_servers).await;
-        registry_tools.with_mcp(mcp_tools)
-    };
+    let constitution_prompt = active_scene_plan.apply_system_prompt(build_system_prompt(
+        &case,
+        &docs,
+        &attached_ids,
+        input.editing_doc_id.as_deref(),
+    ));
     let local_kb = LocalKb::auto_detect(&settings);
     let ctx = ToolContext {
         pool,
@@ -332,7 +365,7 @@ pub async fn case_chat_impl(
         temperature: choice.temperature,
         max_tokens: choice.max_tokens,
         // thinking 模型不支持 tool_choice="required"(DeepSeek 400),降级 auto;详 resolve_tool_choice。
-        tool_choice: resolve_tool_choice(task.needs_tools(), &choice.model).into(),
+        tool_choice: resolve_tool_choice(effective_task.needs_tools(), &choice.model).into(),
         case_docs_for_citation_check,
     };
     let result: Result<ChatRunFinish, String> =
@@ -368,7 +401,7 @@ pub async fn case_chat_impl(
             if let Some(m) = &metrics {
                 append_agent_metrics(
                     &input.case_id,
-                    task.as_db_str().unwrap_or("free_chat"),
+                    effective_task.as_db_str().unwrap_or("free_chat"),
                     &usage.model,
                     m,
                     &final_tool_calls,
@@ -380,7 +413,7 @@ pub async fn case_chat_impl(
             // artifact 落盘也用 cleaned,防止 .md 文件里残留 JSON 引用块。
             let assistant_content = content_cleaned;
             // ── 9. 决定是否落 artifact ──────────────────────────────
-            let mut artifact_doc_id = if let Some(task_str) = task.as_db_str() {
+            let mut artifact_doc_id = if let Some(task_str) = effective_task.as_db_str() {
                 if assistant_content.chars().count() >= 1500 {
                     match write_chat_artifact(
                         pool,
@@ -469,7 +502,7 @@ pub async fn case_chat_impl(
                     case_id: &input.case_id,
                     role: "assistant",
                     content: &assistant_content,
-                    task_type: task.as_db_str(),
+                    task_type: effective_task.as_db_str(),
                     model: Some(&usage.model),
                     prompt_tokens: usage.prompt_tokens.map(|x| x as i64),
                     completion_tokens: usage.completion_tokens.map(|x| x as i64),
@@ -497,7 +530,7 @@ pub async fn case_chat_impl(
                 completion_tokens: usage.completion_tokens,
                 latency_ms,
                 artifact_doc_id,
-                strategy: "agent-loop".to_string(),
+                strategy: active_scene_plan.strategy_label(),
                 based_on_doc_ids,
                 citations: final_citations,
                 tool_calls: final_tool_calls,
@@ -544,7 +577,7 @@ pub async fn case_chat_impl(
                     case_id: &input.case_id,
                     role: "assistant",
                     content: &streamed_partial,
-                    task_type: task.as_db_str(),
+                    task_type: effective_task.as_db_str(),
                     model: None,
                     prompt_tokens: None,
                     completion_tokens: None,
@@ -702,6 +735,8 @@ fn artifact_display_name(task_type: &str) -> &'static str {
         "find_similar_cases" => "类案检索",
         "verify_my_draft" => "草稿核校",
         "simulate_opposition" => "模拟对抗",
+        "deep_analysis" => "诉讼分析报告",
+        "criminal_deep_analysis" => "刑事深度分析报告",
         _ => "AI助手",
     }
 }

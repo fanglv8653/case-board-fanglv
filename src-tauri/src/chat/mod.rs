@@ -35,6 +35,7 @@ pub mod prefix_cache;
 pub mod prompts;
 pub mod stream;
 pub mod tools;
+pub mod workflows;
 
 pub use commands::{
     cancel_chat_impl, case_chat_impl, clear_chat_history_impl, list_chat_history_impl,

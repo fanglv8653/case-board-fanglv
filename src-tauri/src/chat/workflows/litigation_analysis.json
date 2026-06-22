@@ -1,0 +1,114 @@
+{
+  "scene_id": "litigation_analysis",
+  "label": "诉讼分析",
+  "preferred_task_types": [
+    "compile_legal_basis",
+    "find_similar_cases",
+    "simulate_opposition",
+    "deep_analysis"
+  ],
+  "entry_points": [
+    "case_chat_panel",
+    "litigation_module"
+  ],
+  "intent_signals": [
+    "诉讼",
+    "起诉",
+    "答辩",
+    "抗辩",
+    "举证",
+    "请求权",
+    "争点",
+    "证据"
+  ],
+  "route_priority": 40,
+  "default_task_type": "deep_analysis",
+  "attached_docs_preferred": true,
+  "allowed_tools": [
+    "list_case_docs",
+    "read_case_doc",
+    "find_in_document",
+    "semantic_search_case_docs",
+    "search_laws",
+    "search_regulations",
+    "get_law_article",
+    "get_regulation_detail",
+    "law_vector_search",
+    "search_cases_normal",
+    "search_cases_authority",
+    "get_case_detail",
+    "case_vector_search",
+    "verify_legal_citations",
+    "ask_user",
+    "save_artifact",
+    "edit_artifact"
+  ],
+  "optional_tools": [
+    "search_local_kb",
+    "semantic_search_local_kb",
+    "verify_legal_citations"
+  ],
+  "blocked_tools": [
+    "enterprise_search",
+    "enterprise_base_info",
+    "enterprise_change_info",
+    "enterprise_annual_report",
+    "enterprise_writ_list",
+    "enterprise_aggregation_summary",
+    "save_company_report"
+  ],
+  "output_modes": [
+    "chat_answer",
+    "structured_conclusion_card",
+    "markdown_report",
+    "editable_artifact"
+  ],
+  "output_contract": {
+    "required_structures": [
+      "issue_map",
+      "evidence_map",
+      "law_map",
+      "case_map"
+    ],
+    "citation_kinds": [
+      "doc",
+      "law",
+      "case"
+    ],
+    "chat_sections": [
+      "结论摘要",
+      "核心争点",
+      "证据与法条支撑",
+      "风险/缺口",
+      "下一步动作"
+    ],
+    "artifact_title": "诉讼分析报告",
+    "artifact_sections": [
+      "案件背景与分析范围",
+      "我方立场与诉讼目标",
+      "争点总表",
+      "争点逐项分析",
+      "证据梳理与证明力评估",
+      "法条依据与适用说明",
+      "类案支持度与差异点",
+      "对方可能抗辩及我方回应",
+      "证据缺口与补强建议",
+      "阶段性结论",
+      "引用清单"
+    ]
+  },
+  "ask_user_policy": {
+    "must_pause_when": [
+      "我方代理立场未识别",
+      "用户目标不清楚",
+      "关键事实存在多版本且直接影响请求权基础",
+      "需要在多个主备位请求之间拍板"
+    ],
+    "max_rounds": 2
+  },
+  "fallback_policy": [
+    "无法补齐四张结构表时，至少保留 issue_map 并明确 evidence_map/law_map/case_map 的缺口。",
+    "不能核到条文全文时，必须显式标注未完成条文核校。",
+    "不能只输出连续散文，不得省略引用类型区分。"
+  ]
+}

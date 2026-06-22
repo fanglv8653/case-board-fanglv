@@ -1,0 +1,69 @@
+{
+  "scene_id": "contract_review_plus",
+  "label": "合同审查增强",
+  "preferred_task_types": [
+    "verify_my_draft",
+    "free_chat"
+  ],
+  "entry_points": [
+    "case_chat_panel",
+    "transaction_contract_review",
+    "document_editing"
+  ],
+  "intent_signals": [
+    "合同",
+    "条款",
+    "审查",
+    "修订",
+    "改写",
+    "付款条款",
+    "违约责任",
+    "风险点"
+  ],
+  "route_priority": 30,
+  "default_task_type": "verify_my_draft",
+  "editing_doc_preferred": true,
+  "attached_docs_preferred": true,
+  "allowed_tools": [
+    "list_case_docs",
+    "read_case_doc",
+    "find_in_document",
+    "semantic_search_case_docs",
+    "search_laws",
+    "get_law_article",
+    "search_regulations",
+    "get_regulation_detail",
+    "law_vector_search",
+    "search_cases_normal",
+    "search_cases_authority",
+    "get_case_detail",
+    "case_vector_search",
+    "verify_legal_citations",
+    "ask_user",
+    "save_artifact",
+    "edit_artifact"
+  ],
+  "blocked_tools": [
+    "enterprise_search",
+    "enterprise_aggregation_summary",
+    "enterprise_base_info",
+    "enterprise_change_info",
+    "enterprise_writ_list",
+    "enterprise_annual_report",
+    "search_local_kb",
+    "semantic_search_local_kb",
+    "read_kb_file",
+    "reextract_document",
+    "save_company_report"
+  ],
+  "output_modes": [
+    "chat_answer",
+    "risk_checklist",
+    "editable_artifact"
+  ],
+  "prompt_preamble": "【场景约束｜合同审查增强｜contract_review_plus】\n- 优先输出风险分级、涉及条款、原因说明和建议改法，不要只给抽象评价。\n- 若已在编辑模式中，应优先复用 `edit_artifact` 做局部修改；需要整份重写时再考虑 `save_artifact`。\n- 对引用的法律依据、监管要求和类案支持，要明确哪些已核到、哪些仍是分析判断。\n- 若交易背景、角色分配或目标条款不清楚，先用 `ask_user` 追问关键缺口，再继续审查。",
+  "fallback_policy": [
+    "无法形成完整红黄绿分级时，至少给出高风险条款和建议改法。",
+    "若缺少合同全文或关键附件，必须显式提示审查范围受限。"
+  ]
+}
