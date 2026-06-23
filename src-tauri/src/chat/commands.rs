@@ -33,7 +33,10 @@ use crate::chat::model_router::route_model;
 use crate::chat::prompts::task_user_prompt;
 use crate::chat::stream::{ChatStreamEvent, ChatUsage};
 use crate::chat::tools::{ToolContext, ToolRegistry};
-use crate::chat::workflows::{build_scene_execution_plan, SceneRouteInput};
+use crate::chat::workflows::{
+    build_scene_execution_plan, validate_litigation_output, LitigationStructureGuard,
+    SceneRouteInput,
+};
 use crate::db::chat::{insert_chat_message, list_chat_messages, ChatMessage, NewChatMessage};
 use crate::llm::LlmConfig;
 use crate::local_kb::cache::LocalKb;
@@ -73,6 +76,11 @@ impl ChatCancelRegistry {
 pub struct CaseChatResult {
     pub user_message_id: String,
     pub assistant_message_id: String,
+    #[serde(default)]
+    /// 前端入口任务类型（快捷 chip / 普通发送）；null = 自由聊天
+    pub requested_task_type: Option<String>,
+    /// 运行时实际任务类型（可能被 Fanglv 场景路由改写）
+    pub effective_task_type: String,
     pub model: Option<String>,
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
@@ -96,6 +104,8 @@ pub struct CaseChatResult {
     /// 用户回答后当作下一条普通 user 消息回灌。`None` = 正常回答。
     #[serde(default)]
     pub ask_user: Option<Vec<crate::chat::agent_loop::AskQuestion>>,
+    #[serde(default)]
+    pub structure_guard: Option<LitigationStructureGuard>,
 }
 
 /// V0.2 D6.5 · `case_chat_impl` 内部把"跑完一次 LLM"统一收成一个结构,
@@ -141,7 +151,8 @@ pub async fn case_chat_impl(
     input: CaseChatInput,
 ) -> Result<CaseChatResult, String> {
     let started_at = std::time::Instant::now();
-    let task = TaskType::from_str_loose(input.task_type.as_deref());
+    let requested_task = TaskType::from_str_loose(input.task_type.as_deref());
+    let requested_task_type = requested_task.as_db_str().map(str::to_string);
     let channel = format!("chat-stream-{}", input.message_id);
 
     // ── 1. 取 settings + LlmConfig ────────────────────────────────────
@@ -204,6 +215,10 @@ pub async fn case_chat_impl(
         registry_tools
     };
     let effective_task = active_scene_plan.effective_task_type;
+    let effective_task_type = effective_task
+        .as_db_str()
+        .unwrap_or("free_chat")
+        .to_string();
 
     // ── 3. 读最近聊天历史(最近 6 对 = 12 条) ────────────────────────
     let history_rows = list_chat_messages(pool, &input.case_id, Some(12))
@@ -226,7 +241,7 @@ pub async fn case_chat_impl(
             case_id: &input.case_id,
             role: "user",
             content: &input.user_message,
-            task_type: effective_task.as_db_str(),
+            task_type: requested_task_type.as_deref(),
             model: None,
             prompt_tokens: None,
             completion_tokens: None,
@@ -296,7 +311,6 @@ pub async fn case_chat_impl(
     // 每次 chat 都建 chat_task(落 tool_calls / citations / finish);失败不阻断聊天,task_id=null。
     let chat_task_id: Option<String> = {
         let tid = uuid::Uuid::new_v4().to_string();
-        let task_type_for_chat = effective_task.as_db_str().unwrap_or("free_chat");
         let attached_doc_ids_json = attached_doc_ids_clone
             .as_ref()
             .filter(|v| !v.is_empty())
@@ -307,7 +321,7 @@ pub async fn case_chat_impl(
                 id: &tid,
                 case_id: &input.case_id,
                 message_id: &input.message_id,
-                task_type: task_type_for_chat,
+                task_type: effective_task_type.as_str(),
                 status: "executing",
                 attached_doc_ids: attached_doc_ids_json.as_deref(),
             },
@@ -401,7 +415,7 @@ pub async fn case_chat_impl(
             if let Some(m) = &metrics {
                 append_agent_metrics(
                     &input.case_id,
-                    effective_task.as_db_str().unwrap_or("free_chat"),
+                    effective_task_type.as_str(),
                     &usage.model,
                     m,
                     &final_tool_calls,
@@ -502,7 +516,7 @@ pub async fn case_chat_impl(
                     case_id: &input.case_id,
                     role: "assistant",
                     content: &assistant_content,
-                    task_type: effective_task.as_db_str(),
+                    task_type: requested_task_type.as_deref(),
                     model: Some(&usage.model),
                     prompt_tokens: usage.prompt_tokens.map(|x| x as i64),
                     completion_tokens: usage.completion_tokens.map(|x| x as i64),
@@ -522,20 +536,30 @@ pub async fn case_chat_impl(
             // 法条/案例补进语义索引(单飞 + 无新增早退,所以多数轮次是廉价 no-op)。
             crate::spawn_kb_auto_index(app.clone());
 
+            let strategy = active_scene_plan.strategy_label();
+            let structure_guard = if strategy == "agent-loop/fanglv:litigation_analysis" {
+                validate_litigation_output(&assistant_content, &final_citations)
+            } else {
+                None
+            };
+
             Ok(CaseChatResult {
                 user_message_id: user_msg_id,
                 assistant_message_id: assistant_id,
+                requested_task_type: requested_task_type.clone(),
+                effective_task_type: effective_task_type.clone(),
                 model: Some(usage.model),
                 prompt_tokens: usage.prompt_tokens,
                 completion_tokens: usage.completion_tokens,
                 latency_ms,
                 artifact_doc_id,
-                strategy: active_scene_plan.strategy_label(),
+                strategy,
                 based_on_doc_ids,
                 citations: final_citations,
                 tool_calls: final_tool_calls,
                 task_id: chat_task_id.clone(),
                 ask_user,
+                structure_guard,
             })
         }
         Err(err) => {
@@ -577,7 +601,7 @@ pub async fn case_chat_impl(
                     case_id: &input.case_id,
                     role: "assistant",
                     content: &streamed_partial,
-                    task_type: effective_task.as_db_str(),
+                    task_type: requested_task_type.as_deref(),
                     model: None,
                     prompt_tokens: None,
                     completion_tokens: None,

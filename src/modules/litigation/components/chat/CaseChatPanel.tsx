@@ -44,6 +44,7 @@ import {
   cancelChat,
   type CaseChatTaskType,
   type ChatMessage,
+  type LitigationStructureGuard,
   clearChatHistory,
   getCaseWithDocs,
   listChatHistory,
@@ -220,6 +221,8 @@ export function CaseChatPanel({
   const [pendingAsk, setPendingAsk] = useState<AskQuestion[] | null>(null);
   // FL-D3: surface routed scene info without changing backend contracts.
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null);
+  const [activeStructureGuard, setActiveStructureGuard] =
+    useState<LitigationStructureGuard | null>(null);
   // 2026-05-31 · 流式状态来自模块级 registry(跨面板卸载存活)。forceRerender 强制重渲染。
   const [, forceRerender] = useState(0);
   const run = getRun(caseId);
@@ -253,6 +256,10 @@ export function CaseChatPanel({
     () => describeSceneStrategy(activeStrategy),
     [activeStrategy],
   );
+  const activeGuardHint = useMemo(
+    () => describeLitigationGuard(activeStructureGuard),
+    [activeStructureGuard],
+  );
 
   // localStorage 持久化折叠状态 + 广播事件给 FeedbackButton 避让
   useEffect(() => {
@@ -281,6 +288,7 @@ export function CaseChatPanel({
     // V0.3 · 切案件清掉上一个案件遗留的选项卡片
     setPendingAsk(null);
     setActiveStrategy(null);
+    setActiveStructureGuard(null);
     if (!caseId || collapsed) return;
     let abort = false;
     setHistoryLoading(true);
@@ -381,6 +389,7 @@ export function CaseChatPanel({
       const fresh = await listChatHistory(caseId);
       setHistory(fresh);
       setActiveStrategy(result.strategy ?? null);
+      setActiveStructureGuard(result.structure_guard ?? null);
       // V0.3 · 模型这轮发起了选项式追问 → 末尾渲染选项卡片,等用户点选/填写
       setPendingAsk(result.ask_user ?? null);
       // V0.3 · **只有「写文书」(save_artifact)才自动进编辑器**。分析类任务(类案检索/法律依据
@@ -443,6 +452,7 @@ export function CaseChatPanel({
       setHistory([]);
       setError(null);
       setActiveStrategy(null);
+      setActiveStructureGuard(null);
     } catch (e) {
       setError(formatError(e));
     }
@@ -517,6 +527,23 @@ export function CaseChatPanel({
               {activeSceneHint.badge}
             </span>
             <span className="min-w-0 flex-1">{activeSceneHint.summary}</span>
+          </div>
+        </div>
+      )}
+      {activeGuardHint && (
+        <div
+          className={cn(
+            "border-b px-3 py-2 text-[11px]",
+            activeGuardHint.tone === "ok"
+              ? "border-emerald-200/60 bg-emerald-50/70 text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-950/20 dark:text-emerald-200"
+              : "border-rose-200/60 bg-rose-50/70 text-rose-900 dark:border-rose-900/40 dark:bg-rose-950/20 dark:text-rose-200",
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <span className="rounded-full border border-current/20 bg-background/80 px-2 py-0.5 font-medium dark:bg-background/20">
+              {activeGuardHint.badge}
+            </span>
+            <span className="min-w-0 flex-1">{activeGuardHint.summary}</span>
           </div>
         </div>
       )}
@@ -932,6 +959,34 @@ function describeSceneStrategy(strategy: string | null): {
     };
   }
   return null;
+}
+
+
+function describeLitigationGuard(guard: LitigationStructureGuard | null): {
+  badge: string;
+  summary: string;
+  tone: "ok" | "warn";
+} | null {
+  if (!guard || guard.scene_id !== "litigation_analysis") return null;
+  if (guard.status === "passed") {
+    return {
+      badge: "结构已对齐",
+      summary: "本轮已命中诉讼结构托底检查，四图结构与基础引用类型已达到最小要求。",
+      tone: "ok",
+    };
+  }
+  const missing = [
+    ...guard.missing_structures,
+    ...guard.missing_citation_kinds.map((item) => `${item} 引用`),
+    ...guard.missing_chat_sections,
+  ];
+  const missingSummary =
+    missing.length > 0 ? `缺口：${missing.join("、")}。` : "";
+  return {
+    badge: "结构待补齐",
+    summary: `${missingSummary}${guard.fallback_note ?? "本轮先保留普通回答，请继续追问补齐诉讼结构。"}`,
+    tone: "warn",
+  };
 }
 
 function formatError(e: unknown): string {

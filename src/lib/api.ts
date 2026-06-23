@@ -1299,9 +1299,22 @@ export type ChatStreamEvent =
   | { kind: "error"; message: string };
 
 /** case_chat 完成后的元数据(promise 返回值)。 */
+export interface LitigationStructureGuard {
+  scene_id: string;
+  status: "passed" | "warned";
+  missing_structures: string[];
+  missing_citation_kinds: string[];
+  missing_chat_sections: string[];
+  fallback_note: string | null;
+}
+
 export interface CaseChatResult {
   user_message_id: string;
   assistant_message_id: string;
+  /** 前端入口任务(requested task);null = 自由聊天 */
+  requested_task_type: CaseChatTaskType | null;
+  /** 运行时实际任务(effective task);可能被 Fanglv 场景路由改写 */
+  effective_task_type: CaseChatTaskType | "free_chat";
   model: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
@@ -1319,6 +1332,8 @@ export interface CaseChatResult {
   task_id: string | null;
   /** V0.3 · 本轮模型调 ask_user 发起的选项式追问;前端据此渲染选项卡片。null = 正常回答 */
   ask_user: AskQuestion[] | null;
+  /** FL-E3: 诉讼场景最小结构托底结果，仅在诉讼分析命中时返回 */
+  structure_guard: LitigationStructureGuard | null;
 }
 
 export interface CaseChatInput {

@@ -511,6 +511,8 @@ export interface Settings {
   chat_loop_max_iters: number | null;
   /** chat 单条消息最多引用文档数(默认 5)。 */
   chat_max_attached: number | null;
+  /** 2026-06-21 方律场景路由总开关。false = 完全关闭,聊天保持原主链。 */
+  enable_fanglv_router: boolean;
 
   /** 2026-06-04 V0.3.6 · 外部 MCP server 白名单(CaseBoard 当客户端消费其工具)。
    *  默认 [] = 桥接关闭、零行为变化。详 docs/adr/0008。 */

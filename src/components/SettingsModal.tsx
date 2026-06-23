@@ -60,6 +60,8 @@ import { cn } from "@/lib/utils";
 import { FEATURE_FLAGS, useFeatureFlag } from "@/lib/featureFlags";
 import { FONT_SCALE, useFontScale } from "@/lib/uiScale";
 
+const SETTINGS_SAVED_EVENT = "caseboard:settings-saved";
+
 type VerifyStatus = "idle" | "verifying" | "ok" | "fail";
 type CompatBackend = "glm" | "mimo" | "custom";
 type CompatSettingKey =
@@ -573,6 +575,11 @@ export function SettingsModal({
     try {
       await saveSettings(prepareSettingsForSave(settings));
       setDirty(false);
+      try {
+        window.dispatchEvent(new CustomEvent(SETTINGS_SAVED_EVENT));
+      } catch {
+        // ignore event dispatch failures
+      }
       // 2026-05-27 · 两种模式都要通知父组件 settings 已经变了,父组件据此重判依赖项
       // (如 DeepSeek 余额 chip 是否显示)。修复同事场景:onboarding 选"稍后再配置"
       // 进 page 模式补填 key,保存后 chip 不出现 —— 因为 page 模式只显示 toast、不触发
@@ -736,6 +743,51 @@ export function SettingsModal({
 
               {/* ── 功能开关:首页日程日历 ── */}
               {tab === "toggles" && (
+                <>
+                  <Section
+                    title="方律场景路由"
+                    desc="控制聊天主链是否允许切到 Fanglv 场景路由。默认关闭;开启后仅在命中特定法律场景时接管,普通聊天仍可走原主链。"
+                    fill
+                  >
+                    <label className="flex items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <span className="text-xs text-muted-foreground">
+                          {settings.enable_fanglv_router
+                            ? "已开启 — 命中特定法律场景时才接管"
+                            : "已关闭 — 聊天始终走原主链"}
+                        </span>
+                        <p className="text-label text-muted-foreground">
+                          建议只在需要诉讼分析、合同法律检索等 Fanglv 场景时开启。切换后对新发起的聊天生效,不会回改历史消息。
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={settings.enable_fanglv_router}
+                        onClick={() =>
+                          updateField(
+                            "enable_fanglv_router",
+                            !settings.enable_fanglv_router,
+                          )
+                        }
+                        className={cn(
+                          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
+                          settings.enable_fanglv_router
+                            ? "bg-emerald-600"
+                            : "bg-muted",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "inline-block size-4 rounded-full bg-white shadow transition-transform",
+                            settings.enable_fanglv_router
+                              ? "translate-x-4"
+                              : "translate-x-0.5",
+                          )}
+                        />
+                      </button>
+                    </label>
+                  </Section>
                   <Section
                     title="首页日程日历(可选)"
                     desc="把开庭/续封、带日期的待办、手动提醒汇总到首页日历;默认关闭,想体验就开,随时可关。"
@@ -775,6 +827,7 @@ export function SettingsModal({
                       </button>
                     </label>
                   </Section>
+                </>
               )}
 
               {/* ── 通用:微信扫码加群(缩略图悬停放大;托管 lawtools.top,过期换图不必重新发版) ── */}
