@@ -329,6 +329,7 @@ export function HomeView({
     .filter(({ status }) => status.id !== "closed" && status.id !== "mediated")
     .map(({ caseData }) => caseData);
   const upcomingEvents = buildUpcomingEvents(activeCases);
+  const activeCaseCount = activeCases.length;
   const calendarEvents = [
     ...buildAllCalendarEvents(activeCases),
     ...buildTodoEvents(openTodos),
@@ -462,7 +463,9 @@ export function HomeView({
     <main className="flex h-full w-full flex-col bg-background">
       <header className="border-b border-border bg-card/50 px-8 py-3">
         <div className="mx-auto flex max-w-6xl items-center">
-          <h1 className="text-sm font-semibold tracking-tight text-foreground">案件看板</h1>
+          <h1 className="text-sm font-semibold tracking-tight text-foreground">
+            今日工作台
+          </h1>
         </div>
       </header>
 
@@ -474,10 +477,12 @@ export function HomeView({
                 OVERVIEW · {monthLabel}
               </p>
               <h1 className="mt-2 text-4xl font-semibold tracking-tight text-foreground">
-                {greeting}
+                今日工作台
               </h1>
               <p className="mt-2 text-sm text-muted-foreground">
-                你正在办 {cases.length} 个案件,扫一眼今天的进度。
+                {cases.length === 0
+                  ? "还没有导入案件。导入后会自动抽取案件画像、关键日期、当事人和材料目录。"
+                  : `在办 ${activeCaseCount} 个案件,近期 ${upcomingEvents.length} 个关键节点。${greeting},扫一眼今天的节点和进度。`}
               </p>
               <div className="mt-5 flex gap-2">
                 <Button
@@ -488,6 +493,9 @@ export function HomeView({
                   导入案件文件夹
                 </Button>
               </div>
+              <p className="mt-2 text-caption text-muted-foreground/70">
+                如云端 OCR / 大模型 key 未验证,点击导入后会按现有流程引导配置。
+              </p>
             </div>
             <ImportantDates events={upcomingEvents} onPickCase={onPickCase} />
           </div>
@@ -1229,9 +1237,9 @@ function ImportantDates({
       {events.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <CalendarClock className="size-6 text-muted-foreground/40" />
-          <p className="mt-2 text-xs text-muted-foreground">暂无近期事件</p>
+          <p className="mt-2 text-xs text-muted-foreground">暂无近期节点</p>
           <p className="mt-1 text-caption text-muted-foreground/70">
-            导入案件后,开庭日 / 保全续封会自动出现在这里
+            导入案件后,开庭日 / 保全续封会从关键日期中汇总到这里
           </p>
         </div>
       ) : (
@@ -1597,9 +1605,13 @@ function EventRow({
             <span className="text-sm font-semibold text-foreground">{e.type}</span>
             {hint && <span className={`rounded px-1.5 py-0.5 text-caption font-medium ${hintCls}`}>{hint}</span>}
           </div>
-          {e.note && <p className="mt-0.5 truncate text-xs text-muted-foreground">{e.note}</p>}
           <p className="mt-0.5 truncate text-xs text-foreground/80">{e.caseName}</p>
           {e.court && <p className="mt-0.5 truncate text-caption text-muted-foreground/70">{e.court}</p>}
+          {e.note && (
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+              备注: {e.note}
+            </p>
+          )}
         </div>
       </button>
     </li>
@@ -2235,8 +2247,10 @@ function EmptyCases({ onImport }: { onImport: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/30 px-6 py-16 text-center">
       <FolderOpen className="size-10 text-muted-foreground/40" />
-      <p className="mt-4 text-base font-medium text-foreground">还没有导入任何案件</p>
-      <p className="mt-1 text-sm text-muted-foreground">选择一个案件文件夹开始</p>
+      <p className="mt-4 text-base font-medium text-foreground">还没有导入案件</p>
+      <p className="mt-1 max-w-md text-sm leading-relaxed text-muted-foreground">
+        选择案件文件夹开始。导入后会自动抽取案件画像、关键日期、当事人和材料目录。
+      </p>
       <Button onClick={onImport} className="mt-6">
         <FolderOpen className="size-3.5" />
         导入案件文件夹

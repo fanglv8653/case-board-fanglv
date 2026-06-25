@@ -219,7 +219,8 @@ function App() {
     }
   }, []);
 
-  // 切 tab 包装:从设置 tab 切走时,如果有未保存改动,先 confirm
+  // 切 tab 包装:从设置 tab 切走时,如果有未保存改动,先 confirm。
+  // 返回 boolean 让「工作台」全局 reset 只在确认离开设置后继续执行。
   const setActiveModuleSafe = useCallback(
     async (target: string) => {
       if (activeModule === "settings" && target !== "settings" && settingsDirty) {
@@ -227,10 +228,11 @@ function App() {
           "设置里有未保存的改动,切走会丢失这些改动 — 确定继续吗?",
           { danger: true, okLabel: "继续切换" },
         );
-        if (!ok) return;
+        if (!ok) return false;
         setSettingsDirty(false); // 用户确认了,清掉脏标记
       }
       setActiveModule(target);
+      return true;
     },
     [activeModule, settingsDirty],
   );
@@ -934,13 +936,20 @@ function App() {
   // 所有 hooks 声明完毕,以下可以做条件渲染 / 路由
   // ========================================================================
 
-  // 诉讼模块内部子路由:首页 (HomeView) ↔ 案件详情 (CaseView)
+  // 诉讼/刑事模块内部子路由:首页 (HomeView) ↔ 案件详情 (CaseView)
   const pickCase = (caseId: string) => {
     setSelectedId(caseId);
     setView("detail");
   };
-  const goHome = () => {
+  const goModuleHome = () => {
     setView("home");
+    setSelectedId(null);
+  };
+  const goWorkspaceHome = async () => {
+    const switched = await setActiveModuleSafe("litigation");
+    if (!switched) return;
+    setView("home");
+    setSelectedId(null);
   };
 
   // 诉讼 / 刑事 共享导入·PDF分类·OCR·全局抽取·case+document 数据层,只按「领域」过滤显示
@@ -956,7 +965,7 @@ function App() {
     loading,
     error,
     onSwitchCase: setSelectedId,
-    onGoHome: goHome,
+    onGoHome: goModuleHome,
     onOpenDoc: handleOpenDoc,
     onRevealDoc: handleRevealDoc,
     onRevealCase: handleRevealCase,
@@ -1054,15 +1063,11 @@ function App() {
 
   return (
     <div className="flex h-full w-full flex-col bg-background">
-      {/* 顶部三模块 tab(诉讼 / 非诉 / 工具)+ 左侧首页按钮 + 右侧 DeepSeek 余额 */}
+      {/* 顶部工作台入口 + 七模块 tab + 右侧 DeepSeek 余额 */}
       <ModuleTabs
         active={activeModule}
         onSwitch={setActiveModuleSafe}
-        onGoHome={() => {
-          setActiveModuleSafe("litigation");
-          setView("home");
-          setSelectedId(null);
-        }}
+        onGoHome={goWorkspaceHome}
         rightSlot={
           <>
             {showDeepSeekChip && <DeepSeekBalanceChip />}
