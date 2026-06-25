@@ -12,7 +12,7 @@ import { FeedbackButton } from "@/components/FeedbackButton";
 import { ModuleTabs } from "@/components/ModuleTabs";
 // 私人专属功能接缝(双轨发布模型):开源仓返回 [] → 无「独立」顶层 tab。
 import { getPrivateTopTabs } from "@/private";
-import { HomeView } from "@/components/HomeView";
+import { HomeView, type HomeStatusWarning } from "@/components/HomeView";
 import { HomeDropZone } from "@/components/HomeDropZone";
 import { isCriminalCase, splitCasesByDomain } from "@/lib/caseDomain";
 import { RunningTaskOverlay } from "@/components/RunningTaskOverlay";
@@ -28,7 +28,6 @@ import type { InterestPrefill } from "@/modules/tools/calculators/InterestCalcul
 import { TeamModule } from "@/modules/team/TeamModule";
 import { ExecutionModule } from "@/modules/execution";
 import { CaseView } from "@/modules/litigation/components/CaseView";
-import { EmptyState } from "@/modules/litigation/components/EmptyState";
 import { ProgressBanner } from "@/modules/litigation/components/ProgressBanner";
 import { confirmDialog } from "@/lib/dialog";
 import {
@@ -53,9 +52,79 @@ import {
   type Document,
   type ImportPlan,
   type ProgressEvent,
+  type Settings,
   type UpdateInfo,
 } from "@/lib/types";
 import { SplitImportDialog } from "@/components/SplitImportDialog";
+
+type ImportKeyIssue = { label: string; reason: "missing" | "unverified" };
+
+function collectImportKeyIssues(s: Settings): ImportKeyIssue[] {
+  const issues: ImportKeyIssue[] = [];
+
+  {
+    const filled = !!s.mineru_api_key?.trim();
+    const verified = !!s.mineru_verified_at;
+    if (!filled) {
+      issues.push({ label: "MinerU API Token(云端 OCR)", reason: "missing" });
+    } else if (!verified) {
+      issues.push({ label: "MinerU API Token(云端 OCR)", reason: "unverified" });
+    }
+  }
+  {
+    const backend = s.cloud_llm_backend ?? "deepseek";
+    const isMinimax = backend === "minimax";
+    const isCompat = ["glm", "mimo", "custom"].includes(backend);
+    const compatKey =
+      backend === "glm"
+        ? s.glm_llm_api_key || s.compat_llm_api_key
+        : backend === "mimo"
+          ? s.mimo_llm_api_key || s.compat_llm_api_key
+          : backend === "custom"
+            ? s.custom_llm_api_key || s.compat_llm_api_key
+            : s.compat_llm_api_key;
+    const compatVerifiedAt =
+      backend === "glm"
+        ? s.glm_llm_verified_at || s.compat_llm_verified_at
+        : backend === "mimo"
+          ? s.mimo_llm_verified_at || s.compat_llm_verified_at
+          : backend === "custom"
+            ? s.custom_llm_verified_at || s.compat_llm_verified_at
+            : s.compat_llm_verified_at;
+    const filled = isMinimax
+      ? !!s.minimax_api_key?.trim()
+      : isCompat
+        ? !!compatKey?.trim()
+        : !!s.cloud_llm_api_key?.trim();
+    const verified = isMinimax
+      ? !!s.minimax_verified_at
+      : isCompat
+        ? !!compatVerifiedAt
+        : !!s.deepseek_verified_at;
+    const providerName = isMinimax
+      ? "MiniMax"
+      : isCompat
+        ? { glm: "智谱 GLM", mimo: "小米 MiMo", custom: "自定义模型" }[backend] ??
+          "云端模型"
+        : "DeepSeek";
+    const label = `${providerName} API Key(云端 LLM)`;
+    if (!filled) {
+      issues.push({ label, reason: "missing" });
+    } else if (!verified) {
+      issues.push({ label, reason: "unverified" });
+    }
+  }
+
+  return issues;
+}
+
+function buildHomeStatusWarnings(s: Settings): HomeStatusWarning[] {
+  return collectImportKeyIssues(s).map((issue) => ({
+    kind: "blocking",
+    text: `${issue.label}${issue.reason === "missing" ? "尚未填写" : "已填写但未通过验证"},导入前需要先完成配置。`,
+    actionLabel: "去设置",
+  }));
+}
 
 function App() {
   /** 全部已入库案件(按 updated_at 倒序) */
@@ -146,8 +215,14 @@ function App() {
    * 用来决定 ModuleTabs 右侧是否显示 DeepSeekBalanceChip。
    */
   const [showDeepSeekChip, setShowDeepSeekChip] = useState(false);
+  const [networkStatus, setNetworkStatus] = useState<
+    "unknown" | "online" | "offline"
+  >("unknown");
+  const [homeStatusWarnings, setHomeStatusWarnings] = useState<
+    HomeStatusWarning[]
+  >([]);
 
-  // 首次启动检测是否需要 onboarding + 判断是否显示 DeepSeek chip
+  // 首次启动检测是否需要 onboarding + 判断是否显示 DeepSeek chip / 首页配置提示
   useEffect(() => {
     getSettings()
       .then((s) => {
@@ -167,8 +242,22 @@ function App() {
         const hasDeepSeekKey =
           !!s.cloud_llm_api_key && s.cloud_llm_api_key.trim().length > 0;
         setShowDeepSeekChip(hasDeepSeekKey);
+        setHomeStatusWarnings(buildHomeStatusWarnings(s));
       })
       .catch((err) => console.error("加载 settings 失败:", err));
+  }, []);
+
+  useEffect(() => {
+    const updateNetworkStatus = () => {
+      setNetworkStatus(navigator.onLine ? "online" : "offline");
+    };
+    updateNetworkStatus();
+    window.addEventListener("online", updateNetworkStatus);
+    window.addEventListener("offline", updateNetworkStatus);
+    return () => {
+      window.removeEventListener("online", updateNetworkStatus);
+      window.removeEventListener("offline", updateNetworkStatus);
+    };
   }, []);
 
   // 2026-05-25 V0.1.8 · 启动:拿当前版本 + 静默检测远程版本(失败不报错)
@@ -279,6 +368,7 @@ function App() {
         const hasDeepSeekKey =
           !!s.cloud_llm_api_key && s.cloud_llm_api_key.trim().length > 0;
         setShowDeepSeekChip(hasDeepSeekKey);
+        setHomeStatusWarnings(buildHomeStatusWarnings(s));
       })
       .catch(console.error);
   }, []);
@@ -399,64 +489,8 @@ function App() {
   // 同时消化老用户 ocr/llm_provider="local" 残留,避免前端漏检→后端却走云端而失败的错位)。
   const validateImportKeys = useCallback(async (): Promise<boolean> => {
     const s = await getSettings();
-
-    type Issue = { label: string; reason: "missing" | "unverified" };
-    const issues: Issue[] = [];
-
-    {
-      const filled = !!s.mineru_api_key?.trim();
-      const verified = !!s.mineru_verified_at;
-      if (!filled) {
-        issues.push({ label: "MinerU API Token(云端 OCR)", reason: "missing" });
-      } else if (!verified) {
-        issues.push({ label: "MinerU API Token(云端 OCR)", reason: "unverified" });
-      }
-    }
-    {
-      // 2026-06-15/16:按云端后端校验对应的 key,与后端 effective_cloud_llm_backend 三选一对齐
-      // (minimax / 通用兼容 glm·mimo·custom / 其余回落 DeepSeek)。各后端 key 字段独立。
-      const backend = s.cloud_llm_backend ?? "deepseek";
-      const isMinimax = backend === "minimax";
-      const isCompat = ["glm", "mimo", "custom"].includes(backend);
-      const compatKey =
-        backend === "glm"
-          ? s.glm_llm_api_key || s.compat_llm_api_key
-          : backend === "mimo"
-            ? s.mimo_llm_api_key || s.compat_llm_api_key
-            : backend === "custom"
-              ? s.custom_llm_api_key || s.compat_llm_api_key
-              : s.compat_llm_api_key;
-      const compatVerifiedAt =
-        backend === "glm"
-          ? s.glm_llm_verified_at || s.compat_llm_verified_at
-          : backend === "mimo"
-            ? s.mimo_llm_verified_at || s.compat_llm_verified_at
-            : backend === "custom"
-              ? s.custom_llm_verified_at || s.compat_llm_verified_at
-              : s.compat_llm_verified_at;
-      const filled = isMinimax
-        ? !!s.minimax_api_key?.trim()
-        : isCompat
-          ? !!compatKey?.trim()
-          : !!s.cloud_llm_api_key?.trim();
-      const verified = isMinimax
-        ? !!s.minimax_verified_at
-        : isCompat
-          ? !!compatVerifiedAt
-          : !!s.deepseek_verified_at;
-      const providerName = isMinimax
-        ? "MiniMax"
-        : isCompat
-          ? { glm: "智谱 GLM", mimo: "小米 MiMo", custom: "自定义模型" }[backend] ??
-            "云端模型"
-          : "DeepSeek";
-      const label = `${providerName} API Key(云端 LLM)`;
-      if (!filled) {
-        issues.push({ label, reason: "missing" });
-      } else if (!verified) {
-        issues.push({ label, reason: "unverified" });
-      }
-    }
+    const issues = collectImportKeyIssues(s);
+    setHomeStatusWarnings(buildHomeStatusWarnings(s));
 
     if (issues.length > 0) {
       const lines = issues.map(
@@ -982,21 +1016,10 @@ function App() {
     onArtifactCreated: handleArtifactCreated,
   };
 
-  // 诉讼模块整体渲染:从未导入任何案件→EmptyState / 选中民事案件→CaseView / 否则→HomeView。
-  // 首页两态(EmptyState / HomeView)都包一层 HomeDropZone:拖案件文件夹进来即导入。
-  // EmptyState 判据用全量 cases(不是 civilCases):否则只有刑事案件时诉讼 tab 会误显「还没有案件」。
-  // 有案件但 civilCases 为空时,落到下面的 HomeView 分支(空的民事案件网格)。
+  // 诉讼模块整体渲染:选中民事案件→CaseView / 否则→HomeView。
+  // 零案件也统一落到 HomeView 空库态,避免「工作台」和旧 EmptyState 两套首屏表达分裂。
   const litigationBody =
-    cases.length === 0 && !loading ? (
-      <HomeDropZone onImportPath={handleDropImport}>
-        <EmptyState
-          onImport={handleImport}
-          error={error}
-          onOpenSettings={openSettings}
-        />
-      </HomeDropZone>
-    ) : view === "detail" &&
-      civilCases.some((c) => c.id === selectedId) ? (
+    view === "detail" && civilCases.some((c) => c.id === selectedId) ? (
       <CaseView cases={civilCases} domain="civil" {...caseViewCommonProps} />
     ) : (
       <HomeDropZone onImportPath={handleDropImport}>
@@ -1008,6 +1031,9 @@ function App() {
           onDeleteCase={handleDeleteCaseById}
           onDeleteCases={handleDeleteCases}
           onImportFolder={handleCalendarImport}
+          networkStatus={networkStatus}
+          configWarnings={homeStatusWarnings}
+          onOpenSettings={() => openSettingsTab("brain")}
         />
       </HomeDropZone>
     );
@@ -1027,6 +1053,9 @@ function App() {
             <p className="mt-3 text-xs leading-relaxed text-muted-foreground/80">
               导入案件文件夹后,系统会按案号(含「刑」)、罪名(含「罪」)、起诉书 / 公诉 /
               被告人等刑事专属信息自动把刑事案件归到这里;民事 / 诉讼案件请在「诉讼」标签查看。
+            </p>
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+              刑事模块仍在 Beta,自动归类和分析结论请以人工复核为准。
             </p>
             <div className="mt-8 flex justify-center">
               <button
@@ -1057,6 +1086,9 @@ function App() {
           onDeleteCase={handleDeleteCaseById}
           onDeleteCases={handleDeleteCases}
           onImportFolder={handleCalendarImport}
+          networkStatus={networkStatus}
+          configWarnings={homeStatusWarnings}
+          onOpenSettings={() => openSettingsTab("brain")}
         />
       </HomeDropZone>
     );

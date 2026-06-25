@@ -74,6 +74,12 @@ import {
   type StatusId,
 } from "@/modules/litigation/lib/inferStatus";
 
+export type HomeStatusWarning = {
+  kind: "blocking" | "degraded";
+  text: string;
+  actionLabel?: string;
+};
+
 export interface HomeViewProps {
   cases: Case[];
   userDisplayName: string | null;
@@ -85,6 +91,9 @@ export interface HomeViewProps {
   onDeleteCases: (caseIds: string[]) => void;
   /** 飞书日历:点日历事件后导入对应案件文件夹(反查案件池表→有则直接导,否则弹选择器)。 */
   onImportFolder?: (eventTitle: string) => void;
+  networkStatus?: "unknown" | "online" | "offline";
+  configWarnings?: HomeStatusWarning[];
+  onOpenSettings?: () => void;
 }
 
 type ViewMode = "grid" | "list";
@@ -134,6 +143,9 @@ export function HomeView({
   onDeleteCase,
   onDeleteCases,
   onImportFolder,
+  networkStatus = "unknown",
+  configWarnings = [],
+  onOpenSettings,
 }: HomeViewProps) {
   const greeting = getGreeting(userDisplayName);
   const monthLabel = new Date()
@@ -493,9 +505,11 @@ export function HomeView({
                   导入案件文件夹
                 </Button>
               </div>
-              <p className="mt-2 text-caption text-muted-foreground/70">
-                如云端 OCR / 大模型 key 未验证,点击导入后会按现有流程引导配置。
-              </p>
+              <HomeStatusHints
+                networkStatus={networkStatus}
+                warnings={configWarnings}
+                onOpenSettings={onOpenSettings}
+              />
             </div>
             <ImportantDates events={upcomingEvents} onPickCase={onPickCase} />
           </div>
@@ -793,6 +807,57 @@ export function HomeView({
         </div>
       )}
     </main>
+  );
+}
+
+function HomeStatusHints({
+  networkStatus,
+  warnings,
+  onOpenSettings,
+}: {
+  networkStatus: "unknown" | "online" | "offline";
+  warnings: HomeStatusWarning[];
+  onOpenSettings?: () => void;
+}) {
+  const items: HomeStatusWarning[] = [
+    ...(networkStatus === "offline"
+      ? [
+          {
+            kind: "degraded" as const,
+            text: "当前可能离线:本地案件可用,云端 OCR / 大模型 / 元典 / MCP 暂不可用。",
+          },
+        ]
+      : []),
+    ...warnings,
+  ];
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      {items.map((item, index) => (
+        <div
+          key={`${item.kind}-${index}`}
+          className={cn(
+            "flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed",
+            item.kind === "blocking"
+              ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200"
+              : "border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-200",
+          )}
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span className="flex-1">{item.text}</span>
+          {item.actionLabel && onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="shrink-0 rounded border border-current/20 px-2 py-0.5 font-medium hover:bg-background/60"
+            >
+              {item.actionLabel}
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

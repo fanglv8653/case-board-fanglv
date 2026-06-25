@@ -287,9 +287,11 @@ function TeamOnboard({ onDone }: { onDone: () => void }) {
       <div className="mx-auto max-w-3xl px-6 py-10">
         <div className="mb-8 text-center">
           <Users className="mx-auto mb-3 size-10 text-sky-500" />
-          <h2 className="mb-2 text-lg font-semibold text-foreground">团队看板</h2>
+          <h2 className="mb-2 text-lg font-semibold text-foreground">
+            团队协作未配置
+          </h2>
           <p className="text-sm text-muted-foreground">
-            团队成员的在办案件、进度、重要日期,一个看板全看到。
+            本机仍可单独使用案件看板。配置团队后,成员的在办案件、进度、重要日期可在局域网内同步查看。
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
             无需服务器:同一办公网内的队友 App 自动互相同步(谁在所谁中转);

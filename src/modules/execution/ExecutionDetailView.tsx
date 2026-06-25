@@ -196,7 +196,7 @@ export function ExecutionDetailView({
     }
     const wantOpen = await confirmDialog(
       "⚠ 未配置元典 API key。「查被执行人」/「深挖」/「完整报告」需要元典法律开放平台的 API key," +
-        "工具不内置任何人的 key,你需要自己申请(免费)。点「打开申请页」后,在元典「个人中心」申请 API key,再到「设置 → 元典法律开放平台」填入并点「验证」。",
+        "工具不内置任何人的 key,你需要自己申请(免费)。点「打开申请页」后,在元典「个人中心」申请 API key,再到「设置 → 数据源 → 元典法律开放平台」填入并点「验证」。",
       { okLabel: "打开申请页" },
     );
     if (wantOpen) {
