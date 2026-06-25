@@ -38,6 +38,16 @@ export function formatMoney(amount: number): string {
   return amount.toFixed(2) + " 元";
 }
 
+export function normalizeLprMultiplier(multiplier?: number): number {
+  if (multiplier === undefined || !Number.isFinite(multiplier)) return 1;
+  if (multiplier < 0) return 1;
+  return multiplier;
+}
+
+function effectiveLprRate(baseRate: number, multiplier?: number): number {
+  return baseRate * normalizeLprMultiplier(multiplier);
+}
+
 /* ============================ 利息计算 ============================ */
 
 export type RateType = "custom" | "lpr";
@@ -48,22 +58,19 @@ export interface InterestPrincipal {
   rateType: RateType;
   rate: string; // 自定义利率(%),仅 rateType="custom" 时用
   lprTerm: LprTerm; // LPR 期限,仅 rateType="lpr" 时用
+  lprMultiplier: string; // LPR 倍数,仅 rateType="lpr" 时用
   startDate: string;
   endDate: string;
 }
 
-/**
- * 按 LPR 变化点分段算单笔利息。
- *
- * @returns 利息(元,保留 2 位小数)
- */
-export function calculateInterestByPeriod(
+function calculateInterestRaw(
   principal: number,
   startDate: string,
   endDate: string,
   rateType: RateType,
   customRate: number,
   lprTerm: LprTerm,
+  lprMultiplier = 1,
 ): number {
   if (!principal || principal <= 0 || !startDate || !endDate) return 0;
   const start = new Date(startDate);
@@ -74,14 +81,14 @@ export function calculateInterestByPeriod(
   if (rateType === "custom") {
     if (!customRate || isNaN(customRate)) return 0;
     const days = daysBetween(startDate, endDate);
-    const interest = (principal * customRate) / 100 / 365 * days;
-    return Math.round(interest * 100) / 100;
+    return (principal * customRate) / 100 / 365 * days;
   }
 
   // LPR:按 LPR 变化点分段
   let totalInterest = 0;
   let currentDate = new Date(start);
-  let currentRate = getLprForDate(startDate, lprTerm) ?? 3.65;
+  const initialLpr = getLprForDate(startDate, lprTerm) ?? 3.65;
+  let currentRate = effectiveLprRate(initialLpr, lprMultiplier);
 
   for (let i = 0; i < LPR_DATA.length; i++) {
     const lprDate = new Date(LPR_DATA[i].date);
@@ -97,7 +104,8 @@ export function calculateInterestByPeriod(
     }
 
     currentDate = lprDate;
-    currentRate = lprTerm === "5y+" ? LPR_DATA[i].lpr5y : LPR_DATA[i].lpr1y;
+    const nextBaseRate = lprTerm === "5y+" ? LPR_DATA[i].lpr5y : LPR_DATA[i].lpr1y;
+    currentRate = effectiveLprRate(nextBaseRate, lprMultiplier);
   }
 
   // 最后一段(最后一个 LPR 点 → endDate)
@@ -106,6 +114,32 @@ export function calculateInterestByPeriod(
     totalInterest += (principal * currentRate) / 100 / 365 * lastDays;
   }
 
+  return totalInterest;
+}
+
+/**
+ * 按 LPR 变化点分段算单笔利息。
+ *
+ * @returns 利息(元,保留 2 位小数)
+ */
+export function calculateInterestByPeriod(
+  principal: number,
+  startDate: string,
+  endDate: string,
+  rateType: RateType,
+  customRate: number,
+  lprTerm: LprTerm,
+  lprMultiplier = 1,
+): number {
+  const totalInterest = calculateInterestRaw(
+    principal,
+    startDate,
+    endDate,
+    rateType,
+    customRate,
+    lprTerm,
+    lprMultiplier,
+  );
   return Math.round(totalInterest * 100) / 100;
 }
 
@@ -115,6 +149,10 @@ export interface InterestSegment {
   startDate: string;
   endDate: string;
   days: number;
+  principal: number;
+  rateType: RateType;
+  baseRate: number;
+  multiplier: number;
   rate: number;
   interest: number;
 }
@@ -127,6 +165,7 @@ export function calculateInterestSegments(
   rateType: RateType,
   customRate: number,
   lprTerm: LprTerm,
+  lprMultiplier = 1,
 ): InterestSegment[] {
   if (!principal || principal <= 0 || !startDate || !endDate) return [];
 
@@ -137,6 +176,10 @@ export function calculateInterestSegments(
         startDate,
         endDate,
         days,
+        principal,
+        rateType: "custom",
+        baseRate: customRate,
+        multiplier: 1,
         rate: customRate,
         interest: Math.round((principal * customRate / 100 / 365 * days) * 100) / 100,
       },
@@ -146,14 +189,17 @@ export function calculateInterestSegments(
   // LPR:按"利率实际变化"的点分段(连续相同利率合并)
   const segs: InterestSegment[] = [];
   let segStartDate = startDate;
-  let currentRate = getLprForDate(startDate, lprTerm) ?? 3.65;
+  const multiplier = normalizeLprMultiplier(lprMultiplier);
+  let currentBaseRate = getLprForDate(startDate, lprTerm) ?? 3.65;
+  let currentRate = effectiveLprRate(currentBaseRate, multiplier);
 
   for (let i = 0; i < LPR_DATA.length; i++) {
     const lprDate = LPR_DATA[i].date;
     if (new Date(lprDate) <= new Date(startDate)) continue;
     if (new Date(lprDate) > new Date(endDate)) break;
 
-    const newRate = lprTerm === "5y+" ? LPR_DATA[i].lpr5y : LPR_DATA[i].lpr1y;
+    const newBaseRate = lprTerm === "5y+" ? LPR_DATA[i].lpr5y : LPR_DATA[i].lpr1y;
+    const newRate = effectiveLprRate(newBaseRate, multiplier);
     if (Math.abs(newRate - currentRate) > 0.001) {
       const segDays = daysBetween(segStartDate, lprDate);
       if (segDays > 0) {
@@ -161,11 +207,16 @@ export function calculateInterestSegments(
           startDate: segStartDate,
           endDate: lprDate,
           days: segDays,
+          principal,
+          rateType: "lpr",
+          baseRate: currentBaseRate,
+          multiplier,
           rate: currentRate,
           interest: Math.round((principal * currentRate / 100 / 365 * segDays) * 100) / 100,
         });
       }
       segStartDate = lprDate;
+      currentBaseRate = newBaseRate;
       currentRate = newRate;
     }
   }
@@ -176,6 +227,10 @@ export function calculateInterestSegments(
       startDate: segStartDate,
       endDate,
       days: lastDays,
+      principal,
+      rateType: "lpr",
+      baseRate: currentBaseRate,
+      multiplier,
       rate: currentRate,
       interest: Math.round((principal * currentRate / 100 / 365 * lastDays) * 100) / 100,
     });
@@ -193,6 +248,7 @@ export interface ExecCaseInput {
   rate: number; // 年利率(%)
   rateType: RateType;
   lprTerm: LprTerm;
+  lprMultiplier: number;
   startDate: string; // 计算起始日
   endDate: string;
   litigationFee: number;
@@ -213,6 +269,7 @@ export interface RepaymentStep {
   newInterest: number;
   principalBefore: number;
   accumulatedInterestBefore: number;
+  interestSegments: InterestSegment[];
   deductions: { type: "费用" | "一般利息" | "本金"; amount: number }[];
   remainingFeesAfter: number;
   accumulatedInterestAfter: number;
@@ -234,6 +291,7 @@ export interface FiveStageResult {
   remainingFees: number;
   finalDays: number;
   finalInterest: number;
+  finalInterestSegments: InterestSegment[];
   total: number;
   steps: RepaymentStep[];
   doubleSegments: DoubleSegment[];
@@ -251,12 +309,10 @@ export function calcFiveStage(
   includeDelayed: boolean,
 ): FiveStageResult {
   const principal0 = caseInfo.principal;
-  const annualRate = caseInfo.rate;
   const startDate = caseInfo.startDate;
   const endDate0 = caseInfo.endDate;
   const totalFees = caseInfo.litigationFee + caseInfo.lawyerFee + caseInfo.otherFee;
 
-  const dailyRate = annualRate / 100 / 365;
   const delayedDailyRate = 0.000175; // 万分之一点七五
 
   let remainingPrincipal = principal0;
@@ -268,7 +324,24 @@ export function calcFiveStage(
   // ── 第三阶段:逐笔还款 ──
   for (const rep of repayments) {
     const daysSinceLast = daysBetween(lastInterestDate, rep.date);
-    const newInterest = remainingPrincipal * dailyRate * daysSinceLast;
+    const newInterest = calculateInterestRaw(
+      remainingPrincipal,
+      lastInterestDate,
+      rep.date,
+      caseInfo.rateType,
+      caseInfo.rate,
+      caseInfo.lprTerm,
+      caseInfo.lprMultiplier,
+    );
+    const interestSegments = calculateInterestSegments(
+      remainingPrincipal,
+      lastInterestDate,
+      rep.date,
+      caseInfo.rateType,
+      caseInfo.rate,
+      caseInfo.lprTerm,
+      caseInfo.lprMultiplier,
+    );
     accumulatedInterest += newInterest;
 
     const step: RepaymentStep = {
@@ -278,6 +351,7 @@ export function calcFiveStage(
       newInterest,
       principalBefore: remainingPrincipal,
       accumulatedInterestBefore: accumulatedInterest - newInterest,
+      interestSegments,
       deductions: [],
       remainingFeesAfter: 0,
       accumulatedInterestAfter: 0,
@@ -317,7 +391,24 @@ export function calcFiveStage(
   const finalStartDate =
     repayments.length > 0 ? repayments[repayments.length - 1].date : startDate;
   const finalDays = daysBetween(finalStartDate, endDate0);
-  const finalInterest = remainingPrincipal * dailyRate * finalDays;
+  const finalInterest = calculateInterestRaw(
+    remainingPrincipal,
+    finalStartDate,
+    endDate0,
+    caseInfo.rateType,
+    caseInfo.rate,
+    caseInfo.lprTerm,
+    caseInfo.lprMultiplier,
+  );
+  const finalInterestSegments = calculateInterestSegments(
+    remainingPrincipal,
+    finalStartDate,
+    endDate0,
+    caseInfo.rateType,
+    caseInfo.rate,
+    caseInfo.lprTerm,
+    caseInfo.lprMultiplier,
+  );
   accumulatedInterest += finalInterest;
 
   // ── 第五阶段:迟延履行加倍利息(独立累计) ──
@@ -381,6 +472,7 @@ export function calcFiveStage(
     remainingFees,
     finalDays,
     finalInterest,
+    finalInterestSegments,
     total,
     steps,
     doubleSegments,
