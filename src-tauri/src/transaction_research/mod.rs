@@ -1,7 +1,7 @@
-﻿//! 闈炶瘔鍚堝悓娉曞緥妫€绱?MVP(FL-C2)銆?//!
-//! 鐩爣:
-//! - 澶嶇敤 `contract_review` 椤甸潰,鎻愪緵涓€涓?*闈炴浠跺瀷**娉曞緥妫€绱㈠懡浠?//! - 澶嶇敤鐜版湁娉曞緥/娉曡/绫绘/鏈湴 KB 宸ュ叿灞?浣?*涓?*鎺ュ叆 `case_chat` 澶栧３
-//! - 涓嶅啓鑱婂ぉ鍘嗗彶,涓嶈惤 artifact,鍙繑鍥炵粨鏋勫寲鐮旂┒缁撴灉
+//! Transaction contract legal research MVP (FL-C2).
+//!
+//! The module reuses existing legal and local-KB tools, then returns a structured
+//! research result without writing chat history or artifacts.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -108,16 +108,16 @@ pub async fn transaction_legal_research(
         return Ok(TransactionLegalResearchResponse {
             question,
             normalized_issue: String::new(),
-            scope_note: "褰撳墠娌℃湁鍙绱㈢殑闂銆?.to_string(),
-            summary: "璇峰厛杈撳叆娉曞緥妫€绱㈤棶棰橈紝鎴栦粠鏌愭潯椋庨櫓鐐瑰彂璧封€滄煡鏈潯渚濇嵁鈥濄€?.to_string(),
+            scope_note: "当前没有可检索的问题。".to_string(),
+            summary: "请先输入法律检索问题，或从某条风险点发起依据检索。".to_string(),
             authorities: Vec::new(),
             risk_analysis: Vec::new(),
             recommended_actions: Vec::new(),
             citations: Vec::new(),
             tool_trace: Vec::new(),
             follow_up_questions: vec![
-                "璇疯ˉ鍏呬綘瑕佹绱㈢殑鍏蜂綋鏉℃鎴栭闄╃偣銆?.to_string(),
-                "濡傛湁鏄庣‘鍚堝悓绫诲瀷锛屼篃璇疯ˉ鍏咃紝渚嬪锛氭埧灞嬬璧併€佽偂鏉冭浆璁┿€佹妧鏈湇鍔°€?.to_string(),
+                "请补充你要检索的具体条款或风险点。".to_string(),
+                "如有明确合同类型，也请补充，例如：房屋租赁、股权转让、技术服务。".to_string(),
             ],
         });
     }
@@ -126,16 +126,16 @@ pub async fn transaction_legal_research(
         return Ok(TransactionLegalResearchResponse {
             question: question.clone(),
             normalized_issue: question,
-            scope_note: "闂杩囩煭锛屽鏄撳鑷存硶寰嬫绱㈣寖鍥磋繃瀹姐€?.to_string(),
-            summary: "鏈疆鏈嚜鍔ㄥ彂璧锋绱紝璇峰厛琛ュ厖鍚堝悓绫诲瀷銆佷簤璁潯娆炬垨浣犳柟绔嬪満銆?.to_string(),
+            scope_note: "问题过短，容易导致法律检索范围过宽。".to_string(),
+            summary: "本轮未自动发起检索，请先补充合同类型、争议条款或我方立场。".to_string(),
             authorities: Vec::new(),
             risk_analysis: Vec::new(),
             recommended_actions: Vec::new(),
             citations: Vec::new(),
             tool_trace: Vec::new(),
             follow_up_questions: vec![
-                "浣犳兂鏍告煡鐨勬槸鍝竴绫诲悎鍚屾垨鍝竴鏉￠闄╃偣锛?.to_string(),
-                "浣犳洿鍏冲績娉曟潯渚濇嵁銆佺洃绠¤鍒欙紝杩樻槸绫绘鏀寔锛?.to_string(),
+                "你想核查的是哪一类合同或哪一条风险点？".to_string(),
+                "你更关心法条依据、监管规则，还是类案支持？".to_string(),
             ],
         });
     }
@@ -155,13 +155,13 @@ pub async fn transaction_legal_research(
     let materials = tool_runs
         .iter()
         .filter_map(|run| run.content.as_ref().map(|content| (run.trace.tool.as_str(), content.as_str())))
-        .map(|(tool, content)| format!("## 宸ュ叿: {tool}\n{content}"))
+        .map(|(tool, content)| format!("## 工具: {tool}\n{content}"))
         .collect::<Vec<_>>();
 
     if materials.is_empty() {
         let mut follow_up_questions = vec![
-            "璇风‘璁ゆ槸鍚﹀凡鍦ㄨ缃〉閰嶇疆鍏冨吀 API Key銆?.to_string(),
-            "濡傛灉浣犳湁鏈湴鐭ヨ瘑搴擄紝涔熷彲鍏堢‘璁ょ煡璇嗗簱鐩綍鏄惁宸茬粦瀹氬苟鍚敤銆?.to_string(),
+            "请确认是否已在设置页配置元典 API Key。".to_string(),
+            "如果你有本地知识库，也请确认知识库目录是否已绑定并启用。".to_string(),
         ];
         if settings
             .yuandian_api_key
@@ -170,13 +170,13 @@ pub async fn transaction_legal_research(
             .unwrap_or("")
             .is_empty()
         {
-            follow_up_questions.insert(0, "褰撳墠鏈厤缃厓鍏?API Key锛屾槸鍚﹀厛鍘昏缃〉瀹屾垚閰嶇疆锛?.to_string());
+            follow_up_questions.insert(0, "当前未配置元典 API Key，是否先在设置页完成配置？".to_string());
         }
         return Ok(TransactionLegalResearchResponse {
             question: question.clone(),
             normalized_issue: question,
-            scope_note: "鏈疆娌℃湁鎷垮埌鍙敤妫€绱㈢粨鏋溿€?.to_string(),
-            summary: "鏈墽琛屽嚭鍙敤鐨勬硶寰嬫绱㈢粨鏋溿€傚綋鍓?MVP 涓嶄細鍥為€€鍒版浠惰亰澶╀富閾撅紝璇峰厛琛ヨ冻鏁版嵁婧愰厤缃垨鎹㈡洿鍏蜂綋鐨勯棶棰樸€?.to_string(),
+            scope_note: "本轮没有拿到可用检索结果。".to_string(),
+            summary: "未检索到可用的法律材料。当前 MVP 不会回退到案件聊天主链，请先补足数据源配置或换一个更具体的问题。".to_string(),
             authorities: Vec::new(),
             risk_analysis: Vec::new(),
             recommended_actions: Vec::new(),
@@ -298,7 +298,7 @@ async fn run_tool(
                 success: false,
                 kb_hit: false,
                 credits_used: 0,
-                error_short: Some("宸ュ叿鏈敞鍐?.to_string()),
+                error_short: Some("工具未注册。".to_string()),
             },
             content: None,
             evidence: Vec::new(),
@@ -354,30 +354,30 @@ async fn summarize_research(
             .unwrap_or("")
             .is_empty()
     {
-        return Err("灏氭湭閰嶇疆浜戠 LLM API Key锛岃鍏堝湪璁剧疆椤靛畬鎴愰厤缃€?.to_string());
+        return Err("尚未配置云端 LLM API Key，请先在设置页完成配置。".to_string());
     }
 
     let contract_context = format!(
-        "鍚堝悓鍚? {}\n鍚堝悓绫诲瀷: {}\n鎴戞柟绔嬪満: {}\n椋庨櫓鏍囬: {}\n鏉℃瀹氫綅: {}\n鍘熸枃鐗囨: {}",
-        input.contract_name.as_deref().unwrap_or("鏈彁渚?),
-        input.contract_type.as_deref().unwrap_or("鏈彁渚?),
+        "合同名称: {}\n合同类型: {}\n我方立场: {}\n风险标题: {}\n条款定位: {}\n原文片段: {}",
+        input.contract_name.as_deref().unwrap_or("未提供"),
+        input.contract_type.as_deref().unwrap_or("未提供"),
         normalize_stance_label(input.stance.as_deref()),
-        input.risk_title.as_deref().unwrap_or("鏈彁渚?),
-        input.clause_ref.as_deref().unwrap_or("鏈彁渚?),
-        input.anchor_text.as_deref().unwrap_or("鏈彁渚?),
+        input.risk_title.as_deref().unwrap_or("未提供"),
+        input.clause_ref.as_deref().unwrap_or("未提供"),
+        input.anchor_text.as_deref().unwrap_or("未提供"),
     );
     let joined_materials = materials.join("\n\n");
     let system_prompt = build_summary_system_prompt();
     let user_prompt = format!(
-        "銆愮敤鎴烽棶棰樸€慭n{question}\n\n銆愬悎鍚屼笂涓嬫枃銆慭n{contract_context}\n\n銆愭绱㈡潗鏂欍€慭n{joined_materials}"
+        "【用户问题】\n{question}\n\n【合同上下文】\n{contract_context}\n\n【检索材料】\n{joined_materials}"
     );
 
     let content = run_json_completion(&config, &system_prompt, &user_prompt)
         .await
-        .map_err(|err| format!("鍚堝悓娉曞緥妫€绱㈡€荤粨澶辫触: {err}"))?;
+        .map_err(|err| format!("合同法律检索总结失败: {err}"))?;
     let cleaned = extract_json_object(&content);
     serde_json::from_str::<LlmResearchSummary>(&cleaned)
-        .map_err(|err| format!("鍚堝悓娉曞緥妫€绱㈢粨鏋滀笉鏄湁鏁?JSON: {err}"))
+        .map_err(|err| format!("合同法律检索结果不是有效 JSON: {err}"))
 }
 
 fn build_question(input: &TransactionLegalResearchInput) -> String {
@@ -393,19 +393,19 @@ fn build_question(input: &TransactionLegalResearchInput) -> String {
     let stance = normalize_stance_label(input.stance.as_deref());
 
     if !risk.is_empty() {
-        let mut question = format!("璇锋绱腑鍥芥硶涓嬩笌銆寋risk}銆嶇浉鍏崇殑娉曟潯銆佺洃绠¤鍒欏拰绫绘锛屽苟璇存槑瀵箋stance}鐨勯闄╁奖鍝嶃€?);
+        let mut question = format!("请检索中国法下与“{risk}”相关的法条、监管规则和类案，并说明对{stance}的风险影响。");
         if !clause_ref.is_empty() {
-            question.push_str(&format!("閲嶇偣鍏虫敞鏉℃浣嶇疆锛歿clause_ref}銆?));
+            question.push_str(&format!("重点关注条款位置：{clause_ref}。"));
         }
         if !anchor_text.is_empty() {
-            question.push_str(&format!("鍘熸枃鐗囨锛歿anchor_text}銆?));
+            question.push_str(&format!("原文片段：{anchor_text}。"));
         }
         return question;
     }
 
     if !contract_type.is_empty() {
         return format!(
-            "璇峰洿缁曘€寋contract_type}銆嶅悎鍚岋紝妫€绱腑鍥芥硶涓嬪父瑙侀珮椋庨櫓鏉℃銆佸彲鐩存帴鎻村紩鐨勬硶鏉″拰浠ｈ〃鎬х被妗堛€?
+            "请围绕“{contract_type}”合同，检索中国法下常见高风险条款、可直接援引的法条和代表性类案。"
         );
     }
 
@@ -425,35 +425,38 @@ fn build_issue_title(input: &TransactionLegalResearchInput) -> String {
 }
 
 fn build_summary_system_prompt() -> String {
-    r#"浣犳槸涓€鍚嶄腑鍥藉晢浜嬪緥甯堝姪鎵嬨€傜幇鍦ㄤ綘鍙熀浜庡凡缁欏畾鐨勬绱㈡潗鏂欙紝杈撳嚭涓€涓?JSON 瀵硅薄锛屼笉瑕佽緭鍑?markdown 浠ｇ爜鍧楋紝涓嶈杈撳嚭瑙ｉ噴鎬у墠瑷€銆?
-杈撳嚭瀛楁蹇呴』鏄細
+    r#"你是一名中国商事律师助手。现在你只能基于已给定的检索材料，输出一个 JSON 对象；不要输出 markdown 代码块，不要输出解释性前言。
+输出字段必须是：
 {
-  "normalized_issue": "鎶婄敤鎴烽棶棰樺綊涓€鎴愪竴鍙ユ绱富棰?,
-  "scope_note": "璇存槑鏈疆妫€绱㈣鐩栧埌浜嗗摢浜涙潗鏂欙紝鎴栨湁鍝簺杈圭晫",
-  "summary": "3-5 鍙ユ€荤粨锛屽厛缁欑粨璁猴紝鍐嶈渚濇嵁杈圭晫",
+  "normalized_issue": "把用户问题归一成一句检索主题",
+  "scope_note": "说明本轮检索覆盖到哪些材料，或有哪些边界",
+  "summary": "3-5 句总结，先给结论，再讲依据边界",
   "authorities": [
     {
       "authority_type": "law | regulation | case | local_kb",
-      "title": "鏉ユ簮鏍囬",
-      "locator": "鏉″彿/妗堝彿/鏂囦欢璺緞/娉曡瀹氫綅",
-      "snippet": "鍙憳鍙栧褰撳墠闂鏈€鐩稿叧鐨勪竴灏忔",
-      "relevance": "杩欐潯鏉愭枡涓轰粈涔堜笌褰撳墠闂鐩稿叧"
+      "title": "来源标题",
+      "locator": "条号/案号/文件路径/法规定位",
+      "snippet": "只摘取对当前问题最相关的一小段",
+      "relevance": "这条材料为什么与当前问题相关"
     }
   ],
-  "risk_analysis": ["椋庨櫓鍒ゆ柇 1", "椋庨櫓鍒ゆ柇 2"],
-  "recommended_actions": ["涓嬩竴姝ュ缓璁?1", "涓嬩竴姝ュ缓璁?2"],
+  "risk_analysis": ["风险判断 1", "风险判断 2"],
+  "recommended_actions": ["下一步建议 1", "下一步建议 2"],
   "citations": [
     {
       "source_type": "law | regulation | case | local_kb",
-      "source_name": "鏉ユ簮鍚嶇О",
-      "locator": "瀹氫綅"
+      "source_name": "来源名称",
+      "locator": "定位"
     }
   ],
-  "follow_up_questions": ["濡傝瘉鎹笉瓒虫垨闂杩囧锛岄渶瑕佽ˉ闂殑 0-2 涓棶棰?]
+  "follow_up_questions": ["如证据不足或问题过宽，需要补问的 0-2 个问题"]
 }
 
-纭€ц姹傦細
-1. 鍙兘浣跨敤缁欏畾妫€绱㈡潗鏂欙紝涓嶅緱缂栭€犱笉瀛樺湪鐨勬硶瑙勫悕绉般€佹硶鏉″彿銆佹鍙锋垨瑁佸垽缁撹銆?2. 濡傛灉鏉愭枡涓嶈冻锛屽繀椤诲湪 scope_note 鍜?summary 閲屾槑纭啓鍑鸿竟鐣屻€?3. authorities 鏈€澶?6 鏉★紝鍙繚鐣欐渶鐩稿叧鏉愭枡銆?4. 濡傛灉娌℃湁鍙敤鏉愭枡锛宎uthorities / citations 杩斿洖绌烘暟缁勶紝recommended_actions 閲屾槑纭彁绀鸿ˉ鍏呮绱€?"#
+硬性要求：
+1. 只能使用给定检索材料，不得编造不存在的法规名称、法条号、案号或裁判结论。
+2. 如果材料不足，必须在 scope_note 和 summary 里明确写出边界。
+3. authorities 最多 6 条，只保留最相关材料。
+4. 如果没有可用材料，authorities / citations 返回空数组，recommended_actions 里明确提示补充检索。"#
         .to_string()
 }
 
@@ -507,7 +510,7 @@ async fn run_json_completion(
         .and_then(|message| message.get("content"))
         .and_then(|content| content.as_str())
         .map(str::to_string)
-        .ok_or_else(|| LlmError::ResponseFormat("鏃?choices[0].message.content".into()))
+        .ok_or_else(|| LlmError::ResponseFormat("missing choices[0].message.content".into()))
 }
 
 fn extract_json_object(content: &str) -> String {
@@ -537,7 +540,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return value.to_string();
     }
     let shortened: String = value.chars().take(max_chars).collect();
-    format!("{shortened}鈥?)
+    format!("{shortened}...")
 }
 
 fn is_meaningful_tool_content(value: &str) -> bool {
@@ -634,7 +637,7 @@ fn fact_to_authority(
 fn authorities_to_citations(
     authorities: &[TransactionResearchAuthority],
 ) -> Vec<TransactionResearchCitation> {
-    let mut citations = Vec::new();
+    let mut citations: Vec<TransactionResearchCitation> = Vec::new();
     for authority in authorities {
         let citation = TransactionResearchCitation {
             source_type: authority.authority_type.clone(),
@@ -934,6 +937,7 @@ fn article_label(raw: &str) -> String {
         format!("第{normalized}条")
     }
 }
+
 fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
 }
@@ -942,7 +946,34 @@ fn compact_keyword(question: &str) -> String {
     let normalized = normalize_whitespace(question);
     let cleaned: String = normalized
         .chars()
-        .filter(|ch| !matches!(ch, '\n' | '\r' | '\t' | '锛? | ',' | '銆? | '锛? | ';' | '锛? | ':' | '锛? | '?' | '锛? | '!' | '锛? | '锛? | '(' | ')' | '鈥? | '鈥? | '"' | '\'' | '銆?))
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '\n'
+                    | '\r'
+                    | '\t'
+                    | '，'
+                    | ','
+                    | '、'
+                    | '；'
+                    | ';'
+                    | '：'
+                    | ':'
+                    | '？'
+                    | '?'
+                    | '！'
+                    | '!'
+                    | '。'
+                    | '('
+                    | ')'
+                    | '“'
+                    | '”'
+                    | '"'
+                    | '\''
+                    | '《'
+                    | '》'
+            )
+        })
         .collect();
     let candidate = if cleaned.trim().is_empty() {
         normalized
@@ -954,10 +985,9 @@ fn compact_keyword(question: &str) -> String {
 
 fn normalize_stance_label(value: Option<&str>) -> String {
     match value.unwrap_or("").trim() {
-        "party_a" | "鐢叉柟" => "鐢叉柟".to_string(),
-        "party_b" | "涔欐柟" => "涔欐柟".to_string(),
-        "neutral" | "涓珛" => "涓珛".to_string(),
-        _ => "涓珛".to_string(),
+        "party_a" | "甲方" => "甲方".to_string(),
+        "party_b" | "乙方" => "乙方".to_string(),
+        "neutral" | "中立" => "中立".to_string(),
+        _ => "中立".to_string(),
     }
 }
-

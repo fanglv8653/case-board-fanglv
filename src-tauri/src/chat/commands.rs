@@ -181,7 +181,7 @@ pub async fn case_chat_impl(
     let scene_plan = build_scene_execution_plan(
         &settings,
         SceneRouteInput {
-            task,
+            task: requested_task,
             user_message: &input.user_message,
             attached_doc_ids: attached_doc_ids_for_route,
             editing_doc_id: input.editing_doc_id.as_deref(),
@@ -206,7 +206,8 @@ pub async fn case_chat_impl(
                 "[chat] fanglv router 工具过滤后为空,回退旧链路(strategy={})",
                 scene_plan.strategy_label()
             );
-            active_scene_plan = scene_plan.with_runtime_fallback(task, "fanglv-tools-empty");
+            active_scene_plan =
+                scene_plan.with_runtime_fallback(requested_task, "fanglv-tools-empty");
             registry_tools
         } else {
             registry_tools.filter_by_names(&scene_plan.allowed_tools, &scene_plan.blocked_tools)
