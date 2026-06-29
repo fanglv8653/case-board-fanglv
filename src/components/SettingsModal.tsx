@@ -1530,14 +1530,6 @@ export function SettingsModal({
             </>
           )}
 
-          {/* 作者署名(不写具体律所名 —— 其他律所用户会担心数据流向某家律所;
-              保留"执业律师"身份作为信任背书,见产品定位"护城河=律师身份") */}
-          <div className="mt-2 border-t border-border pt-5 text-center">
-            <p className="text-sm font-medium text-foreground">刘成 律师</p>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              一线执业律师 · 个人开发
-            </p>
-          </div>
         </div>
 
         {/* 底部按钮栏 */}
