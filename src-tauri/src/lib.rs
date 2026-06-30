@@ -675,6 +675,50 @@ async fn delete_payment(pool: tauri::State<'_, SqlitePool>, id: String) -> Resul
 }
 
 /* ============================================================
+ * 2026-06-29 · 收入台账 (case_income_records) commands
+ * ============================================================ */
+
+#[tauri::command]
+async fn list_income_records(
+    pool: tauri::State<'_, SqlitePool>,
+    filter: db::income_records::IncomeRecordFilter,
+) -> Result<Vec<db::income_records::IncomeRecord>, String> {
+    db::income_records::list(pool.inner(), filter).await
+}
+
+#[tauri::command]
+async fn get_income_record(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<Option<db::income_records::IncomeRecord>, String> {
+    db::income_records::get(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn upsert_income_record(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::income_records::UpsertIncomeRecordInput,
+) -> Result<db::income_records::IncomeRecord, String> {
+    db::income_records::upsert(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn delete_income_record(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, String> {
+    db::income_records::delete(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn summarize_income_records(
+    pool: tauri::State<'_, SqlitePool>,
+    filter: db::income_records::IncomeRecordFilter,
+) -> Result<db::income_records::IncomeSummary, String> {
+    db::income_records::summarize(pool.inner(), filter).await
+}
+
+/* ============================================================
  * 2026-06-13 · 案件待办清单 (case_todos) commands(胡彬律师反馈)
  * ============================================================ */
 
@@ -5332,6 +5376,11 @@ pub fn run() {
             add_payment,
             list_payments,
             delete_payment,
+            list_income_records,
+            get_income_record,
+            upsert_income_record,
+            delete_income_record,
+            summarize_income_records,
             add_todo,
             list_todos,
             list_open_todos,

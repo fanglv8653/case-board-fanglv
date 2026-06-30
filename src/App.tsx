@@ -27,6 +27,7 @@ import { ToolsModule } from "@/modules/tools";
 import type { InterestPrefill } from "@/modules/tools/calculators/InterestCalculator";
 import { TeamModule } from "@/modules/team/TeamModule";
 import { ExecutionModule } from "@/modules/execution";
+import { IncomeModule } from "@/modules/income/IncomeModule";
 import { CaseView } from "@/modules/litigation/components/CaseView";
 import { ProgressBanner } from "@/modules/litigation/components/ProgressBanner";
 import { confirmDialog } from "@/lib/dialog";
@@ -1120,6 +1121,7 @@ function App() {
             }}
           />
         )}
+        {activeModule === "income" && <IncomeModule />}
         {activeModule === "transaction" && <TransactionModule />}
         {activeModule === "tools" && (
           <ToolsModule

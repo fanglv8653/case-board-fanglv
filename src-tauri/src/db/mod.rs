@@ -29,6 +29,7 @@ pub mod court_filing;
 pub mod credits;
 pub mod document_tags;
 pub mod documents;
+pub mod income_records;
 pub mod lawyer_profiles;
 pub mod metrics;
 pub mod payments;

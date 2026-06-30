@@ -179,6 +179,85 @@ export interface CaseInstance {
   updated_at: string;
 }
 
+export type IncomeSourceType = "personal" | "collaboration";
+
+export type IncomeArchiveHoldbackStatus = "holding" | "returned" | "not_returned";
+
+export type IncomeInvoiceStatus = "all" | "invoiced" | "not_invoiced";
+
+export interface IncomeRecord {
+  id: string;
+  case_id: string | null;
+  /** 解析后的显示案件名:优先 manual_case_name,否则取关联案件 name。 */
+  case_name: string | null;
+  manual_case_name: string | null;
+  lawyer_fee_total: number;
+  source_type: IncomeSourceType;
+  collaborator_name: string | null;
+  share_ratio: number;
+  firm_deduction_rate: number;
+  archive_holdback_rate: number;
+  personal_share_amount: number;
+  firm_deduction_amount: number;
+  archive_holdback_amount: number;
+  archive_holdback_status: IncomeArchiveHoldbackStatus;
+  archive_returned_at: string | null;
+  archive_returned_amount: number;
+  invoice_date: string | null;
+  invoice_no: string | null;
+  recognized_month: string;
+  actual_income_amount: number;
+  actual_income_overridden: number;
+  actual_income_override_note: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IncomeRecordFilter {
+  month_from?: string | null;
+  month_to?: string | null;
+  source_type?: IncomeSourceType | null;
+  archive_holdback_status?: IncomeArchiveHoldbackStatus | null;
+  invoice_status?: IncomeInvoiceStatus | null;
+  query?: string | null;
+}
+
+export interface IncomeRecordUpsertInput {
+  id?: string | null;
+  case_id?: string | null;
+  manual_case_name?: string | null;
+  lawyer_fee_total: number;
+  source_type?: IncomeSourceType | null;
+  collaborator_name?: string | null;
+  share_ratio?: number | null;
+  firm_deduction_rate?: number | null;
+  archive_holdback_rate?: number | null;
+  archive_holdback_status?: IncomeArchiveHoldbackStatus | null;
+  archive_returned_at?: string | null;
+  archive_returned_amount?: number | null;
+  invoice_date?: string | null;
+  invoice_no?: string | null;
+  recognized_month?: string | null;
+  actual_income_amount?: number | null;
+  actual_income_overridden?: number | null;
+  actual_income_override_note?: string | null;
+  note?: string | null;
+}
+
+export interface IncomeSummary {
+  record_count: number;
+  lawyer_fee_total_sum: number;
+  personal_share_sum: number;
+  firm_deduction_sum: number;
+  archive_holdback_sum: number;
+  actual_income_sum: number;
+  holding_amount_sum: number;
+  returned_holdback_sum: number;
+  invoiced_fee_sum: number;
+  overridden_count: number;
+}
+
 /** 新建/更新审级的输入(add/updateCaseInstance 共用)。 */
 export interface NewCaseInstance {
   level: string;

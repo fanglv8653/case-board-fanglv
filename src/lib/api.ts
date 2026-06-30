@@ -12,6 +12,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Case,
   CaseInstance,
+  IncomeRecord,
+  IncomeRecordFilter,
+  IncomeRecordUpsertInput,
+  IncomeSummary,
   CaseWithDocs,
   CourtFilingJob,
   CourtFilingEnvReport,
@@ -611,6 +615,36 @@ export function listPayments(caseId: string): Promise<Payment[]> {
 
 export function deletePayment(id: string): Promise<number> {
   return invoke<number>("delete_payment", { id });
+}
+
+/* ------------------------------------------------------------------ */
+/* 收入台账(2026-06-29 · case_income_records)                         */
+/* ------------------------------------------------------------------ */
+
+export function listIncomeRecords(
+  filter: IncomeRecordFilter = {},
+): Promise<IncomeRecord[]> {
+  return invoke<IncomeRecord[]>("list_income_records", { filter });
+}
+
+export function getIncomeRecord(id: string): Promise<IncomeRecord | null> {
+  return invoke<IncomeRecord | null>("get_income_record", { id });
+}
+
+export function upsertIncomeRecord(
+  input: IncomeRecordUpsertInput,
+): Promise<IncomeRecord> {
+  return invoke<IncomeRecord>("upsert_income_record", { input });
+}
+
+export function deleteIncomeRecord(id: string): Promise<number> {
+  return invoke<number>("delete_income_record", { id });
+}
+
+export function summarizeIncomeRecords(
+  filter: IncomeRecordFilter = {},
+): Promise<IncomeSummary> {
+  return invoke<IncomeSummary>("summarize_income_records", { filter });
 }
 
 /* ------------------------------------------------------------------ */

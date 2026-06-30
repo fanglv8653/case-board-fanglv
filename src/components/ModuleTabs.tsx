@@ -11,6 +11,7 @@
 import { useLayoutEffect, useRef, useState, type ComponentType } from "react";
 import {
   Briefcase,
+  CircleDollarSign,
   FileQuestion,
   Gavel,
   Home,
@@ -32,6 +33,7 @@ export type ModuleId =
   | "litigation"
   | "criminal"
   | "execution"
+  | "income"
   | "transaction"
   | "tools"
   | "team"
@@ -61,6 +63,7 @@ const MODULES: {
     title: "刑事案件 Beta: 自动识别归类,分析结果需人工核对",
   },
   { id: "execution", label: "执行", icon: Gavel, group: "case" },
+  { id: "income", label: "收入", icon: CircleDollarSign, group: "work" },
   { id: "transaction", label: "非诉", icon: FileQuestion, group: "work" },
   { id: "tools", label: "工具", icon: Wrench, group: "work" },
   // 2026-06-10 团队版 Phase 1:LAN 接力同步团队看板(未入团显示引导页)
