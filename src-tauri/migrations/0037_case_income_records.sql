@@ -2,7 +2,6 @@
 --
 -- 独立的个人收入台账,不复用 cases.agg_fees / case_payments,也不进入工作台/团队/AI。
 -- `case_id` 可空:允许记录未导入案件;若关联案件被删,保留台账并把 case_id 置空。
-
 CREATE TABLE IF NOT EXISTS case_income_records (
     id                          TEXT PRIMARY KEY NOT NULL,
     case_id                     TEXT,

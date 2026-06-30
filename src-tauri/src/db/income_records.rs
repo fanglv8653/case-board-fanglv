@@ -285,20 +285,20 @@ pub async fn summarize(
         r#"
 SELECT
     COUNT(*) AS record_count,
-    COALESCE(SUM(ir.lawyer_fee_total), 0) AS lawyer_fee_total_sum,
-    COALESCE(SUM(ir.personal_share_amount), 0) AS personal_share_sum,
-    COALESCE(SUM(ir.firm_deduction_amount), 0) AS firm_deduction_sum,
-    COALESCE(SUM(ir.archive_holdback_amount), 0) AS archive_holdback_sum,
-    COALESCE(SUM(ir.actual_income_amount), 0) AS actual_income_sum,
+    COALESCE(SUM(ir.lawyer_fee_total), 0.0) AS lawyer_fee_total_sum,
+    COALESCE(SUM(ir.personal_share_amount), 0.0) AS personal_share_sum,
+    COALESCE(SUM(ir.firm_deduction_amount), 0.0) AS firm_deduction_sum,
+    COALESCE(SUM(ir.archive_holdback_amount), 0.0) AS archive_holdback_sum,
+    COALESCE(SUM(ir.actual_income_amount), 0.0) AS actual_income_sum,
     COALESCE(SUM(CASE
         WHEN ir.archive_holdback_status = 'holding'
-        THEN MAX(ir.archive_holdback_amount - ir.archive_returned_amount, 0)
-        ELSE 0
-    END), 0) AS holding_amount_sum,
-    COALESCE(SUM(ir.archive_returned_amount), 0) AS returned_holdback_sum,
+        THEN MAX(ir.archive_holdback_amount - ir.archive_returned_amount, 0.0)
+        ELSE 0.0
+    END), 0.0) AS holding_amount_sum,
+    COALESCE(SUM(ir.archive_returned_amount), 0.0) AS returned_holdback_sum,
     COALESCE(SUM(CASE
         WHEN ir.invoice_date IS NOT NULL AND trim(ir.invoice_date) <> ''
-        THEN ir.lawyer_fee_total ELSE 0 END), 0) AS invoiced_fee_sum,
+        THEN ir.lawyer_fee_total ELSE 0.0 END), 0.0) AS invoiced_fee_sum,
     COALESCE(SUM(CASE WHEN ir.actual_income_overridden = 1 THEN 1 ELSE 0 END), 0) AS overridden_count
 FROM case_income_records ir
 LEFT JOIN cases c ON ir.case_id = c.id
