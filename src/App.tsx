@@ -272,11 +272,8 @@ function App() {
         if (p) setJustUpdated(p);
       })
       .catch(() => {});
-    // 2026-06-15 私人自用包防误更新:编译期设 VITE_NO_UPDATE_CHECK=1 → 跳过启动自动检查更新,
-    // 不再弹「发现新版本」。背景:私人自用包带专属功能(「独立」tab),却和公开版共用同一个
-    // lawtools.top/latest.json;公开发版后版本号更高,会把私人版自动更新成公开版、丢掉专属功能
-    // (作者就这么误装过)。公开构建不设此变量 → 照常检查,公开用户正常收到更新。
-    // 手动点右下角版本 chip 仍可主动检查,不受影响。
+    // 方律个人版默认由后端关闭远程更新检查;这里保留编译期开关作为二次保险。
+    // 后续如要启用 GitHub 私有发布通道,先恢复后端检查,再放开这里的自动提示。
     if (import.meta.env.VITE_NO_UPDATE_CHECK !== "1") {
       checkForUpdate()
         .then((info) => {
@@ -285,7 +282,7 @@ function App() {
           // (开源用户基于旧版二改的,疯狂弹窗会严重打扰)。弹过的版本号记
           // localStorage;下次远程版本没变就不再弹;发了更新的版本再弹一次。
           // 用户仍可随时点右下角版本 chip 主动查看更新。
-          const PROMPTED_KEY = "caseboard.update_prompted_version";
+          const PROMPTED_KEY = "fanglv-caseboard.update_prompted_version";
           if (info.has_update && info.latest) {
             let prompted: string | null = null;
             try {

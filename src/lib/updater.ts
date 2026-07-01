@@ -16,7 +16,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 
-const PENDING_KEY = "caseboard.pending_update";
+const PENDING_KEY = "fanglv-caseboard.pending_update";
 
 export interface PendingUpdate {
   version: string;

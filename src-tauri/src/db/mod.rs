@@ -11,7 +11,8 @@
 //!
 //! 测试模式可以传 `sqlite::memory:` 跑内存库,不污染本机文件系统。
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -36,25 +37,71 @@ pub mod payments;
 pub mod seed;
 pub mod todos;
 
-/// `directories` 用的标识——macOS 上这会拼成 `~/Library/Application Support/CaseBoard/`
+/// `directories` 用的标识——macOS 上这会拼成 `~/Library/Application Support/FanglvCaseBoard/`
 const APP_QUALIFIER: &str = "";
 const APP_ORG: &str = "";
-const APP_NAME: &str = "CaseBoard";
+const APP_NAME: &str = "FanglvCaseBoard";
+const LEGACY_APP_NAME: &str = "CaseBoard";
 
-/// 拿到当前操作系统下 CaseBoard 的数据目录路径。
+/// 拿到当前操作系统下方律案件看板的数据目录路径。
 ///
-/// macOS: `~/Library/Application Support/CaseBoard/`
-/// Linux: `~/.local/share/CaseBoard/`
-/// Windows: `%APPDATA%\CaseBoard\data\`
+/// macOS: `~/Library/Application Support/FanglvCaseBoard/`
+/// Linux: `~/.local/share/FanglvCaseBoard/`
+/// Windows: `%APPDATA%\FanglvCaseBoard\data\`
 pub fn app_data_dir() -> Result<PathBuf, DbError> {
-    let proj =
-        ProjectDirs::from(APP_QUALIFIER, APP_ORG, APP_NAME).ok_or(DbError::HomeDirNotFound)?;
-    Ok(proj.data_dir().to_path_buf())
+    let current = project_data_dir(APP_NAME)?;
+    migrate_legacy_data_dir_if_needed(&current)?;
+    Ok(current)
 }
 
 /// 默认数据库文件路径(`<app_data_dir>/caseboard.db`)。
 pub fn default_db_path() -> Result<PathBuf, DbError> {
     Ok(app_data_dir()?.join("caseboard.db"))
+}
+
+fn project_data_dir(app_name: &str) -> Result<PathBuf, DbError> {
+    let proj =
+        ProjectDirs::from(APP_QUALIFIER, APP_ORG, app_name).ok_or(DbError::HomeDirNotFound)?;
+    Ok(proj.data_dir().to_path_buf())
+}
+
+fn migrate_legacy_data_dir_if_needed(current: &Path) -> Result<(), DbError> {
+    let current_db = current.join("caseboard.db");
+    if current_db.exists() {
+        return Ok(());
+    }
+
+    let legacy = project_data_dir(LEGACY_APP_NAME)?;
+    let legacy_db = legacy.join("caseboard.db");
+    if !legacy_db.exists() || legacy == current {
+        return Ok(());
+    }
+
+    copy_dir_missing_only(&legacy, current)?;
+    crate::dlog!(
+        "[db] 已从旧数据目录 {} 复制到新数据目录 {}",
+        legacy.display(),
+        current.display()
+    );
+    Ok(())
+}
+
+fn copy_dir_missing_only(src: &Path, dst: &Path) -> Result<(), DbError> {
+    fs::create_dir_all(dst).map_err(|e| DbError::Io(e.to_string()))?;
+    for entry in fs::read_dir(src).map_err(|e| DbError::Io(e.to_string()))? {
+        let entry = entry.map_err(|e| DbError::Io(e.to_string()))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if dst_path.exists() {
+            continue;
+        }
+        if src_path.is_dir() {
+            copy_dir_missing_only(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).map_err(|e| DbError::Io(e.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 /// 初始化连接池:确保目录存在、连接、跑 migrations。

@@ -5241,10 +5241,10 @@ fn ensure_webview2_runtime() {
 
     let choice = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Warning)
-        .set_title("案件看板 · 缺少运行环境")
+        .set_title("方律案件看板 · 缺少运行环境")
         .set_description(
-            "检测到系统未安装 Microsoft Edge WebView2 运行时,案件看板无法启动。\n\n\
-             点「确定」前往微软官方下载(免费、安全,约几 MB),安装完成后重新打开案件看板即可。\n\
+            "检测到系统未安装 Microsoft Edge WebView2 运行时,方律案件看板无法启动。\n\n\
+             点「确定」前往微软官方下载(免费、安全,约几 MB),安装完成后重新打开方律案件看板即可。\n\
              若下载很慢,可在浏览器搜索「WebView2 运行时 下载」从国内镜像获取。",
         )
         .set_buttons(rfd::MessageButtons::OkCancel)

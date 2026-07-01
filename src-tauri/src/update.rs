@@ -1,11 +1,9 @@
-//! 版本检测 —— 启动时 / 手动触发,fetch lawtools.top 仓库的 version.json 比对当前版本。
+//! 版本检测 —— 方律个人版默认关闭原版远程更新检查,避免被公开版覆盖。
 //!
 //! 2026-05-25 V0.1.8 加。
 //!
 //! 设计:
-//!   - 数据源:`https://lawtools.top/version.json`(lawtools.top 的 OSS 公开域名)
-//!     2026-05-25 V0.1.8 hotfix:原来用 raw.githubusercontent.com,但 lawtools.top 仓库
-//!     是 PRIVATE,raw 永远 404。改用 OSS 公开域名,无需认证。
+//!   - 数据源:方律私有发布通道。当前个人版默认关闭远程更新检查,后续发布策略确定后再启用。
 //!   - 当前版本:`env!("CARGO_PKG_VERSION")`,跟 Cargo.toml 一致
 //!   - 比对:语义化版本(major.minor.patch),远程严格大于本地才算落后
 //!   - 超时:8s。失败不报错,返回 `has_update=false` + error 字段给前端日志用
@@ -14,8 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
-const VERSION_JSON_URL: &str = "https://lawtools.top/version.json";
+const VERSION_JSON_URL: &str =
+    "https://raw.githubusercontent.com/fanglv8653/case-board-fanglv/main/release/version.json";
 const FETCH_TIMEOUT_SEC: u64 = 8;
+const PRIVATE_UPDATE_CHECK_DISABLED: bool = true;
 
 /// 远程 version.json 反序列化结构
 #[derive(Debug, Clone, Deserialize)]
@@ -65,6 +65,17 @@ impl UpdateInfo {
 /// 检测远程最新版本。
 pub async fn check_for_update() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
+    if PRIVATE_UPDATE_CHECK_DISABLED {
+        return UpdateInfo {
+            current,
+            latest: None,
+            has_update: false,
+            released_at: None,
+            notes: Some("方律个人版已关闭原版远程更新检查。".to_string()),
+            download_url: None,
+            error: None,
+        };
+    }
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SEC))
@@ -77,7 +88,7 @@ pub async fn check_for_update() -> UpdateInfo {
     let resp = match client
         .get(VERSION_JSON_URL)
         .header("Accept", "application/json")
-        .header("User-Agent", format!("CaseBoard/{}", current))
+        .header("User-Agent", format!("FanglvCaseBoard/{}", current))
         .send()
         .await
     {
@@ -104,7 +115,7 @@ pub async fn check_for_update() -> UpdateInfo {
         notes: remote.notes,
         download_url: remote
             .download_url
-            .or_else(|| Some("https://lawtools.top/".to_string())),
+            .or_else(|| Some("https://github.com/fanglv8653/case-board-fanglv".to_string())),
         error: None,
     }
 }

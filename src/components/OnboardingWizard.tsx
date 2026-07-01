@@ -413,7 +413,7 @@ function IntroPage({ page, first }: { page: FeaturePage; first: boolean }) {
     <div className="animate-in fade-in-0 slide-in-from-right-2 duration-300">
       {first && (
         <h1 className="mb-1 text-2xl font-bold tracking-tight">
-          欢迎使用 CaseBoard
+          欢迎使用方律案件看板
         </h1>
       )}
       <span className="inline-block rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700">

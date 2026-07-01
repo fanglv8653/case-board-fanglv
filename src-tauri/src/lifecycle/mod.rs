@@ -65,7 +65,7 @@ pub fn detect_local_readiness(model_dir: Option<&str>) -> LocalReadiness {
 /// 找用户的本机模型目录。优先级:
 /// 1. 用户在 settings 显式指定的
 /// 2. 作者的 LM Studio 路径(~/.lmstudio/models/openbmb/MiniCPM-V-4.6-gguf/)
-/// 3. App 默认下载目录(~/.cache/caseboard/models/)
+/// 3. App 默认下载目录(~/.cache/FanglvCaseBoard/models/)
 fn resolve_model_dir(explicit: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         let path = PathBuf::from(p);
@@ -83,7 +83,7 @@ fn resolve_model_dir(explicit: Option<&str>) -> Option<PathBuf> {
         }
     }
     // App 默认目录
-    if let Some(proj) = directories::ProjectDirs::from("io", "caseboard", "CaseBoard") {
+    if let Some(proj) = directories::ProjectDirs::from("", "", "FanglvCaseBoard") {
         let dir = proj.cache_dir().join("models");
         if dir.exists() {
             return Some(dir);
@@ -141,7 +141,7 @@ pub fn spawn_llama_server(model_dir: &Path) -> Result<(), String> {
     }
 
     // 日志目录
-    let log_dir = directories::ProjectDirs::from("io", "caseboard", "CaseBoard")
+    let log_dir = directories::ProjectDirs::from("", "", "FanglvCaseBoard")
         .map(|p| p.data_dir().to_path_buf())
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&log_dir).ok();
@@ -201,7 +201,7 @@ pub async fn wait_until_ready() -> Result<(), String> {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     Err(format!(
-        "等了 {}s,llama-server :8899 还没就绪。检查 ~/.local/share/CaseBoard/llama-server.log",
+        "等了 {}s,llama-server :8899 还没就绪。检查 FanglvCaseBoard 数据目录下的 llama-server.log",
         SERVER_READY_TIMEOUT_SEC
     ))
 }

@@ -36,7 +36,7 @@ export function UpdateAvailableDialog({ info, onClose }: Props) {
   const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
 
   const handleManualDownload = async () => {
-    const url = info.download_url ?? "https://lawtools.top/";
+    const url = info.download_url ?? "https://github.com/fanglv8653/case-board-fanglv";
     try {
       await openUrl(url);
     } catch (e) {
