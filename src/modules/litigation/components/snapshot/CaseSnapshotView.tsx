@@ -18,6 +18,7 @@ import { type Case, type CaseInstance, type Document } from "@/lib/types";
 import { listCaseInstances } from "@/lib/api";
 import { formatYuan } from "@/lib/format";
 import { computeCaseSnapshot } from "@/lib/caseSnapshot";
+import { extractExecutionCaseNoFromCase, getTrialCaseNo } from "@/lib/caseNumbers";
 import {
   applyFieldOverrides,
   rowKeyOf,
@@ -89,6 +90,11 @@ export function CaseSnapshotView({
   // LLM snapshot + 用户 overlay
   const rawSnap = computeCaseSnapshot(caseData, documents);
   const snap = applyFieldOverrides(rawSnap, ov.overrides);
+  const executionCaseNo = extractExecutionCaseNoFromCase(caseData);
+  const primaryCaseNo = executionCaseNo ?? snap.case_no;
+  const trialCaseNo = executionCaseNo
+    ? getTrialCaseNo(caseData, instances, snap.case_no)
+    : null;
 
   const amountText = snap.claim_amount ? formatYuan(snap.claim_amount) : null;
   // 编辑态显示纯数字字符串(给用户改);非编辑态显示带 ¥ 千位逗号的格式化值(给人看)。
@@ -237,7 +243,15 @@ export function CaseSnapshotView({
           dragHandle={dragHandle}
         >
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 md:grid-cols-3">
-            <FactRow label="案件编号" value={snap.case_no} mono {...edit("agg_case_no")} />
+            <FactRow
+              label={executionCaseNo ? "执行案号" : "案件编号"}
+              value={primaryCaseNo}
+              mono
+              {...(!executionCaseNo ? edit("agg_case_no") : {})}
+            />
+            {executionCaseNo && (
+              <FactRow label="审判案号" value={trialCaseNo} mono {...edit("agg_case_no")} />
+            )}
             <FactRow label="案件类型" value={snap.case_type} />
             <FactRow label="案件名称" value={caseData.name} />
             <FactRow label="承办机关" value={snap.court} {...edit("agg_court")} />
@@ -577,9 +591,16 @@ export function CaseSnapshotView({
               snap.cause || <Dash />
             )}
           </h2>
-          {(snap.case_no || isEditMode) && (
-            <span className="font-mono text-sm text-muted-foreground">
-              {isEditMode ? (
+          {(primaryCaseNo || isEditMode) && (
+            <span className="flex items-center gap-1.5 font-mono text-sm text-muted-foreground">
+              {executionCaseNo ? (
+                <>
+                  <span className="font-sans text-caption text-muted-foreground">
+                    执行案号
+                  </span>
+                  <span>{executionCaseNo}</span>
+                </>
+              ) : isEditMode ? (
                 <EditableField
                   key={`${caseData.id}:agg_case_no:hero`}
                   initialValue={snap.case_no}
@@ -596,6 +617,25 @@ export function CaseSnapshotView({
             </span>
           )}
         </div>
+        {executionCaseNo && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            <span>审判案号：</span>
+            {isEditMode ? (
+              <EditableField
+                key={`${caseData.id}:agg_case_no:trial-secondary`}
+                initialValue={snap.case_no}
+                editable
+                onCommit={(v) => ov.setField("agg_case_no", v)}
+                ariaLabel="编辑审判案号"
+                editableClassName="font-mono text-xs"
+                hasOverride={ov.hasFieldOverride("agg_case_no")}
+                onReset={() => ov.clearField("agg_case_no")}
+              />
+            ) : (
+              <span className="font-mono">{trialCaseNo || <Dash />}</span>
+            )}
+          </p>
+        )}
         <p className="mt-1 text-sm text-muted-foreground">
           {isEditMode ? (
             <EditableField

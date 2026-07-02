@@ -1795,28 +1795,50 @@ function CalendarPanel({
               暂无近期日程(开庭 / 到期日由案件分析自动汇总到这里)
             </p>
           ) : (
-            summaryEvents.map((event, index) => (
-              <button
-                key={`${event.caseId}-${event.date}-${index}`}
-                type="button"
-                onClick={() => onPickCase(event.caseId)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted/60"
-              >
-                <span className={cn("size-2 shrink-0 rounded-full", calendarDotClass(event))} />
-                <span className="shrink-0 font-mono text-caption text-muted-foreground">
-                  {event.date.slice(5)}
-                </span>
-                <span className="font-medium text-foreground">{event.type}</span>
-                <span className="truncate text-muted-foreground">{event.caseName}</span>
-                <span className="ml-auto shrink-0 font-mono text-caption text-muted-foreground">
-                  {event.daysFromNow === 0
-                    ? "D-DAY"
-                    : event.daysFromNow > 0
-                      ? `D-${event.daysFromNow}`
-                      : `逾期${-event.daysFromNow}天`}
-                </span>
-              </button>
-            ))
+            summaryEvents.map((event, index) => {
+              const isManual = event.kind === "manual";
+              const countdown =
+                event.daysFromNow === 0
+                  ? "D-DAY"
+                  : event.daysFromNow > 0
+                    ? `D-${event.daysFromNow}`
+                    : `逾期${-event.daysFromNow}天`;
+              return (
+                <div
+                  key={`${event.id ?? event.caseId}-${event.date}-${index}`}
+                  className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-muted/60"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isManual) onPickCase(event.caseId);
+                    }}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    <span className={cn("size-2 shrink-0 rounded-full", calendarDotClass(event))} />
+                    <span className="shrink-0 font-mono text-caption text-muted-foreground">
+                      {event.date.slice(5)}
+                    </span>
+                    <span className="shrink-0 font-medium text-foreground">{event.type}</span>
+                    <span className="truncate text-muted-foreground">{event.caseName}</span>
+                    <span className="ml-auto shrink-0 font-mono text-caption text-muted-foreground">
+                      {countdown}
+                    </span>
+                  </button>
+                  {isManual && event.id && (
+                    <button
+                      type="button"
+                      onClick={() => void onDeleteEvent(event.id!)}
+                      aria-label="删除日程"
+                      title="删除日程"
+                      className="shrink-0 rounded p-0.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       ) : (
@@ -1960,7 +1982,8 @@ function CalendarPanel({
                       type="button"
                       onClick={() => void onDeleteEvent(event.id!)}
                       aria-label="删除日程"
-                      className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                      title="删除日程"
+                      className="shrink-0 rounded p-0.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
                     >
                       <Trash2 className="size-3.5" />
                     </button>
