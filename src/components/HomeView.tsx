@@ -45,8 +45,10 @@ import {
   type CalendarEvent,
   deleteCalendarEvent,
   getCaseWithDocs,
+  getCriminalCaseProfile,
   getSettings,
   listCalendarEvents,
+  listCriminalDeadlineItems,
   listOpenTodos,
   type OpenTodoRow,
   updateHomeCaseOrder,
@@ -61,10 +63,11 @@ import {
   ttDeleteItem,
   type TickTickItem,
 } from "@/lib/ticktickApi";
-import type { Case, Document } from "@/lib/types";
+import type { Case, CriminalCaseProfile, CriminalDeadlineItem, Document } from "@/lib/types";
 import { parseJsonArray } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useFeatureFlag } from "@/lib/featureFlags";
+import { isCriminalCase } from "@/lib/caseDomain";
 import { CalendarBoard } from "./CalendarBoard";
 import {
   compareCasesByStatusThenTime,
@@ -82,6 +85,7 @@ export type HomeStatusWarning = {
 
 export interface HomeViewProps {
   cases: Case[];
+  allCases?: Case[];
   userDisplayName: string | null;
   onPickCase: (caseId: string) => void;
   onImport: () => void;
@@ -94,6 +98,9 @@ export interface HomeViewProps {
   networkStatus?: "unknown" | "online" | "offline";
   configWarnings?: HomeStatusWarning[];
   onOpenSettings?: () => void;
+  onOpenCriminalModule?: () => void;
+  onOpenCivilModule?: () => void;
+  onOpenExecutionModule?: () => void;
 }
 
 type ViewMode = "grid" | "list";
@@ -137,6 +144,7 @@ const PRESERVATION_RE = /保全|续封|查封|冻结/;
 
 export function HomeView({
   cases,
+  allCases,
   userDisplayName,
   onPickCase,
   onImport,
@@ -146,7 +154,11 @@ export function HomeView({
   networkStatus = "unknown",
   configWarnings = [],
   onOpenSettings,
+  onOpenCriminalModule,
+  onOpenCivilModule,
+  onOpenExecutionModule,
 }: HomeViewProps) {
+  const overviewCases = allCases ?? cases;
   const greeting = getGreeting(userDisplayName);
   const monthLabel = new Date()
     .toLocaleString("en-US", { month: "short", year: "numeric" })
@@ -173,6 +185,19 @@ export function HomeView({
   // 2026-06-16 · 首页清爽开关(设置页「功能开关」tab,默认关,逐设备生效)
   const [filterBarOn] = useFeatureFlag("home_filter_bar");
   const [ticktickOn] = useFeatureFlag("home_ticktick");
+  const criminalOverviewCases = useMemo(
+    () => overviewCases.filter((c) => isCriminalCase(c)),
+    [overviewCases],
+  );
+  const [criminalProfilesByCase, setCriminalProfilesByCase] = useState<
+    Record<string, CriminalCaseProfile | null>
+  >({});
+  const [criminalDeadlinesByCase, setCriminalDeadlinesByCase] = useState<
+    Record<string, CriminalDeadlineItem[]>
+  >({});
+  const [criminalOverviewError, setCriminalOverviewError] = useState<string | null>(
+    null,
+  );
 
   const reloadManualEvents = () => {
     listCalendarEvents()
@@ -201,7 +226,7 @@ export function HomeView({
   useEffect(() => {
     let cancelled = false;
     Promise.all(
-      cases.map(async (c) => {
+      overviewCases.map(async (c) => {
         try {
           const r = await getCaseWithDocs(c.id);
           return [c.id, r.documents] as const;
@@ -215,7 +240,44 @@ export function HomeView({
     return () => {
       cancelled = true;
     };
-  }, [cases]);
+  }, [overviewCases]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (criminalOverviewCases.length === 0) {
+      setCriminalProfilesByCase({});
+      setCriminalDeadlinesByCase({});
+      setCriminalOverviewError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    Promise.all(
+      criminalOverviewCases.map(async (c) => {
+        const [profile, deadlines] = await Promise.all([
+          getCriminalCaseProfile(c.id),
+          listCriminalDeadlineItems(c.id),
+        ]);
+        return [c.id, profile, deadlines] as const;
+      }),
+    )
+      .then((rows) => {
+        if (cancelled) return;
+        setCriminalProfilesByCase(
+          Object.fromEntries(rows.map(([id, profile]) => [id, profile])),
+        );
+        setCriminalDeadlinesByCase(
+          Object.fromEntries(rows.map(([id, , deadlines]) => [id, deadlines])),
+        );
+        setCriminalOverviewError(null);
+      })
+      .catch((e) => {
+        if (!cancelled) setCriminalOverviewError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [criminalOverviewCases]);
 
   useEffect(() => {
     let cancelled = false;
@@ -262,6 +324,25 @@ export function HomeView({
         nearestHearing: findNearestFutureHearing(c),
       })),
     [casesWithOverride, docsByCase],
+  );
+  const overviewRows = useMemo<CaseRow[]>(
+    () =>
+      overviewCases.map((c) => ({
+        caseData: c,
+        status: resolveCaseStatus(c, docsByCase[c.id] ?? []),
+        display: buildCaseDisplay(c),
+        nearestHearing: findNearestFutureHearing(c),
+      })),
+    [overviewCases, docsByCase],
+  );
+  const criminalOverviewRows = overviewRows.filter((row) =>
+    isCriminalCase(row.caseData),
+  );
+  const executionOverviewRows = overviewRows.filter(
+    (row) => row.status.id === "execution",
+  );
+  const civilOverviewRows = overviewRows.filter(
+    (row) => !isCriminalCase(row.caseData) && row.status.id !== "execution",
   );
 
   const defaultSorted = [...caseRows].sort((a, b) =>
@@ -513,6 +594,18 @@ export function HomeView({
             </div>
             <ImportantDates events={upcomingEvents} onPickCase={onPickCase} />
           </div>
+
+          <WorkbenchOverviewStrip
+            criminalRows={criminalOverviewRows}
+            civilRows={civilOverviewRows}
+            executionRows={executionOverviewRows}
+            criminalProfilesByCase={criminalProfilesByCase}
+            criminalDeadlinesByCase={criminalDeadlinesByCase}
+            criminalOverviewError={criminalOverviewError}
+            onOpenCriminalModule={onOpenCriminalModule}
+            onOpenCivilModule={onOpenCivilModule}
+            onOpenExecutionModule={onOpenExecutionModule}
+          />
 
           {/* 飞书日历开启 → 月历视图(替代本地日程日历卡);否则按本地开关显示原日程卡 */}
           {cases.length > 0 && feishuEnabled && (
@@ -859,6 +952,185 @@ function HomeStatusHints({
       ))}
     </div>
   );
+}
+
+function WorkbenchOverviewStrip({
+  criminalRows,
+  civilRows,
+  executionRows,
+  criminalProfilesByCase,
+  criminalDeadlinesByCase,
+  criminalOverviewError,
+  onOpenCriminalModule,
+  onOpenCivilModule,
+  onOpenExecutionModule,
+}: {
+  criminalRows: CaseRow[];
+  civilRows: CaseRow[];
+  executionRows: CaseRow[];
+  criminalProfilesByCase: Record<string, CriminalCaseProfile | null>;
+  criminalDeadlinesByCase: Record<string, CriminalDeadlineItem[]>;
+  criminalOverviewError: string | null;
+  onOpenCriminalModule?: () => void;
+  onOpenCivilModule?: () => void;
+  onOpenExecutionModule?: () => void;
+}) {
+  const criminalActive = activeRows(criminalRows);
+  const civilActive = activeRows(civilRows);
+  const deadlineStats = countCriminalDeadlineStats(criminalDeadlinesByCase);
+  const stageSummary = summarizeCriminalStages(criminalRows, criminalProfilesByCase);
+  const civilEvents = buildUpcomingEvents(civilActive.map((row) => row.caseData));
+  const executionRemaining = executionRows.reduce(
+    (sum, row) => sum + Number(row.caseData.execution_remaining ?? 0),
+    0,
+  );
+
+  return (
+    <section className="mb-8 grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <OverviewCard
+        title="刑事总览"
+        icon={<ShieldAlert className="size-4" />}
+        count={criminalActive.length}
+        countLabel="在办刑事"
+        onClick={onOpenCriminalModule}
+      >
+        <p className="text-sm text-muted-foreground">
+          {stageSummary || "阶段待补录；进入刑事详情可维护画像与节点。"}
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          期限：今日 {deadlineStats.today}，7日内 {deadlineStats.in7Days}，逾期 {deadlineStats.overdue}
+        </p>
+        {criminalOverviewError && (
+          <p className="mt-2 text-caption text-amber-700 dark:text-amber-300">
+            刑事状态读取失败，已保留案件列表。
+          </p>
+        )}
+      </OverviewCard>
+      <OverviewCard
+        title="民事总览"
+        icon={<CalendarDays className="size-4" />}
+        count={civilActive.length}
+        countLabel="在办民事"
+        onClick={onOpenCivilModule}
+      >
+        <p className="text-sm text-muted-foreground">
+          近期关键日期 {civilEvents.length} 个，原有案件列表、状态筛选和导入入口保持不变。
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          点击返回诉讼模块查看民事案件主流程。
+        </p>
+      </OverviewCard>
+      <OverviewCard
+        title="执行总览"
+        icon={<Gavel className="size-4" />}
+        count={executionRows.length}
+        countLabel="执行线索"
+        onClick={onOpenExecutionModule}
+      >
+        <p className="text-sm text-muted-foreground">
+          待执行余额 {formatYuan(executionRemaining)}，继续使用执行模块处理回款和执行动作。
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          首页仅做总览，不改变执行模块入口和计算流程。
+        </p>
+      </OverviewCard>
+    </section>
+  );
+}
+
+function OverviewCard({
+  title,
+  icon,
+  count,
+  countLabel,
+  onClick,
+  children,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  count: number;
+  countLabel: string;
+  onClick?: () => void;
+  children: React.ReactNode;
+}) {
+  const content = (
+    <>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+          <span className="inline-flex size-7 items-center justify-center rounded-md bg-muted text-muted-foreground">
+            {icon}
+          </span>
+          {title}
+        </div>
+        <div className="text-right">
+          <div className="text-2xl font-semibold tracking-tight">{count}</div>
+          <div className="text-caption text-muted-foreground">{countLabel}</div>
+        </div>
+      </div>
+      <div className="mt-4">{children}</div>
+    </>
+  );
+
+  if (!onClick) {
+    return (
+      <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-xl border border-border bg-card p-5 text-left shadow-sm transition-colors hover:border-foreground/30 hover:bg-foreground/[0.025]"
+    >
+      {content}
+    </button>
+  );
+}
+
+function activeRows(rows: CaseRow[]) {
+  return rows.filter(
+    (row) => row.status.id !== "closed" && row.status.id !== "mediated",
+  );
+}
+
+function summarizeCriminalStages(
+  rows: CaseRow[],
+  profiles: Record<string, CriminalCaseProfile | null>,
+) {
+  const counts = new Map<string, number>();
+  for (const row of activeRows(rows)) {
+    const stage = profiles[row.caseData.id]?.current_stage?.trim() || "阶段待补录";
+    counts.set(stage, (counts.get(stage) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([stage, count]) => `${stage} ${count}`)
+    .join(" · ");
+}
+
+function countCriminalDeadlineStats(
+  byCase: Record<string, CriminalDeadlineItem[]>,
+) {
+  const today = todayDate();
+  const weekEnd = new Date(today);
+  weekEnd.setDate(today.getDate() + 7);
+  let overdue = 0;
+  let todayCount = 0;
+  let in7Days = 0;
+  for (const item of Object.values(byCase).flat()) {
+    if (["done", "completed", "waived"].includes(item.status)) continue;
+    if (!item.effective_due_at) continue;
+    const due = parseDate(item.effective_due_at);
+    if (!due) continue;
+    if (due < today) overdue += 1;
+    if (toDateKey(due) === toDateKey(today)) todayCount += 1;
+    if (due >= today && due <= weekEnd) in7Days += 1;
+  }
+  return { overdue, today: todayCount, in7Days };
 }
 
 function IconToggle({

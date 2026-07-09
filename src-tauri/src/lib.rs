@@ -719,6 +719,138 @@ async fn summarize_income_records(
 }
 
 /* ============================================================
+ * 2026-07-03 · 案件工作台账(case_work_items) commands
+ * ============================================================ */
+
+#[tauri::command]
+async fn list_case_work_items(
+    pool: tauri::State<'_, SqlitePool>,
+    filter: db::case_work_items::CaseWorkItemFilter,
+) -> Result<Vec<db::case_work_items::CaseWorkItem>, String> {
+    db::case_work_items::list(pool.inner(), filter).await
+}
+
+#[tauri::command]
+async fn get_case_work_item(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<Option<db::case_work_items::CaseWorkItem>, String> {
+    db::case_work_items::get(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn upsert_case_work_item(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_work_items::UpsertCaseWorkItemInput,
+) -> Result<db::case_work_items::CaseWorkItem, String> {
+    db::case_work_items::upsert(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn delete_case_work_item(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, String> {
+    db::case_work_items::delete(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn get_criminal_case_profile(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Option<db::criminal_cases::CriminalCaseProfile>, String> {
+    db::criminal_cases::get_criminal_case_profile(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn upsert_criminal_case_profile(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_cases::UpsertCriminalCaseProfileInput,
+) -> Result<db::criminal_cases::CriminalCaseProfile, String> {
+    db::criminal_cases::upsert_criminal_case_profile(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn list_case_stage_items(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::criminal_cases::CaseStageItem>, String> {
+    db::criminal_cases::list_case_stage_items(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn upsert_case_stage_item(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_cases::UpsertCaseStageItemInput,
+) -> Result<db::criminal_cases::CaseStageItem, String> {
+    db::criminal_cases::upsert_case_stage_item(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn delete_case_stage_item(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, String> {
+    db::criminal_cases::delete_case_stage_item(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn list_criminal_deadline_items(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::criminal_cases::CriminalDeadlineItem>, String> {
+    db::criminal_cases::list_criminal_deadline_items(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn refresh_criminal_deadlines(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<db::criminal_cases::CriminalDeadlineRefreshReport, String> {
+    db::criminal_cases::refresh_criminal_deadlines(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn upsert_criminal_deadline_item(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_cases::UpsertCriminalDeadlineItemInput,
+) -> Result<db::criminal_cases::CriminalDeadlineItem, String> {
+    db::criminal_cases::upsert_criminal_deadline_item(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn delete_criminal_deadline_item(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, String> {
+    db::criminal_cases::delete_criminal_deadline_item(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn list_case_agency_contacts(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::criminal_cases::CaseAgencyContact>, String> {
+    db::criminal_cases::list_case_agency_contacts(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn upsert_case_agency_contact(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_cases::UpsertCaseAgencyContactInput,
+) -> Result<db::criminal_cases::CaseAgencyContact, String> {
+    db::criminal_cases::upsert_case_agency_contact(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn delete_case_agency_contact(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, String> {
+    db::criminal_cases::delete_case_agency_contact(pool.inner(), &id).await
+}
+
+/* ============================================================
  * 2026-06-13 · 案件待办清单 (case_todos) commands(胡彬律师反馈)
  * ============================================================ */
 
@@ -5381,6 +5513,22 @@ pub fn run() {
             upsert_income_record,
             delete_income_record,
             summarize_income_records,
+            list_case_work_items,
+            get_case_work_item,
+            upsert_case_work_item,
+            delete_case_work_item,
+            get_criminal_case_profile,
+            upsert_criminal_case_profile,
+            list_case_stage_items,
+            upsert_case_stage_item,
+            delete_case_stage_item,
+            list_criminal_deadline_items,
+            refresh_criminal_deadlines,
+            upsert_criminal_deadline_item,
+            delete_criminal_deadline_item,
+            list_case_agency_contacts,
+            upsert_case_agency_contact,
+            delete_case_agency_contact,
             add_todo,
             list_todos,
             list_open_todos,

@@ -12,6 +12,18 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Case,
   CaseInstance,
+  CaseAgencyContact,
+  CaseAgencyContactUpsertInput,
+  CaseStageItem,
+  CaseStageItemUpsertInput,
+  CaseWorkItem,
+  CaseWorkItemFilter,
+  CaseWorkItemUpsertInput,
+  CriminalCaseProfile,
+  CriminalCaseProfileUpsertInput,
+  CriminalDeadlineItem,
+  CriminalDeadlineRefreshReport,
+  CriminalDeadlineItemUpsertInput,
   IncomeRecord,
   IncomeRecordFilter,
   IncomeRecordUpsertInput,
@@ -645,6 +657,96 @@ export function summarizeIncomeRecords(
   filter: IncomeRecordFilter = {},
 ): Promise<IncomeSummary> {
   return invoke<IncomeSummary>("summarize_income_records", { filter });
+}
+
+export function listCaseWorkItems(
+  filter: CaseWorkItemFilter = {},
+): Promise<CaseWorkItem[]> {
+  return invoke<CaseWorkItem[]>("list_case_work_items", { filter });
+}
+
+export function getCaseWorkItem(id: string): Promise<CaseWorkItem | null> {
+  return invoke<CaseWorkItem | null>("get_case_work_item", { id });
+}
+
+export function upsertCaseWorkItem(
+  input: CaseWorkItemUpsertInput,
+): Promise<CaseWorkItem> {
+  return invoke<CaseWorkItem>("upsert_case_work_item", { input });
+}
+
+export function deleteCaseWorkItem(id: string): Promise<number> {
+  return invoke<number>("delete_case_work_item", { id });
+}
+
+export function getCriminalCaseProfile(
+  caseId: string,
+): Promise<CriminalCaseProfile | null> {
+  return invoke<CriminalCaseProfile | null>("get_criminal_case_profile", {
+    caseId,
+  });
+}
+
+export function upsertCriminalCaseProfile(
+  input: CriminalCaseProfileUpsertInput,
+): Promise<CriminalCaseProfile> {
+  return invoke<CriminalCaseProfile>("upsert_criminal_case_profile", { input });
+}
+
+export function listCaseStageItems(caseId: string): Promise<CaseStageItem[]> {
+  return invoke<CaseStageItem[]>("list_case_stage_items", { caseId });
+}
+
+export function upsertCaseStageItem(
+  input: CaseStageItemUpsertInput,
+): Promise<CaseStageItem> {
+  return invoke<CaseStageItem>("upsert_case_stage_item", { input });
+}
+
+export function deleteCaseStageItem(id: string): Promise<number> {
+  return invoke<number>("delete_case_stage_item", { id });
+}
+
+export function listCriminalDeadlineItems(
+  caseId: string,
+): Promise<CriminalDeadlineItem[]> {
+  return invoke<CriminalDeadlineItem[]>("list_criminal_deadline_items", {
+    caseId,
+  });
+}
+
+export function refreshCriminalDeadlines(
+  caseId: string,
+): Promise<CriminalDeadlineRefreshReport> {
+  return invoke<CriminalDeadlineRefreshReport>("refresh_criminal_deadlines", {
+    caseId,
+  });
+}
+
+export function upsertCriminalDeadlineItem(
+  input: CriminalDeadlineItemUpsertInput,
+): Promise<CriminalDeadlineItem> {
+  return invoke<CriminalDeadlineItem>("upsert_criminal_deadline_item", {
+    input,
+  });
+}
+
+export function deleteCriminalDeadlineItem(id: string): Promise<number> {
+  return invoke<number>("delete_criminal_deadline_item", { id });
+}
+
+export function listCaseAgencyContacts(caseId: string): Promise<CaseAgencyContact[]> {
+  return invoke<CaseAgencyContact[]>("list_case_agency_contacts", { caseId });
+}
+
+export function upsertCaseAgencyContact(
+  input: CaseAgencyContactUpsertInput,
+): Promise<CaseAgencyContact> {
+  return invoke<CaseAgencyContact>("upsert_case_agency_contact", { input });
+}
+
+export function deleteCaseAgencyContact(id: string): Promise<number> {
+  return invoke<number>("delete_case_agency_contact", { id });
 }
 
 /* ------------------------------------------------------------------ */

@@ -38,6 +38,7 @@ import { CaseChatPanel } from "./chat/CaseChatPanel";
 import { CaseSnapshotView } from "./snapshot/CaseSnapshotView";
 import { CaseSwitcher } from "./CaseSwitcher";
 import { CourtFilingSection } from "./CourtFilingSection";
+import { CriminalCasePanel } from "./criminal/CriminalCasePanel";
 import {
   type DocumentWritingPaneHandle,
   DocumentWritingPane,
@@ -500,6 +501,15 @@ export function CaseView({
               {loading && <LoadingState />}
               {error && !loading && <ErrorState message={error} />}
               {!loading && !error && documents.length === 0 && <NoDocsHint />}
+              {!loading &&
+                !error &&
+                documents.length === 0 &&
+                selectedCase &&
+                domain === "criminal" && (
+                  <div className="mt-5">
+                    <CriminalCasePanel caseId={selectedCase.id} />
+                  </div>
+                )}
               {!loading && !error && documents.length > 0 && selectedCase && (
                 <div className="space-y-5">
                   {/* 整套案件信息(框架永远显示,字段空就 "—",作者 2026-05-23 晚十四) */}
@@ -509,6 +519,10 @@ export function CaseView({
                     isEditMode={isEditMode}
                     domain={domain}
                   />
+
+                  {domain === "criminal" && (
+                    <CriminalCasePanel caseId={selectedCase.id} />
+                  )}
 
                   {/* 原文件(默认折叠) */}
                   <SourceFilesSection

@@ -258,6 +258,254 @@ export interface IncomeSummary {
   overridden_count: number;
 }
 
+export interface CaseWorkItem {
+  id: string;
+  case_id: string | null;
+  occurred_at: string;
+  work_type: string;
+  title: string;
+  content: string;
+  result: string | null;
+  next_action: string | null;
+  duration_minutes: number | null;
+  source: string;
+  external_source: string | null;
+  external_record_id: string | null;
+  external_updated_at: string | null;
+  raw_payload_json: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface CaseWorkItemFilter {
+  case_id?: string | null;
+  occurred_from?: string | null;
+  occurred_to?: string | null;
+  work_type?: string | null;
+  source?: string | null;
+  query?: string | null;
+}
+
+export interface CaseWorkItemUpsertInput {
+  id?: string | null;
+  case_id?: string | null;
+  occurred_at: string;
+  work_type?: string | null;
+  title: string;
+  content: string;
+  result?: string | null;
+  next_action?: string | null;
+  duration_minutes?: number | null;
+  source?: string | null;
+  external_source?: string | null;
+  external_record_id?: string | null;
+  external_updated_at?: string | null;
+  raw_payload_json?: string | null;
+}
+
+export interface CriminalCaseProfile {
+  case_id: string;
+  current_stage: string | null;
+  procedure_type: string | null;
+  case_subtype: string | null;
+  defense_role: string | null;
+  suspected_charge: string | null;
+  suspect_or_defendant_name: string | null;
+  victim_name: string | null;
+  client_name: string | null;
+  client_relationship: string | null;
+  detention_center: string | null;
+  coercive_measure_type: string | null;
+  detention_date: string | null;
+  arrest_request_date: string | null;
+  arrest_review_received_date: string | null;
+  arrest_decision_date: string | null;
+  arrest_date: string | null;
+  bail_start_date: string | null;
+  residential_surveillance_start_date: string | null;
+  transfer_for_prosecution_date: string | null;
+  prosecution_received_date: string | null;
+  first_instance_accepted_date: string | null;
+  second_instance_accepted_date: string | null;
+  judgment_received_date: string | null;
+  ruling_received_date: string | null;
+  notes: string | null;
+  user_overrides_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CriminalCaseProfileUpsertInput {
+  case_id: string;
+  current_stage?: string | null;
+  procedure_type?: string | null;
+  case_subtype?: string | null;
+  defense_role?: string | null;
+  suspected_charge?: string | null;
+  suspect_or_defendant_name?: string | null;
+  victim_name?: string | null;
+  client_name?: string | null;
+  client_relationship?: string | null;
+  detention_center?: string | null;
+  coercive_measure_type?: string | null;
+  detention_date?: string | null;
+  arrest_request_date?: string | null;
+  arrest_review_received_date?: string | null;
+  arrest_decision_date?: string | null;
+  arrest_date?: string | null;
+  bail_start_date?: string | null;
+  residential_surveillance_start_date?: string | null;
+  transfer_for_prosecution_date?: string | null;
+  prosecution_received_date?: string | null;
+  first_instance_accepted_date?: string | null;
+  second_instance_accepted_date?: string | null;
+  judgment_received_date?: string | null;
+  ruling_received_date?: string | null;
+  notes?: string | null;
+  user_overrides_json?: string | null;
+}
+
+export interface CaseStageItem {
+  id: string;
+  case_id: string;
+  domain: string;
+  major_stage: string | null;
+  stage_label: string;
+  status: string;
+  started_at: string | null;
+  due_at: string | null;
+  completed_at: string | null;
+  reminder_at: string | null;
+  source: string;
+  external_source: string | null;
+  external_record_id: string | null;
+  raw_payload_json: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface CaseStageItemUpsertInput {
+  id?: string | null;
+  case_id: string;
+  domain?: string | null;
+  major_stage?: string | null;
+  stage_label: string;
+  status?: string | null;
+  started_at?: string | null;
+  due_at?: string | null;
+  completed_at?: string | null;
+  reminder_at?: string | null;
+  source?: string | null;
+  external_source?: string | null;
+  external_record_id?: string | null;
+  raw_payload_json?: string | null;
+  notes?: string | null;
+}
+
+export interface CriminalDeadlineItem {
+  id: string;
+  case_id: string;
+  stage_item_id: string | null;
+  rule_code: string | null;
+  title: string;
+  major_stage: string | null;
+  minor_stage: string | null;
+  trigger_date: string | null;
+  trigger_time: string | null;
+  default_due_at: string | null;
+  manual_due_at: string | null;
+  effective_due_at: string | null;
+  reminder_at: string | null;
+  priority: string;
+  status: string;
+  source_type: string;
+  source_law: string | null;
+  source_article: string | null;
+  source_url: string | null;
+  calculation_note: string | null;
+  exception_type: string | null;
+  exception_note: string | null;
+  override_reason: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface CriminalDeadlineItemUpsertInput {
+  id?: string | null;
+  case_id: string;
+  stage_item_id?: string | null;
+  rule_code?: string | null;
+  title: string;
+  major_stage?: string | null;
+  minor_stage?: string | null;
+  trigger_date?: string | null;
+  trigger_time?: string | null;
+  default_due_at?: string | null;
+  manual_due_at?: string | null;
+  effective_due_at?: string | null;
+  reminder_at?: string | null;
+  priority?: string | null;
+  status?: string | null;
+  source_type?: string | null;
+  source_law?: string | null;
+  source_article?: string | null;
+  source_url?: string | null;
+  calculation_note?: string | null;
+  exception_type?: string | null;
+  exception_note?: string | null;
+  override_reason?: string | null;
+  completed_at?: string | null;
+}
+
+export interface CriminalDeadlineRefreshReport {
+  case_id: string;
+  generated_count: number;
+  updated_count: number;
+  preserved_count: number;
+  skipped_count: number;
+  items: CriminalDeadlineItem[];
+}
+
+export interface CaseAgencyContact {
+  id: string;
+  case_id: string;
+  stage_scope: string | null;
+  agency_type: string | null;
+  agency_name: string | null;
+  contact_role: string | null;
+  contact_name: string | null;
+  phone: string | null;
+  case_no: string | null;
+  query_code: string | null;
+  notes: string | null;
+  source: string;
+  external_record_id: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface CaseAgencyContactUpsertInput {
+  id?: string | null;
+  case_id: string;
+  stage_scope?: string | null;
+  agency_type?: string | null;
+  agency_name?: string | null;
+  contact_role?: string | null;
+  contact_name?: string | null;
+  phone?: string | null;
+  case_no?: string | null;
+  query_code?: string | null;
+  notes?: string | null;
+  source?: string | null;
+  external_record_id?: string | null;
+}
+
 /** 新建/更新审级的输入(add/updateCaseInstance 共用)。 */
 export interface NewCaseInstance {
   level: string;

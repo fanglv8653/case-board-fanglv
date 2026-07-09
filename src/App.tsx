@@ -1023,6 +1023,7 @@ function App() {
       <HomeDropZone onImportPath={handleDropImport}>
         <HomeView
           cases={civilCases}
+          allCases={cases}
           userDisplayName={userDisplayName}
           onPickCase={pickCase}
           onImport={handleImport}
@@ -1032,6 +1033,15 @@ function App() {
           networkStatus={networkStatus}
           configWarnings={homeStatusWarnings}
           onOpenSettings={() => openSettingsTab("brain")}
+          onOpenCriminalModule={() => {
+            void setActiveModuleSafe("criminal");
+          }}
+          onOpenCivilModule={() => {
+            void setActiveModuleSafe("litigation");
+          }}
+          onOpenExecutionModule={() => {
+            void setActiveModuleSafe("execution");
+          }}
         />
       </HomeDropZone>
     );
@@ -1078,6 +1088,7 @@ function App() {
       <HomeDropZone onImportPath={handleDropImport}>
         <HomeView
           cases={criminalCases}
+          allCases={cases}
           userDisplayName={userDisplayName}
           onPickCase={pickCase}
           onImport={handleImport}
@@ -1087,6 +1098,15 @@ function App() {
           networkStatus={networkStatus}
           configWarnings={homeStatusWarnings}
           onOpenSettings={() => openSettingsTab("brain")}
+          onOpenCriminalModule={() => {
+            void setActiveModuleSafe("criminal");
+          }}
+          onOpenCivilModule={() => {
+            void setActiveModuleSafe("litigation");
+          }}
+          onOpenExecutionModule={() => {
+            void setActiveModuleSafe("execution");
+          }}
         />
       </HomeDropZone>
     );

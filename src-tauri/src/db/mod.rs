@@ -20,6 +20,8 @@ use sqlx::SqlitePool;
 
 pub mod bookmarks;
 pub mod calendar_events;
+pub mod criminal_cases;
+pub mod case_work_items;
 pub mod case_instances;
 pub mod cases;
 pub mod chat;
