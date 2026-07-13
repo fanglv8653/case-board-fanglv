@@ -50,7 +50,7 @@ const MODULES: {
   group: ModuleGroup;
   title?: string;
 }[] = [
-  { id: "litigation", label: "诉讼", icon: Briefcase, group: "case" },
+  { id: "litigation", label: "民事", icon: Briefcase, group: "case" },
   // 2026-06-17 · 加「刑事」tab(诉讼之后):复刻诉讼看板框架,只显示刑事案件,
   // AI 助手只保留「刑事深度分析」单 chip(三阶层鉴定式,借鉴游初 gutachten-criminal-case)。
   // 2026-06-18 · 标 Beta(尚在打磨,结果需自行核对)。
@@ -98,6 +98,8 @@ export function ModuleTabs({
     if (el) {
       // 内缩 8px(对齐原 inset-x-2 视觉),让下划线比 tab 略窄更精致
       setUnderline({ left: el.offsetLeft + 8, width: el.offsetWidth - 16 });
+    } else {
+      setUnderline({ left: 0, width: 0 });
     }
   }, [active]);
 

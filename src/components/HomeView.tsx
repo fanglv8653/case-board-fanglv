@@ -84,10 +84,10 @@ export type HomeStatusWarning = {
 };
 
 export interface HomeViewProps {
+  mode: HomeViewMode;
   cases: Case[];
-  allCases?: Case[];
   userDisplayName: string | null;
-  onPickCase: (caseId: string) => void;
+  onPickCase: (caseId: string) => void | Promise<void>;
   onImport: () => void;
   /** 右键卡片「删除」→ 删除案件(只删数据库记录,不动原始文件夹)。由 App 弹确认 + 刷新列表。 */
   onDeleteCase: (caseId: string) => void;
@@ -103,10 +103,17 @@ export interface HomeViewProps {
   onOpenExecutionModule?: () => void;
 }
 
+export type HomeViewMode = "workspace" | "civil" | "criminal";
 type ViewMode = "grid" | "list";
 type SortKey = "status" | "amount" | "filed_at" | "hearing";
 type SortDir = "asc" | "desc";
 type EventKind = "hearing" | "deadline" | "todo" | "manual";
+
+type CaseListPreferences = {
+  viewMode: ViewMode;
+  sortKey: SortKey;
+  sortDir: SortDir;
+};
 
 interface CaseDisplayFields {
   caseNo: string | null;
@@ -141,10 +148,60 @@ export interface UpcomingEvent {
 }
 
 const PRESERVATION_RE = /保全|续封|查封|冻结/;
+const CASE_LIST_PREFERENCES_PREFIX = "caseboard:case-list-preferences:v1";
+const DEFAULT_CASE_LIST_PREFERENCES: CaseListPreferences = {
+  viewMode: "grid",
+  sortKey: "status",
+  sortDir: "asc",
+};
+const CASE_LIST_VIEW_MODES: ViewMode[] = ["grid", "list"];
+const CASE_LIST_SORT_KEYS: SortKey[] = ["status", "amount", "filed_at", "hearing"];
+const CASE_LIST_SORT_DIRS: SortDir[] = ["asc", "desc"];
+
+function caseListPreferencesKey(mode: HomeViewMode) {
+  return `${CASE_LIST_PREFERENCES_PREFIX}:${mode}`;
+}
+
+function readCaseListPreferences(mode: HomeViewMode): CaseListPreferences {
+  if (typeof window === "undefined") return DEFAULT_CASE_LIST_PREFERENCES;
+  try {
+    const raw = window.localStorage.getItem(caseListPreferencesKey(mode));
+    if (!raw) return DEFAULT_CASE_LIST_PREFERENCES;
+    const parsed = JSON.parse(raw) as Partial<CaseListPreferences>;
+    return {
+      viewMode: CASE_LIST_VIEW_MODES.includes(parsed.viewMode as ViewMode)
+        ? (parsed.viewMode as ViewMode)
+        : DEFAULT_CASE_LIST_PREFERENCES.viewMode,
+      sortKey: CASE_LIST_SORT_KEYS.includes(parsed.sortKey as SortKey)
+        ? (parsed.sortKey as SortKey)
+        : DEFAULT_CASE_LIST_PREFERENCES.sortKey,
+      sortDir: CASE_LIST_SORT_DIRS.includes(parsed.sortDir as SortDir)
+        ? (parsed.sortDir as SortDir)
+        : DEFAULT_CASE_LIST_PREFERENCES.sortDir,
+    };
+  } catch {
+    return DEFAULT_CASE_LIST_PREFERENCES;
+  }
+}
+
+function writeCaseListPreferences(
+  mode: HomeViewMode,
+  preferences: CaseListPreferences,
+) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      caseListPreferencesKey(mode),
+      JSON.stringify(preferences),
+    );
+  } catch {
+    // localStorage may be unavailable in restricted webviews; keep runtime usable.
+  }
+}
 
 export function HomeView({
+  mode,
   cases,
-  allCases,
   userDisplayName,
   onPickCase,
   onImport,
@@ -158,7 +215,7 @@ export function HomeView({
   onOpenCivilModule,
   onOpenExecutionModule,
 }: HomeViewProps) {
-  const overviewCases = allCases ?? cases;
+  const overviewCases = cases;
   const greeting = getGreeting(userDisplayName);
   const monthLabel = new Date()
     .toLocaleString("en-US", { month: "short", year: "numeric" })
@@ -167,9 +224,10 @@ export function HomeView({
   const [docsByCase, setDocsByCase] = useState<Record<string, Document[]>>({});
   const [statusOverride, setStatusOverride] = useState<Record<string, StatusId | null>>({});
   const [userOrder, setUserOrder] = useState<string[] | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("grid");
-  const [sortKey, setSortKey] = useState<SortKey>("status");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [listPreferences, setListPreferences] = useState<CaseListPreferences>(() =>
+    readCaseListPreferences(mode),
+  );
+  const { viewMode, sortKey, sortDir } = listPreferences;
   const [statusFilters, setStatusFilters] = useState<Set<StatusId>>(new Set());
   const [courtFilter, setCourtFilter] = useState("");
   // 2026-06-16 · 首页模糊搜索(原告/被告名,公司或人名都可子串匹配)
@@ -185,6 +243,16 @@ export function HomeView({
   // 2026-06-16 · 首页清爽开关(设置页「功能开关」tab,默认关,逐设备生效)
   const [filterBarOn] = useFeatureFlag("home_filter_bar");
   const [ticktickOn] = useFeatureFlag("home_ticktick");
+  useEffect(() => {
+    setListPreferences(readCaseListPreferences(mode));
+  }, [mode]);
+  const updateListPreferences = (patch: Partial<CaseListPreferences>) => {
+    setListPreferences((prev) => {
+      const next = { ...prev, ...patch };
+      writeCaseListPreferences(mode, next);
+      return next;
+    });
+  };
   const criminalOverviewCases = useMemo(
     () => overviewCases.filter((c) => isCriminalCase(c)),
     [overviewCases],
@@ -596,6 +664,7 @@ export function HomeView({
           </div>
 
           <WorkbenchOverviewStrip
+            mode={mode}
             criminalRows={criminalOverviewRows}
             civilRows={civilOverviewRows}
             executionRows={executionOverviewRows}
@@ -650,14 +719,14 @@ export function HomeView({
                   <IconToggle
                     active={viewMode === "grid"}
                     label="卡片视图"
-                    onClick={() => setViewMode("grid")}
+                    onClick={() => updateListPreferences({ viewMode: "grid" })}
                   >
                     <LayoutGrid className="size-3.5" />
                   </IconToggle>
                   <IconToggle
                     active={viewMode === "list"}
                     label="列表视图"
-                    onClick={() => setViewMode("list")}
+                    onClick={() => updateListPreferences({ viewMode: "list" })}
                   >
                     <List className="size-3.5" />
                   </IconToggle>
@@ -681,7 +750,9 @@ export function HomeView({
                   排序
                   <select
                     value={sortKey}
-                    onChange={(e) => setSortKey(e.target.value as SortKey)}
+                    onChange={(e) =>
+                      updateListPreferences({ sortKey: e.target.value as SortKey })
+                    }
                     className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
                   >
                     <option value="status">按状态</option>
@@ -693,7 +764,11 @@ export function HomeView({
                 {/* 与左右两个 select 同尺寸(px-2 py-1 text-xs),别用 Button size=sm(更高) */}
                 <button
                   type="button"
-                  onClick={() => setSortDir((d) => (d === "asc" ? "desc" : "asc"))}
+                  onClick={() =>
+                    updateListPreferences({
+                      sortDir: sortDir === "asc" ? "desc" : "asc",
+                    })
+                  }
                   className="flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground transition-colors hover:bg-accent"
                 >
                   <ArrowUpDown className="size-3.5" />
@@ -955,6 +1030,7 @@ function HomeStatusHints({
 }
 
 function WorkbenchOverviewStrip({
+  mode,
   criminalRows,
   civilRows,
   executionRows,
@@ -965,6 +1041,7 @@ function WorkbenchOverviewStrip({
   onOpenCivilModule,
   onOpenExecutionModule,
 }: {
+  mode: HomeViewMode;
   criminalRows: CaseRow[];
   civilRows: CaseRow[];
   executionRows: CaseRow[];
@@ -984,6 +1061,36 @@ function WorkbenchOverviewStrip({
     (sum, row) => sum + Number(row.caseData.execution_remaining ?? 0),
     0,
   );
+
+  if (mode === "civil") {
+    return null;
+  }
+
+  if (mode === "criminal") {
+    return (
+      <section className="mb-8 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <OverviewCard
+          title="刑事总览"
+          icon={<ShieldAlert className="size-4" />}
+          count={criminalActive.length}
+          countLabel="在办刑事"
+          onClick={onOpenCriminalModule}
+        >
+          <p className="text-sm text-muted-foreground">
+            {stageSummary || "阶段待补录；进入刑事详情可维护画像与节点。"}
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            期限：今日 {deadlineStats.today}，7 日内 {deadlineStats.in7Days}，逾期 {deadlineStats.overdue}
+          </p>
+          {criminalOverviewError && (
+            <p className="mt-2 text-caption text-amber-700 dark:text-amber-300">
+              刑事状态读取失败，已保留案件列表。
+            </p>
+          )}
+        </OverviewCard>
+      </section>
+    );
+  }
 
   return (
     <section className="mb-8 grid grid-cols-1 gap-4 lg:grid-cols-3">

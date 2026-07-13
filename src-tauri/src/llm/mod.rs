@@ -83,6 +83,17 @@ pub struct ExtractedFields {
     /// 财产保全记录
     #[serde(deserialize_with = "deserialize_null_default")]
     pub preservations: Vec<Preservation>,
+    /// 电子发票字段；仅材料明确为电子发票时填写，供收入草稿同步使用。
+    #[serde(default)]
+    pub invoice: Option<InvoiceExtract>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InvoiceExtract {
+    pub invoice_date: Option<String>, pub invoice_no: Option<String>, pub invoice_total: Option<f64>,
+    pub invoice_buyer: Option<String>, pub invoice_seller: Option<String>, pub invoice_type: Option<String>,
+    pub case_clue: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

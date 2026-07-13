@@ -930,7 +930,10 @@ pub async fn refresh_criminal_deadlines(
     let mut preserved_count = 0;
     let mut skipped_count = 0;
 
-    for rule in CRIMINAL_DEADLINE_RULES.iter().filter(|rule| rule.auto_apply) {
+    for rule in CRIMINAL_DEADLINE_RULES
+        .iter()
+        .filter(|rule| rule.auto_apply)
+    {
         let Some(trigger_value) = profile_trigger_value(&profile, rule.trigger_field) else {
             continue;
         };
@@ -1138,7 +1141,9 @@ fn compute_criminal_case_profile_input(
         arrest_decision_date: normalize_opt(input.arrest_decision_date),
         arrest_date: normalize_opt(input.arrest_date),
         bail_start_date: normalize_opt(input.bail_start_date),
-        residential_surveillance_start_date: normalize_opt(input.residential_surveillance_start_date),
+        residential_surveillance_start_date: normalize_opt(
+            input.residential_surveillance_start_date,
+        ),
         transfer_for_prosecution_date: normalize_opt(input.transfer_for_prosecution_date),
         prosecution_received_date: normalize_opt(input.prosecution_received_date),
         first_instance_accepted_date: normalize_opt(input.first_instance_accepted_date),
@@ -1256,7 +1261,10 @@ async fn get_latest_deadline_by_rule(
 fn should_preserve_deadline(item: &CriminalDeadlineItem) -> bool {
     item.deleted_at.is_some()
         || item.completed_at.is_some()
-        || item.manual_due_at.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || item
+            .manual_due_at
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty())
         || item
             .override_reason
             .as_deref()

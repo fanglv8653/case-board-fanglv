@@ -184,6 +184,7 @@ export type IncomeSourceType = "personal" | "collaboration";
 export type IncomeArchiveHoldbackStatus = "holding" | "returned" | "not_returned";
 
 export type IncomeInvoiceStatus = "all" | "invoiced" | "not_invoiced";
+export type IncomeRecordStatus = "draft" | "confirmed";
 
 export interface IncomeRecord {
   id: string;
@@ -205,6 +206,15 @@ export interface IncomeRecord {
   archive_returned_amount: number;
   invoice_date: string | null;
   invoice_no: string | null;
+  record_status: IncomeRecordStatus;
+  invoice_total: number | null;
+  invoice_buyer: string | null;
+  invoice_seller: string | null;
+  invoice_type: string | null;
+  auto_source_document_id: string | null;
+  auto_source_filename: string | null;
+  auto_fields_json: string;
+  manual_fields_json: string;
   recognized_month: string;
   actual_income_amount: number;
   actual_income_overridden: number;
@@ -243,6 +253,19 @@ export interface IncomeRecordUpsertInput {
   actual_income_overridden?: number | null;
   actual_income_override_note?: string | null;
   note?: string | null;
+  record_status?: IncomeRecordStatus | null;
+}
+
+export interface InvoiceDraftInput {
+  case_id?: string | null;
+  source_document_id: string;
+  source_filename: string;
+  invoice_date?: string | null;
+  invoice_no: string;
+  invoice_total?: number | null;
+  invoice_buyer?: string | null;
+  invoice_seller?: string | null;
+  invoice_type?: string | null;
 }
 
 export interface IncomeSummary {
@@ -273,6 +296,9 @@ export interface CaseWorkItem {
   external_record_id: string | null;
   external_updated_at: string | null;
   raw_payload_json: string | null;
+  confirmation_status: "pending" | "confirmed";
+  source_document_id: string | null;
+  source_filename: string | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -302,6 +328,9 @@ export interface CaseWorkItemUpsertInput {
   external_record_id?: string | null;
   external_updated_at?: string | null;
   raw_payload_json?: string | null;
+  confirmation_status?: "pending" | "confirmed" | null;
+  source_document_id?: string | null;
+  source_filename?: string | null;
 }
 
 export interface CriminalCaseProfile {
@@ -579,6 +608,12 @@ export interface Document {
   display_name: string | null;
   /** 显示名来源:'user'(人工右键改名,永不被 AI 覆盖)/ 'ai_suggest'(AI 自动整理建议)。 */
   display_name_source: string | null;
+}
+
+export interface CachedExtractionRetryReport {
+  used_cached_text: boolean;
+  status: "done" | "partial" | "failed" | "pending";
+  error: string | null;
 }
 
 /** 对应 Rust 端 `ImportResult`,import_case_folder 命令的返回 */

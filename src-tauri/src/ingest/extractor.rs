@@ -128,6 +128,8 @@ pub enum ExtractResult {
     Extracted {
         fields: ExtractedFields,
         text_md: String,
+        /// Some long-document LLM chunks failed, but at least one yielded usable fields.
+        partial_error: Option<String>,
         metrics: Vec<MetricEntry>,
     },
     /// 已知不支持的格式,跳过(.pdf / 图片等),不报错
@@ -519,59 +521,52 @@ pub async fn extract_one(
         };
     }
 
-    // 3. 文本太长 → 截断(给 LLM 的)
+    // 3. 每片都在模型安全预算内独立抽取。不得截掉后半份材料：成功片
+    // 合并，失败片作为可见 partial 详情；全片失败才是 failed。
     const MAX_CHARS: usize = 10000;
-    let text_for_llm: String = if text.chars().count() > MAX_CHARS {
-        text.chars().take(MAX_CHARS).collect::<String>()
-    } else {
-        text.clone()
-    };
-
-    // 4. LLM 抽取
+    let chunks = crate::ingest::reliability::chunk_text(&text, MAX_CHARS);
     let llm_backend = llm_backend_label(llm_config);
-    let t_llm = Instant::now();
-    match llm::extract_case_fields_with_hint(llm_config, &text_for_llm, Some(filename), category)
-        .await
-    {
-        Ok(fields) => {
+    let total_chunks = chunks.len();
+    let mut successful = Vec::new();
+    let mut failures = Vec::new();
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let t_llm = Instant::now();
+        match llm::extract_case_fields_with_hint(llm_config, &chunk, Some(filename), category).await {
+            Ok(fields) => {
+                successful.push(fields);
+                metrics.push(MetricEntry {
+                    filename: filename.into(), ext: ext.clone(), file_size_bytes,
+                    stage: "llm_extract".into(), backend: llm_backend.clone(), outcome: "ok".into(),
+                    elapsed_ms: t_llm.elapsed().as_millis() as i64, text_chars: Some(chunk.chars().count() as i64), error_short: None,
+                });
+            }
+            Err(e) => {
+                let short = crate::feedback::sanitize_paths(&e.to_string()).chars().take(160).collect::<String>();
+                failures.push(format!("第{}片: {}", index + 1, short));
+                metrics.push(MetricEntry {
+                    filename: filename.into(), ext: ext.clone(), file_size_bytes,
+                    stage: "llm_extract".into(), backend: llm_backend.clone(), outcome: "failed".into(),
+                    elapsed_ms: t_llm.elapsed().as_millis() as i64, text_chars: Some(chunk.chars().count() as i64), error_short: Some(short),
+                });
+            }
+        }
+    }
+    if successful.is_empty() {
+        ExtractResult::Failed { error: format!("LLM 抽取全部失败（0/{} 片）: {}", total_chunks, failures.join("；")), metrics }
+    } else {
+        let fields = crate::ingest::reliability::merge_extracted_fields(successful);
+        let partial_error = (!failures.is_empty()).then(|| format!("LLM 分片部分失败（{}/{} 片失败）: {}", failures.len(), total_chunks, failures.join("；")));
+        if partial_error.is_some() {
             metrics.push(MetricEntry {
                 filename: filename.into(),
                 ext,
                 file_size_bytes,
                 stage: "llm_extract".into(),
                 backend: llm_backend.clone(),
-                outcome: "ok".into(),
-                elapsed_ms: t_llm.elapsed().as_millis() as i64,
-                text_chars: Some(text_for_llm.chars().count() as i64),
-                error_short: None,
+                outcome: "partial".into(), elapsed_ms: 0, text_chars: None, error_short: partial_error.clone(),
             });
-            ExtractResult::Extracted {
-                fields,
-                text_md: text, // pipeline 用这个写盘到 extracts/<case_id>/<doc_id>.md
-                metrics,
-            }
         }
-        Err(e) => {
-            let short = crate::feedback::sanitize_paths(&format!("{}", e))
-                .chars()
-                .take(200)
-                .collect::<String>();
-            metrics.push(MetricEntry {
-                filename: filename.into(),
-                ext,
-                file_size_bytes,
-                stage: "llm_extract".into(),
-                backend: llm_backend.clone(),
-                outcome: "failed".into(),
-                elapsed_ms: t_llm.elapsed().as_millis() as i64,
-                text_chars: None,
-                error_short: Some(short),
-            });
-            ExtractResult::Failed {
-                error: format!("LLM 抽取失败: {}", e),
-                metrics,
-            }
-        }
+        ExtractResult::Extracted { fields, text_md: text, partial_error, metrics }
     }
 }
 
@@ -600,5 +595,32 @@ async fn ocr_fallback(path: PathBuf, ctx: OcrContext) -> Result<(String, &'stati
             Err(format!("{}(尝试后端:{})", error, attempted.join(", ")))
         }
         ocr::OcrResult::Skipped { reason } => Err(format!("OCR 跳过:{}", reason)),
+    }
+}
+
+/// Retry only the LLM phase from an already persisted extraction. This intentionally has no
+/// path or OCR context, so callers cannot accidentally spend OCR quota while retrying.
+pub async fn extract_cached_text(
+    llm_config: &llm::LlmConfig,
+    text: String,
+    filename: &str,
+    category: Option<&str>,
+) -> ExtractResult {
+    const MAX_CHARS: usize = 10000;
+    let chunks = crate::ingest::reliability::chunk_text(&text, MAX_CHARS);
+    let total_chunks = chunks.len();
+    let mut successful = Vec::new();
+    let mut failures = Vec::new();
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        match llm::extract_case_fields_with_hint(llm_config, &chunk, Some(filename), category).await {
+            Ok(fields) => successful.push(fields),
+            Err(e) => failures.push(format!("第{}片: {}", index + 1, e)),
+        }
+    }
+    if successful.is_empty() {
+        ExtractResult::Failed { error: format!("缓存文本 LLM 抽取全部失败（0/{} 片）: {}", total_chunks, failures.join("；")), metrics: Vec::new() }
+    } else {
+        let partial_error = (!failures.is_empty()).then(|| format!("缓存文本 LLM 分片部分失败（{}/{} 片失败）: {}", failures.len(), total_chunks, failures.join("；")));
+        ExtractResult::Extracted { fields: crate::ingest::reliability::merge_extracted_fields(successful), text_md: text, partial_error, metrics: Vec::new() }
     }
 }

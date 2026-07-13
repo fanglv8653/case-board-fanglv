@@ -17,6 +17,13 @@ pub fn case_fields_extraction_with_hint(
     filename: Option<&str>,
     category: Option<&str>,
 ) -> String {
+    let domain = crate::ingest::reliability::classify_domain(category, text);
+    if matches!(domain, crate::ingest::reliability::Domain::Criminal) {
+        return format!(r#"你是刑事案件材料信息抽取助手。只输出 JSON，绝不把刑事材料按民事起诉状解释。
+抽取犯罪嫌疑人/被告人、被害人、委托关系、涉嫌罪名、办案机关、强制措施、羁押地点、当前阶段和关键日期；不确定填 null/[]，不得编造。
+兼容字段中 case_type 必须为\"刑事\"，court 填办案机关，cause 填涉嫌罪名，case_stage 填刑事阶段，key_dates 仅刑事程序日期。plaintiffs、defendants、third_parties、claim_amount、preservations 必须分别为 []、[]、[]、null、[]。
+文件名：{}\n文档类型：{}\n正文：\n---\n{}\n---\n只返回 JSON。"#, filename.unwrap_or(""), category.unwrap_or(""), text.trim());
+    }
     // 根据 category 给出有针对性的提示
     let hint = match category {
         Some("起诉状") | Some("民事起诉状") => {
@@ -158,6 +165,8 @@ JSON Schema(以下所有字段都返回,抽不到就 null 或 []):
 - preservations: 财产保全记录,格式
   [{{ "target": "保全标的描述", "amount": 数字, "started_at": "YYYY-MM-DD或null",
        "duration_years": 2或3, "expires_at": "YYYY-MM-DD或null" }}]
+- invoice: 仅电子发票材料填写；否则必须为 null。格式
+  {{"invoice_date":"YYYY-MM-DD或null","invoice_no":"发票号码或null","invoice_total":价税合计数字或null,"invoice_buyer":"购买方或null","invoice_seller":"销售方或null","invoice_type":"发票类型或null","case_clue":"案件名称/案号线索或null"}}
 
 ========================================
 重要规则:

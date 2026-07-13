@@ -12,7 +12,7 @@ import { FeedbackButton } from "@/components/FeedbackButton";
 import { ModuleTabs } from "@/components/ModuleTabs";
 // 私人专属功能接缝(双轨发布模型):开源仓返回 [] → 无「独立」顶层 tab。
 import { getPrivateTopTabs } from "@/private";
-import { HomeView, type HomeStatusWarning } from "@/components/HomeView";
+import { HomeView, type HomeStatusWarning, type HomeViewMode } from "@/components/HomeView";
 import { HomeDropZone } from "@/components/HomeDropZone";
 import { isCriminalCase, splitCasesByDomain } from "@/lib/caseDomain";
 import { RunningTaskOverlay } from "@/components/RunningTaskOverlay";
@@ -185,7 +185,8 @@ function App() {
    * 各模块完全独立 — 切到非诉/工具不影响诉讼的 cases/selectedId 等 state。
    */
   // string 而非 ModuleId:私人专属顶层 tab(「独立」)的 id 由接缝动态提供,开源仓为空。
-  const [activeModule, setActiveModule] = useState<string>("litigation");
+  const [activeModule, setActiveModule] = useState<string>("workspace");
+  const [previousHomeMode, setPreviousHomeMode] = useState<HomeViewMode>("workspace");
   /**
    * F2(2026-06-18):刚导入案件的 id —— 用来「识别为刑事案件后自动切到刑事 tab」。
    * 刑事案件被 civilCases 过滤掉,导入后若不切 tab 会在诉讼 tab「看不见」;但导入瞬间
@@ -969,17 +970,35 @@ function App() {
   // ========================================================================
 
   // 诉讼/刑事模块内部子路由:首页 (HomeView) ↔ 案件详情 (CaseView)
-  const pickCase = (caseId: string) => {
+  const { civil: civilCases, criminal: criminalCases } =
+    splitCasesByDomain(cases);
+
+  const openCaseFromHome = async (caseId: string, from: HomeViewMode) => {
+    const targetCase = cases.find((c) => c.id === caseId);
+    const targetModule =
+      targetCase && isCriminalCase(targetCase) ? "criminal" : "litigation";
+    const switched = await setActiveModuleSafe(targetModule);
+    if (!switched) return;
+    setPreviousHomeMode(from);
     setSelectedId(caseId);
     setView("detail");
   };
-  const goModuleHome = () => {
+  const goModuleHome = async () => {
+    const targetModule =
+      previousHomeMode === "workspace"
+        ? "workspace"
+        : previousHomeMode === "criminal"
+          ? "criminal"
+          : "litigation";
+    const switched = await setActiveModuleSafe(targetModule);
+    if (!switched) return;
     setView("home");
     setSelectedId(null);
   };
   const goWorkspaceHome = async () => {
-    const switched = await setActiveModuleSafe("litigation");
+    const switched = await setActiveModuleSafe("workspace");
     if (!switched) return;
+    setPreviousHomeMode("workspace");
     setView("home");
     setSelectedId(null);
   };
@@ -987,9 +1006,6 @@ function App() {
   // 诉讼 / 刑事 共享导入·PDF分类·OCR·全局抽取·case+document 数据层,只按「领域」过滤显示
   //(归类启发式见 src/lib/caseDomain.ts:刑事案件进刑事 tab,其余进诉讼 tab)。
   // selectedId/view 也共享,故详情分支额外校验 selectedId 属于本领域,避免切 tab 串案件。
-  const { civil: civilCases, criminal: criminalCases } =
-    splitCasesByDomain(cases);
-
   // 一个案件详情视图的公共 props(诉讼/刑事复用,只换 cases 子集与 domain)。
   const caseViewCommonProps = {
     selectedCase,
@@ -1014,6 +1030,35 @@ function App() {
     onArtifactCreated: handleArtifactCreated,
   };
 
+  const workspaceBody = (
+    <HomeDropZone onImportPath={handleDropImport}>
+      <HomeView
+        mode="workspace"
+        cases={cases}
+        userDisplayName={userDisplayName}
+        onPickCase={(caseId) => {
+          void openCaseFromHome(caseId, "workspace");
+        }}
+        onImport={handleImport}
+        onDeleteCase={handleDeleteCaseById}
+        onDeleteCases={handleDeleteCases}
+        onImportFolder={handleCalendarImport}
+        networkStatus={networkStatus}
+        configWarnings={homeStatusWarnings}
+        onOpenSettings={() => openSettingsTab("brain")}
+        onOpenCriminalModule={() => {
+          void setActiveModuleSafe("criminal");
+        }}
+        onOpenCivilModule={() => {
+          void setActiveModuleSafe("litigation");
+        }}
+        onOpenExecutionModule={() => {
+          void setActiveModuleSafe("execution");
+        }}
+      />
+    </HomeDropZone>
+  );
+
   // 诉讼模块整体渲染:选中民事案件→CaseView / 否则→HomeView。
   // 零案件也统一落到 HomeView 空库态,避免「工作台」和旧 EmptyState 两套首屏表达分裂。
   const litigationBody =
@@ -1022,10 +1067,12 @@ function App() {
     ) : (
       <HomeDropZone onImportPath={handleDropImport}>
         <HomeView
+          mode="civil"
           cases={civilCases}
-          allCases={cases}
           userDisplayName={userDisplayName}
-          onPickCase={pickCase}
+          onPickCase={(caseId) => {
+            void openCaseFromHome(caseId, "civil");
+          }}
           onImport={handleImport}
           onDeleteCase={handleDeleteCaseById}
           onDeleteCases={handleDeleteCases}
@@ -1087,10 +1134,12 @@ function App() {
     ) : (
       <HomeDropZone onImportPath={handleDropImport}>
         <HomeView
+          mode="criminal"
           cases={criminalCases}
-          allCases={cases}
           userDisplayName={userDisplayName}
-          onPickCase={pickCase}
+          onPickCase={(caseId) => {
+            void openCaseFromHome(caseId, "criminal");
+          }}
           onImport={handleImport}
           onDeleteCase={handleDeleteCaseById}
           onDeleteCases={handleDeleteCases}
@@ -1128,6 +1177,7 @@ function App() {
 
       {/* 模块内容区(flex-1 + min-h-0 让子模块能正常滚动) */}
       <div className="min-h-0 flex-1">
+        {activeModule === "workspace" && workspaceBody}
         {activeModule === "litigation" && litigationBody}
         {activeModule === "criminal" && criminalBody}
         {activeModule === "execution" && (

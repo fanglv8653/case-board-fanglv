@@ -44,6 +44,7 @@ type FilterState = {
 
 type FormState = {
   id: string | null;
+  recordStatus?: "draft" | "confirmed";
   caseId: string;
   manualCaseName: string;
   lawyerFeeTotal: string;
@@ -457,6 +458,9 @@ function IncomeTable({
                 <td className="px-3 py-2 font-mono text-muted-foreground">{r.recognized_month}</td>
                 <td className="max-w-[220px] px-3 py-2">
                   <p className="line-clamp-2 font-medium text-foreground">{displayCaseName(r)}</p>
+                  {r.record_status === "draft" && (
+                    <p className="mt-0.5 text-caption font-medium text-amber-700">待确认（不计入统计）</p>
+                  )}
                   {!r.case_id && (
                     <p className="mt-0.5 text-caption text-muted-foreground">手工记录</p>
                   )}
@@ -804,7 +808,7 @@ function IncomeFormDrawer({
               disabled={saving}
               className="rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
             >
-              {saving ? "保存中..." : "保存"}
+              {saving ? "保存中..." : form.recordStatus === "draft" ? "确认并纳入统计" : "保存"}
             </button>
           </div>
         </div>
@@ -906,6 +910,7 @@ function makeBlankForm(seedCase: Case | null): FormState {
 function formFromRecord(record: IncomeRecord): FormState {
   return {
     id: record.id,
+    recordStatus: record.record_status,
     caseId: record.case_id ?? "",
     manualCaseName: record.manual_case_name ?? record.case_name ?? "",
     lawyerFeeTotal: String(record.lawyer_fee_total),
@@ -954,6 +959,7 @@ function toUpsertInput(form: FormState): IncomeRecordUpsertInput | null {
   }
   return {
     id: form.id,
+    record_status: form.recordStatus === "draft" ? "confirmed" : undefined,
     case_id: form.caseId || null,
     manual_case_name: form.manualCaseName.trim() || null,
     lawyer_fee_total: lawyerFeeTotal,

@@ -11,6 +11,7 @@
 //!
 //! 测试模式可以传 `sqlite::memory:` 跑内存库,不污染本机文件系统。
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,9 +21,8 @@ use sqlx::SqlitePool;
 
 pub mod bookmarks;
 pub mod calendar_events;
-pub mod criminal_cases;
-pub mod case_work_items;
 pub mod case_instances;
+pub mod case_work_items;
 pub mod cases;
 pub mod chat;
 pub mod chat_tasks;
@@ -30,6 +30,7 @@ pub mod contract_drafts;
 pub mod contract_preferences;
 pub mod court_filing;
 pub mod credits;
+pub mod criminal_cases;
 pub mod document_tags;
 pub mod documents;
 pub mod income_records;
@@ -45,15 +46,26 @@ const APP_ORG: &str = "";
 const APP_NAME: &str = "FanglvCaseBoard";
 const LEGACY_APP_NAME: &str = "CaseBoard";
 
+/// 显式指定应用数据根目录，用于自动化验证、便携或隔离运行。
+///
+/// 该值必须是绝对目录；设置后不会读取或迁移默认/旧版数据目录。
+pub const CASEBOARD_DATA_DIR_ENV: &str = "CASEBOARD_DATA_DIR";
+
 /// 拿到当前操作系统下方律案件看板的数据目录路径。
 ///
 /// macOS: `~/Library/Application Support/FanglvCaseBoard/`
 /// Linux: `~/.local/share/FanglvCaseBoard/`
 /// Windows: `%APPDATA%\FanglvCaseBoard\data\`
 pub fn app_data_dir() -> Result<PathBuf, DbError> {
+    let override_value = std::env::var_os(CASEBOARD_DATA_DIR_ENV);
+    if override_value.is_some() {
+        // 覆盖模式不得触碰 ProjectDirs 或旧版数据目录，避免自动化运行访问正式库。
+        return app_data_dir_from_paths(override_value, None, None);
+    }
+
     let current = project_data_dir(APP_NAME)?;
-    migrate_legacy_data_dir_if_needed(&current)?;
-    Ok(current)
+    let legacy = project_data_dir(LEGACY_APP_NAME)?;
+    app_data_dir_from_paths(None, Some(current), Some(legacy))
 }
 
 /// 默认数据库文件路径(`<app_data_dir>/caseboard.db`)。
@@ -67,13 +79,51 @@ fn project_data_dir(app_name: &str) -> Result<PathBuf, DbError> {
     Ok(proj.data_dir().to_path_buf())
 }
 
-fn migrate_legacy_data_dir_if_needed(current: &Path) -> Result<(), DbError> {
+fn app_data_dir_from_paths(
+    override_value: Option<OsString>,
+    current: Option<PathBuf>,
+    legacy: Option<PathBuf>,
+) -> Result<PathBuf, DbError> {
+    if let Some(override_dir) = data_dir_override_from_value(override_value)? {
+        return Ok(override_dir);
+    }
+
+    let current = current.ok_or(DbError::HomeDirNotFound)?;
+    let legacy = legacy.ok_or(DbError::HomeDirNotFound)?;
+    migrate_legacy_data_dir_if_needed(&current, &legacy)?;
+    Ok(current)
+}
+
+fn data_dir_override_from_value(value: Option<OsString>) -> Result<Option<PathBuf>, DbError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(DbError::DataDirOverrideInvalid("不能为空".to_string()));
+    }
+
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(DbError::DataDirOverrideInvalid(format!(
+            "必须是绝对路径: {}",
+            path.display()
+        )));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(DbError::DataDirOverrideInvalid(format!(
+            "必须指向目录: {}",
+            path.display()
+        )));
+    }
+    Ok(Some(path))
+}
+
+fn migrate_legacy_data_dir_if_needed(current: &Path, legacy: &Path) -> Result<(), DbError> {
     let current_db = current.join("caseboard.db");
     if current_db.exists() {
         return Ok(());
     }
 
-    let legacy = project_data_dir(LEGACY_APP_NAME)?;
     let legacy_db = legacy.join("caseboard.db");
     if !legacy_db.exists() || legacy == current {
         return Ok(());
@@ -212,6 +262,8 @@ async fn reconcile_migration_checksums(pool: &SqlitePool) -> Result<(), DbError>
 pub enum DbError {
     #[error("找不到用户主目录")]
     HomeDirNotFound,
+    #[error("CASEBOARD_DATA_DIR 无效: {0}")]
+    DataDirOverrideInvalid(String),
     #[error("IO 错误: {0}")]
     Io(String),
     #[error("数据库连接失败: {0}")]
@@ -229,3 +281,85 @@ impl serde::Serialize for DbError {
 // ============================================================================
 // 测试
 // ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temp_path(label: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "caseboard-db-test-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn no_override_keeps_default_path_and_legacy_migration_behavior() {
+        let root = temp_path("default");
+        let current = root.join("current");
+        let legacy = root.join("legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("caseboard.db"), b"legacy-db").unwrap();
+
+        let actual = app_data_dir_from_paths(None, Some(current.clone()), Some(legacy)).unwrap();
+
+        assert_eq!(actual, current);
+        assert_eq!(
+            fs::read(current.join("caseboard.db")).unwrap(),
+            b"legacy-db"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absolute_override_is_used_without_mutating_process_environment() {
+        let root = temp_path("override");
+        let override_dir = root.join("isolated");
+        let actual =
+            app_data_dir_from_paths(Some(override_dir.clone().into_os_string()), None, None)
+                .unwrap();
+
+        assert_eq!(actual, override_dir);
+        assert!(!actual.exists());
+    }
+
+    #[test]
+    fn empty_relative_or_file_override_is_rejected() {
+        let empty = data_dir_override_from_value(Some(OsString::new())).unwrap_err();
+        assert!(matches!(empty, DbError::DataDirOverrideInvalid(_)));
+
+        let relative = data_dir_override_from_value(Some(OsString::from("isolated"))).unwrap_err();
+        assert!(matches!(relative, DbError::DataDirOverrideInvalid(_)));
+
+        let file_path = temp_path("file");
+        fs::write(&file_path, b"not-a-directory").unwrap();
+        let file =
+            data_dir_override_from_value(Some(file_path.clone().into_os_string())).unwrap_err();
+        assert!(matches!(file, DbError::DataDirOverrideInvalid(_)));
+        fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn override_does_not_trigger_legacy_data_migration() {
+        let root = temp_path("no-legacy-copy");
+        let override_dir = root.join("isolated");
+        let default_dir = root.join("default");
+        let legacy_dir = root.join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(legacy_dir.join("caseboard.db"), b"legacy-db").unwrap();
+
+        let actual = app_data_dir_from_paths(
+            Some(override_dir.clone().into_os_string()),
+            Some(default_dir),
+            Some(legacy_dir),
+        )
+        .unwrap();
+
+        assert_eq!(actual, override_dir);
+        assert!(!actual.join("caseboard.db").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}

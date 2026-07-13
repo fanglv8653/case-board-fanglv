@@ -6,6 +6,7 @@ import { toast } from "@/components/ui/toast";
 import { confirmDialog } from "@/lib/dialog";
 import {
   deleteCaseAgencyContact,
+  deleteCaseWorkItem,
   deleteCaseStageItem,
   deleteCriminalDeadlineItem,
   getCriminalCaseProfile,
@@ -14,6 +15,7 @@ import {
   listCaseWorkItems,
   listCriminalDeadlineItems,
   upsertCaseAgencyContact,
+  upsertCaseWorkItem,
   upsertCaseStageItem,
   upsertCriminalCaseProfile,
   upsertCriminalDeadlineItem,
@@ -24,6 +26,7 @@ import type {
   CaseStageItem,
   CaseStageItemUpsertInput,
   CaseWorkItem,
+  CaseWorkItemUpsertInput,
   CriminalCaseProfile,
   CriminalCaseProfileUpsertInput,
   CriminalDeadlineItem,
@@ -35,6 +38,10 @@ type ProfileForm = CriminalCaseProfileUpsertInput;
 type StageForm = CaseStageItemUpsertInput;
 type DeadlineForm = CriminalDeadlineItemUpsertInput;
 type ContactForm = CaseAgencyContactUpsertInput;
+type WorkForm = CaseWorkItemUpsertInput & {
+  hours: string;
+  minutes: string;
+};
 
 const EMPTY_PROFILE: Omit<ProfileForm, "case_id"> = {
   current_stage: "",
@@ -101,6 +108,7 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
   const [stageForm, setStageForm] = useState<StageForm | null>(null);
   const [deadlineForm, setDeadlineForm] = useState<DeadlineForm | null>(null);
   const [contactForm, setContactForm] = useState<ContactForm | null>(null);
+  const [workForm, setWorkForm] = useState<WorkForm | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -118,7 +126,7 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
       setStages(stageRows);
       setDeadlines(deadlineRows);
       setContacts(contactRows);
-      setWorkItems(workRows.slice(0, 5));
+      setWorkItems(workRows);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -195,6 +203,94 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
     } finally {
       setSavingList(false);
     }
+  };
+
+  const saveWork = async () => {
+    if (!workForm?.occurred_at.trim() || !workForm.work_type?.trim() || !workForm.content.trim()) {
+      toast("请填写时间、阶段和工作内容", "error");
+      return;
+    }
+    const hours = Number(workForm.hours || 0);
+    const minutes = Number(workForm.minutes || 0);
+    if (
+      !Number.isInteger(hours) ||
+      !Number.isInteger(minutes) ||
+      hours < 0 ||
+      minutes < 0 ||
+      minutes > 59
+    ) {
+      toast("工时须为非负小时和 0-59 分钟", "error");
+      return;
+    }
+    setSavingList(true);
+    try {
+      const { hours: _hours, minutes: _minutes, ...input } = workForm;
+      await upsertCaseWorkItem({
+        ...input,
+        case_id: caseId,
+        title: `${input.work_type} ${input.occurred_at.slice(0, 10)}`,
+        duration_minutes: hours * 60 + minutes,
+      });
+      setWorkForm(null);
+      toast("工作记录已保存", "success");
+      await reload();
+    } catch (e) {
+      toast(`工作记录保存失败:${e}`, "error");
+    } finally {
+      setSavingList(false);
+    }
+  };
+
+  const confirmWork = async (item: CaseWorkItem) => {
+    setSavingList(true);
+    try {
+      await upsertCaseWorkItem({
+        ...item,
+        confirmation_status: "confirmed",
+      });
+      toast("工作记录已确认并计入工时", "success");
+      await reload();
+    } catch (e) {
+      toast(`确认失败:${e}`, "error");
+    } finally {
+      setSavingList(false);
+    }
+  };
+
+  const removeWork = async (item: CaseWorkItem) => {
+    if (!(await confirmDialog(`删除工作记录「${item.title}」？`, { danger: true }))) {
+      return;
+    }
+    try {
+      await deleteCaseWorkItem(item.id);
+      toast("工作记录已删除", "success");
+      await reload();
+    } catch (e) {
+      toast(`删除失败:${e}`, "error");
+    }
+  };
+
+  const openWorkForm = (item?: CaseWorkItem) => {
+    const duration = item?.duration_minutes ?? 0;
+    setWorkForm(
+      item
+        ? {
+            ...item,
+            hours: String(Math.floor(duration / 60)),
+            minutes: String(duration % 60),
+          }
+        : {
+            occurred_at: new Date().toISOString().slice(0, 16),
+            work_type: "",
+            title: "",
+            content: "",
+            duration_minutes: 0,
+            source: "manual",
+            confirmation_status: "confirmed",
+            hours: "0",
+            minutes: "0",
+          },
+    );
   };
 
   const removeStage = async (item: CaseStageItem) => {
@@ -305,12 +401,6 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
               onChange={(v) =>
                 setProfileForm({ ...profileForm, suspect_or_defendant_name: v })
               }
-            />
-          </Field>
-          <Field label="委托人">
-            <TextInput
-              value={profileForm.client_name}
-              onChange={(v) => setProfileForm({ ...profileForm, client_name: v })}
             />
           </Field>
           <Field label="委托关系">
@@ -588,13 +678,84 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
       </Panel>
 
       <Panel title="工作记录">
-        <ListState emptyText="暂未关联工作记录。完整新增、编辑和同步由 WORK-N2 处理。">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
+          <span>{formatConfirmedDuration(workItems)}</span>
+          <Button type="button" size="sm" onClick={() => openWorkForm()}>
+            <Plus className="size-3.5" />
+            新增工作记录
+          </Button>
+        </div>
+        {workForm && (
+          <div className="mb-3 grid gap-3 rounded-lg border border-border bg-background p-3 md:grid-cols-2">
+            <Field label="时间">
+              <input
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                type="datetime-local"
+                value={workForm.occurred_at.slice(0, 16)}
+                onChange={(event) =>
+                  setWorkForm({ ...workForm, occurred_at: event.target.value })
+                }
+              />
+            </Field>
+            <Field label="阶段">
+              <TextInput
+                value={workForm.work_type}
+                onChange={(value) => setWorkForm({ ...workForm, work_type: value })}
+                placeholder="例如：侦查阶段"
+              />
+            </Field>
+            <Field label="工作内容" className="md:col-span-2">
+              <textarea
+                className="min-h-20 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                value={workForm.content}
+                onChange={(event) =>
+                  setWorkForm({ ...workForm, content: event.target.value })
+                }
+              />
+            </Field>
+            <Field label="工作时间">
+              <div className="flex items-center gap-2">
+                <input
+                  className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  inputMode="numeric"
+                  value={workForm.hours}
+                  onChange={(event) => setWorkForm({ ...workForm, hours: event.target.value })}
+                />
+                <span>小时</span>
+                <input
+                  className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  inputMode="numeric"
+                  value={workForm.minutes}
+                  onChange={(event) => setWorkForm({ ...workForm, minutes: event.target.value })}
+                />
+                <span>分钟</span>
+              </div>
+            </Field>
+            <div className="flex items-end justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setWorkForm(null)}>
+                取消
+              </Button>
+              <Button type="button" disabled={savingList} onClick={() => void saveWork()}>
+                保存
+              </Button>
+            </div>
+          </div>
+        )}
+        <ListState emptyText="暂未关联工作记录。">
           {workItems.map((item) => (
             <ListRow key={item.id}>
               <div className="min-w-0">
                 <p className="font-medium text-foreground">{item.title}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {[item.occurred_at, item.work_type, item.source].filter(Boolean).join(" · ")}
+                  {[
+                    item.occurred_at,
+                    item.work_type,
+                    item.confirmation_status === "pending" ? "待确认（不计工时）" : "已确认",
+                    workSourceLabel(item),
+                    item.source_filename,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </p>
                 {item.content && (
                   <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
@@ -602,12 +763,44 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
                   </p>
                 )}
               </div>
+              <div className="flex flex-wrap items-center gap-1">
+                <Button type="button" variant="ghost" size="sm" onClick={() => openWorkForm(item)}>
+                  编辑
+                </Button>
+                {item.confirmation_status === "pending" && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={savingList}
+                    onClick={() => void confirmWork(item)}
+                  >
+                    确认
+                  </Button>
+                )}
+                <Button type="button" variant="ghost" size="sm" onClick={() => void removeWork(item)}>
+                  <Trash2 className="size-3.5" />
+                </Button>
+              </div>
             </ListRow>
           ))}
         </ListState>
       </Panel>
     </section>
   );
+}
+
+function formatConfirmedDuration(items: CaseWorkItem[]) {
+  const total = items
+    .filter((item) => item.confirmation_status === "confirmed")
+    .reduce((sum, item) => sum + (item.duration_minutes ?? 0), 0);
+  return `已确认工时：共 ${Math.floor(total / 60)} 小时 ${total % 60} 分钟`;
+}
+
+function workSourceLabel(item: CaseWorkItem) {
+  if (item.source === "manual") return "手工";
+  if (item.source === "feishu" || item.external_source === "feishu") return "飞书导入";
+  return "材料提取";
 }
 
 function Panel({

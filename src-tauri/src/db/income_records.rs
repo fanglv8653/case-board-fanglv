@@ -36,6 +36,15 @@ pub struct IncomeRecord {
     pub archive_returned_amount: f64,
     pub invoice_date: Option<String>,
     pub invoice_no: Option<String>,
+    pub record_status: String,
+    pub invoice_total: Option<f64>,
+    pub invoice_buyer: Option<String>,
+    pub invoice_seller: Option<String>,
+    pub invoice_type: Option<String>,
+    pub auto_source_document_id: Option<String>,
+    pub auto_source_filename: Option<String>,
+    pub auto_fields_json: String,
+    pub manual_fields_json: String,
     pub recognized_month: String,
     pub actual_income_amount: f64,
     pub actual_income_overridden: i64,
@@ -71,11 +80,25 @@ pub struct UpsertIncomeRecordInput {
     pub archive_returned_amount: Option<f64>,
     pub invoice_date: Option<String>,
     pub invoice_no: Option<String>,
+    pub record_status: Option<String>,
     pub recognized_month: Option<String>,
     pub actual_income_amount: Option<f64>,
     pub actual_income_overridden: Option<i64>,
     pub actual_income_override_note: Option<String>,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InvoiceDraftInput {
+    pub case_id: Option<String>,
+    pub source_document_id: String,
+    pub source_filename: String,
+    pub invoice_date: Option<String>,
+    pub invoice_no: String,
+    pub invoice_total: Option<f64>,
+    pub invoice_buyer: Option<String>,
+    pub invoice_seller: Option<String>,
+    pub invoice_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -115,6 +138,7 @@ struct ComputedInput {
     actual_income_overridden: i64,
     actual_income_override_note: Option<String>,
     note: Option<String>,
+    record_status: String,
 }
 
 const RECORD_SELECT: &str = r#"
@@ -137,6 +161,8 @@ SELECT
     ir.archive_returned_amount,
     ir.invoice_date,
     ir.invoice_no,
+    ir.record_status, ir.invoice_total, ir.invoice_buyer, ir.invoice_seller, ir.invoice_type,
+    ir.auto_source_document_id, ir.auto_source_filename, ir.auto_fields_json, ir.manual_fields_json,
     ir.recognized_month,
     ir.actual_income_amount,
     ir.actual_income_overridden,
@@ -201,6 +227,7 @@ pub async fn upsert(
     pool: &SqlitePool,
     input: UpsertIncomeRecordInput,
 ) -> Result<IncomeRecord, String> {
+    let is_manual_edit = input.id.is_some();
     let computed = compute_input(input)?;
     sqlx::query(
         "INSERT INTO case_income_records (
@@ -210,8 +237,8 @@ pub async fn upsert(
             archive_holdback_status, archive_returned_at, archive_returned_amount,
             invoice_date, invoice_no, recognized_month,
             actual_income_amount, actual_income_overridden, actual_income_override_note,
-            note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            note, record_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             case_id = excluded.case_id,
             manual_case_name = excluded.manual_case_name,
@@ -234,6 +261,7 @@ pub async fn upsert(
             actual_income_overridden = excluded.actual_income_overridden,
             actual_income_override_note = excluded.actual_income_override_note,
             note = excluded.note,
+            record_status = excluded.record_status,
             updated_at = datetime('now')",
     )
     .bind(&computed.id)
@@ -258,9 +286,27 @@ pub async fn upsert(
     .bind(computed.actual_income_overridden)
     .bind(&computed.actual_income_override_note)
     .bind(&computed.note)
+    .bind(&computed.record_status)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    if is_manual_edit {
+        // JSON array, not a substring convention: later automatic invoice rescans query it via json_each.
+        let protected = serde_json::json!([
+            "case_id",
+            "manual_case_name",
+            "lawyer_fee_total",
+            "invoice_date",
+            "invoice_no",
+            "invoice_total",
+            "invoice_buyer",
+            "invoice_seller",
+            "invoice_type"
+        ]);
+        sqlx::query("UPDATE case_income_records SET manual_fields_json = ?, record_status = 'confirmed', updated_at = datetime('now') WHERE id = ?")
+            .bind(protected.to_string()).bind(&computed.id).execute(pool).await.map_err(|e| e.to_string())?;
+    }
 
     get(pool, &computed.id)
         .await?
@@ -274,6 +320,41 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(result.rows_affected())
+}
+
+/// OCR invoice sync is idempotent by the normalized invoice number.  Existing rows retain
+/// human-confirmed fields; an unmatched invoice becomes a draft and is therefore excluded from summaries.
+pub async fn sync_invoice_draft(
+    pool: &SqlitePool,
+    input: InvoiceDraftInput,
+) -> Result<IncomeRecord, String> {
+    let invoice_no: String = input
+        .invoice_no
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .collect();
+    if invoice_no.is_empty() {
+        return Err("电子发票缺少发票号码，不能自动建账".into());
+    }
+    let id =
+        sqlx::query_scalar::<_, String>("SELECT id FROM case_income_records WHERE invoice_no = ?")
+            .bind(&invoice_no)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let amount = input.invoice_total.unwrap_or(0.0).max(0.0);
+    let month = input
+        .invoice_date
+        .as_deref()
+        .filter(|v| v.len() >= 7)
+        .map(|v| v[..7].to_string())
+        .unwrap_or_else(|| Local::now().format("%Y-%m").to_string());
+    sqlx::query("INSERT INTO case_income_records (id, case_id, manual_case_name, lawyer_fee_total, source_type, share_ratio, firm_deduction_rate, archive_holdback_rate, personal_share_amount, firm_deduction_amount, archive_holdback_amount, archive_holdback_status, archive_returned_amount, invoice_date, invoice_no, recognized_month, actual_income_amount, actual_income_overridden, record_status, invoice_total, invoice_buyer, invoice_seller, invoice_type, auto_source_document_id, auto_source_filename, auto_fields_json, manual_fields_json) VALUES (?, ?, NULL, ?, 'personal', 1, .15, .05, ?, ?, ?, 'holding', 0, ?, ?, ?, ?, 0, 'draft', ?, ?, ?, ?, ?, ?, '[\"case_id\",\"invoice_date\",\"invoice_no\",\"invoice_total\",\"invoice_buyer\",\"invoice_seller\",\"invoice_type\"]', '[]') ON CONFLICT(invoice_no) WHERE invoice_no IS NOT NULL AND trim(invoice_no) <> '' DO UPDATE SET case_id=CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(case_income_records.manual_fields_json) WHERE value='case_id') THEN excluded.case_id ELSE case_income_records.case_id END, invoice_date=CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(case_income_records.manual_fields_json) WHERE value='invoice_date') THEN excluded.invoice_date ELSE case_income_records.invoice_date END, invoice_total=CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(case_income_records.manual_fields_json) WHERE value='invoice_total') THEN excluded.invoice_total ELSE case_income_records.invoice_total END, invoice_buyer=CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(case_income_records.manual_fields_json) WHERE value='invoice_buyer') THEN excluded.invoice_buyer ELSE case_income_records.invoice_buyer END, invoice_seller=CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(case_income_records.manual_fields_json) WHERE value='invoice_seller') THEN excluded.invoice_seller ELSE case_income_records.invoice_seller END, invoice_type=CASE WHEN NOT EXISTS(SELECT 1 FROM json_each(case_income_records.manual_fields_json) WHERE value='invoice_type') THEN excluded.invoice_type ELSE case_income_records.invoice_type END, auto_source_document_id=excluded.auto_source_document_id, auto_source_filename=excluded.auto_source_filename, auto_fields_json='[\"case_id\",\"invoice_date\",\"invoice_no\",\"invoice_total\",\"invoice_buyer\",\"invoice_seller\",\"invoice_type\"]', updated_at=datetime('now')")
+        .bind(&id).bind(&input.case_id).bind(amount).bind(amount).bind(amount * 0.15).bind(amount * 0.05).bind(&input.invoice_date).bind(&invoice_no).bind(&month).bind(amount * 0.80).bind(input.invoice_total).bind(&input.invoice_buyer).bind(&input.invoice_seller).bind(&input.invoice_type).bind(&input.source_document_id).bind(&input.source_filename).execute(pool).await.map_err(|e| e.to_string())?;
+    get(pool, &id)
+        .await?
+        .ok_or_else(|| "发票草稿写入后读取失败".into())
 }
 
 pub async fn summarize(
@@ -303,6 +384,7 @@ SELECT
 FROM case_income_records ir
 LEFT JOIN cases c ON ir.case_id = c.id
 {FILTER_SQL}
+AND ir.record_status = 'confirmed'
 "#
     );
     sqlx::query_as::<_, IncomeSummary>(&sql)
@@ -375,8 +457,14 @@ fn compute_input(input: UpsertIncomeRecordInput) -> Result<ComputedInput, String
         return Err("律师费总额不能为负数".to_string());
     }
 
-    let source_type = normalize_opt(input.source_type).unwrap_or_else(|| SOURCE_PERSONAL.to_string());
+    let source_type =
+        normalize_opt(input.source_type).unwrap_or_else(|| SOURCE_PERSONAL.to_string());
     validate_source_type(&source_type)?;
+    let record_status =
+        normalize_opt(input.record_status).unwrap_or_else(|| "confirmed".to_string());
+    if !matches!(record_status.as_str(), "draft" | "confirmed") {
+        return Err("收入状态必须是 draft 或 confirmed".to_string());
+    }
 
     let share_ratio = input.share_ratio.unwrap_or(1.0);
     validate_ratio("分成比例", share_ratio)?;
@@ -387,8 +475,8 @@ fn compute_input(input: UpsertIncomeRecordInput) -> Result<ComputedInput, String
     let archive_holdback_rate = input.archive_holdback_rate.unwrap_or(0.05);
     validate_ratio("归档暂押费比例", archive_holdback_rate)?;
 
-    let archive_holdback_status =
-        normalize_opt(input.archive_holdback_status).unwrap_or_else(|| HOLDBACK_HOLDING.to_string());
+    let archive_holdback_status = normalize_opt(input.archive_holdback_status)
+        .unwrap_or_else(|| HOLDBACK_HOLDING.to_string());
     validate_holdback_status(&archive_holdback_status)?;
 
     let invoice_date = normalize_opt(input.invoice_date);
@@ -473,6 +561,7 @@ fn compute_input(input: UpsertIncomeRecordInput) -> Result<ComputedInput, String
         actual_income_overridden: overridden,
         actual_income_override_note,
         note: normalize_opt(input.note),
+        record_status,
     })
 }
 
@@ -496,7 +585,10 @@ fn validate_source_type(value: &str) -> Result<(), String> {
 }
 
 fn validate_holdback_status(value: &str) -> Result<(), String> {
-    if matches!(value, HOLDBACK_HOLDING | HOLDBACK_RETURNED | HOLDBACK_NOT_RETURNED) {
+    if matches!(
+        value,
+        HOLDBACK_HOLDING | HOLDBACK_RETURNED | HOLDBACK_NOT_RETURNED
+    ) {
         Ok(())
     } else {
         Err(format!("不支持的归档暂押状态: {value}"))
@@ -540,4 +632,92 @@ fn validate_month(value: &str) -> Result<(), String> {
 
 fn round_money(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invoice(buyer: &str, total: f64) -> InvoiceDraftInput {
+        InvoiceDraftInput {
+            case_id: None,
+            source_document_id: "doc-invoice-1".into(),
+            source_filename: "电子发票.pdf".into(),
+            invoice_date: Some("2026-07-13".into()),
+            invoice_no: "12 34-56".into(),
+            invoice_total: Some(total),
+            invoice_buyer: Some(buyer.into()),
+            invoice_seller: Some("测试律所".into()),
+            invoice_type: Some("电子发票".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn invoice_sync_is_idempotent_and_respects_manual_fields() {
+        let pool = crate::db::init_pool(":memory:")
+            .await
+            .expect("migrate database");
+        let first = sync_invoice_draft(&pool, invoice("甲公司", 10_000.0))
+            .await
+            .expect("first sync");
+        let second = sync_invoice_draft(&pool, invoice("乙公司", 12_000.0))
+            .await
+            .expect("repeat sync");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.invoice_buyer.as_deref(), Some("乙公司"));
+        assert_eq!(second.invoice_total, Some(12_000.0));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM case_income_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        sqlx::query("UPDATE case_income_records SET invoice_buyer = '人工购买方', manual_fields_json = '[\"invoice_buyer\"]' WHERE id = ?")
+            .bind(&second.id).execute(&pool).await.unwrap();
+        let protected = sync_invoice_draft(&pool, invoice("丙公司", 15_000.0))
+            .await
+            .expect("protected rescan");
+        assert_eq!(protected.invoice_buyer.as_deref(), Some("人工购买方"));
+        assert_eq!(protected.invoice_total, Some(15_000.0));
+    }
+
+    #[tokio::test]
+    async fn draft_is_excluded_until_confirmed() {
+        let pool = crate::db::init_pool(":memory:")
+            .await
+            .expect("migrate database");
+        let draft = sync_invoice_draft(&pool, invoice("甲公司", 10_000.0))
+            .await
+            .expect("draft sync");
+        assert_eq!(
+            summarize(&pool, IncomeRecordFilter::default())
+                .await
+                .unwrap()
+                .record_count,
+            0
+        );
+
+        upsert(
+            &pool,
+            UpsertIncomeRecordInput {
+                id: Some(draft.id),
+                manual_case_name: Some("发票待关联案件".into()),
+                lawyer_fee_total: 10_000.0,
+                invoice_date: draft.invoice_date,
+                invoice_no: draft.invoice_no,
+                record_status: Some("confirmed".into()),
+                recognized_month: Some("2026-07".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("confirm record");
+
+        let summary = summarize(&pool, IncomeRecordFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(summary.record_count, 1);
+        assert_eq!(summary.lawyer_fee_total_sum, 10_000.0);
+    }
 }

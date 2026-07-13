@@ -703,6 +703,14 @@ async fn upsert_income_record(
 }
 
 #[tauri::command]
+async fn sync_invoice_income_draft(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::income_records::InvoiceDraftInput,
+) -> Result<db::income_records::IncomeRecord, String> {
+    db::income_records::sync_invoice_draft(pool.inner(), input).await
+}
+
+#[tauri::command]
 async fn delete_income_record(
     pool: tauri::State<'_, SqlitePool>,
     id: String,
@@ -800,6 +808,14 @@ async fn list_criminal_deadline_items(
     case_id: String,
 ) -> Result<Vec<db::criminal_cases::CriminalDeadlineItem>, String> {
     db::criminal_cases::list_criminal_deadline_items(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn summarize_case_work_duration(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<db::case_work_items::CaseWorkDurationSummary, String> {
+    db::case_work_items::summarize_confirmed_duration(pool.inner(), &case_id).await
 }
 
 #[tauri::command]
@@ -3655,6 +3671,17 @@ async fn reextract_document(
         .map(|_| ())
 }
 
+/// Cache-first LLM retry. `used_cached_text=true` is returned when it reused the persisted
+/// extraction and therefore did not call OCR; absent cache falls back to normal extraction.
+#[tauri::command]
+async fn reextract_document_from_cache(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    doc_id: String,
+) -> Result<ingest::pipeline::CachedRetryReport, String> {
+    pipeline::trigger_reextract_cached(app, pool.inner(), &doc_id).await
+}
+
 /// 2026-06-13(胡彬律师反馈)· 去水印重新识别:对带大幅水印的工商调档件,
 /// 强制走 PP-OCRv6(纯文字)+ 去水印过滤(不回退 VL)。同样不自动跑全案分析(省钱)。
 #[tauri::command]
@@ -5511,6 +5538,7 @@ pub fn run() {
             list_income_records,
             get_income_record,
             upsert_income_record,
+            sync_invoice_income_draft,
             delete_income_record,
             summarize_income_records,
             list_case_work_items,
@@ -5523,6 +5551,7 @@ pub fn run() {
             upsert_case_stage_item,
             delete_case_stage_item,
             list_criminal_deadline_items,
+            summarize_case_work_duration,
             refresh_criminal_deadlines,
             upsert_criminal_deadline_item,
             delete_criminal_deadline_item,
@@ -5566,6 +5595,7 @@ pub fn run() {
             delete_case_instance,
             delete_document,
             reextract_document,
+            reextract_document_from_cache,
             reextract_document_dewatermark,
             export_report_html,
             export_report_docx,

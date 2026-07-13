@@ -649,6 +649,10 @@ export function upsertIncomeRecord(
   return invoke<IncomeRecord>("upsert_income_record", { input });
 }
 
+export function syncInvoiceIncomeDraft(input: import("./types").InvoiceDraftInput): Promise<IncomeRecord> {
+  return invoke<IncomeRecord>("sync_invoice_income_draft", { input });
+}
+
 export function deleteIncomeRecord(id: string): Promise<number> {
   return invoke<number>("delete_income_record", { id });
 }
@@ -955,6 +959,11 @@ export function deleteDocument(id: string): Promise<number> {
  */
 export function reextractDocument(docId: string): Promise<void> {
   return invoke<void>("reextract_document", { docId });
+}
+
+/** Retry LLM extraction from persisted text first; `used_cached_text` proves no OCR ran. */
+export function reextractDocumentFromCache(docId: string): Promise<import("./types").CachedExtractionRetryReport> {
+  return invoke("reextract_document_from_cache", { docId });
 }
 
 /**
@@ -2124,4 +2133,13 @@ export function listContractPreferences(): Promise<ContractPreference[]> {
 /** 删除一条起草偏好。 */
 export function deleteContractPreference(id: string): Promise<number> {
   return invoke<number>("delete_contract_preference", { id });
+}
+export type CaseWorkDurationSummary = {
+  confirmed_minutes: number;
+};
+
+export function summarizeCaseWorkDuration(
+  caseId: string,
+): Promise<CaseWorkDurationSummary> {
+  return invoke("summarize_case_work_duration", { caseId });
 }

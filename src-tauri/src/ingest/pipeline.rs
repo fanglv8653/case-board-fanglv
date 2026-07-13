@@ -18,7 +18,7 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
 use crate::db::documents::Document;
-use crate::ingest::extractor::{extract_one, ExtractResult};
+use crate::ingest::extractor::{extract_cached_text, extract_one, ExtractResult};
 use crate::ingest::ocr::OcrContext;
 use crate::llm;
 use crate::settings;
@@ -254,6 +254,39 @@ pub async fn trigger_reextract(
     // run_analysis=false:重识别单文档不自动跑全案分析(省钱),用户识别完一批后手动点「重新分析」。
     spawn_extraction(app, pool.clone(), case_id, vec![doc], false);
     Ok(filename)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CachedRetryReport { pub used_cached_text: bool, pub status: String, pub error: Option<String> }
+
+/// Cache-first retry entry point. A readable cached extraction never invokes OCR; only a
+/// missing/unreadable cache falls back to the normal re-extraction pipeline.
+pub async fn trigger_reextract_cached(
+    app: AppHandle, pool: &SqlitePool, doc_id: &str,
+) -> Result<CachedRetryReport, String> {
+    let doc = crate::db::documents::get_document_by_id(pool, doc_id).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| "文档不存在或已删除".to_string())?;
+    let cached = doc.extracted_text_path.as_deref().and_then(|path| std::fs::read_to_string(path).ok());
+    let Some(text) = cached else {
+        trigger_reextract(app, pool, doc_id, None).await?;
+        return Ok(CachedRetryReport { used_cached_text: false, status: "pending".into(), error: None });
+    };
+    let user_settings = settings::read_settings().map_err(|e| e.to_string())?;
+    let config = llm::LlmConfig::from_settings(&user_settings);
+    match extract_cached_text(&config, text, &doc.filename, doc.category.as_deref()).await {
+        ExtractResult::Extracted { fields, partial_error, .. } => {
+            let json = serde_json::to_string(&fields).map_err(|e| e.to_string())?;
+            let status = if partial_error.is_some() { "partial" } else { "done" };
+            sqlx::query("UPDATE documents SET extracted_fields = ?, extraction_status = ?, last_error = ? WHERE id = ?")
+                .bind(json).bind(status).bind(&partial_error).bind(doc_id).execute(pool).await.map_err(|e| e.to_string())?;
+            Ok(CachedRetryReport { used_cached_text: true, status: status.into(), error: partial_error })
+        }
+        ExtractResult::Failed { error, .. } => {
+            sqlx::query("UPDATE documents SET extraction_status = 'failed', last_error = ? WHERE id = ?").bind(&error).bind(doc_id).execute(pool).await.map_err(|e| e.to_string())?;
+            Ok(CachedRetryReport { used_cached_text: true, status: "failed".into(), error: Some(error) })
+        }
+        _ => Err("缓存重试得到非字段抽取结果".into()),
+    }
 }
 
 async fn run_extraction(
@@ -694,26 +727,111 @@ async fn process_one_doc(
         ExtractResult::Extracted {
             fields,
             text_md,
+            mut partial_error,
             metrics: _,
         } => {
+            if let Some(warning) = crate::ingest::reliability::quality_warning(&text_md) {
+                partial_error = Some(match partial_error {
+                    Some(detail) => format!("{}；{}", detail, warning),
+                    None => warning.to_string(),
+                });
+            }
             let json = serde_json::to_string(&fields).unwrap_or_else(|_| "null".into());
             let extracted_text_path = match write_extracted_md(case_id, &doc.id, &text_md) {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    crate::dlog!("[pipeline] 写 extracts/.md 失败: {}", e);
-                    None
+                    let detail = format!("保存抽取正文失败: {}", e);
+                    crate::dlog!("[pipeline] {}", detail);
+                    let _ = sqlx::query(
+                        "UPDATE documents SET extraction_status = 'failed', last_error = ? WHERE id = ?",
+                    )
+                    .bind(&detail)
+                    .bind(&doc.id)
+                    .execute(pool)
+                    .await;
+                    return DocOutcome::Failed { error: detail };
                 }
             };
-            // 成功 → 清掉 last_error(可能是上次失败留下的)
-            let _ = sqlx::query(
+            // A DB write failure is not a successful extraction: report it back to the UI.
+            if let Err(e) = sqlx::query(
                 "UPDATE documents SET extracted_fields = ?, extracted_text_path = ?, \
-                 extraction_status = 'done', last_error = NULL WHERE id = ?",
+                 extraction_status = ?, last_error = ? WHERE id = ?",
             )
             .bind(&json)
             .bind(&extracted_text_path)
+            .bind(if partial_error.is_some() { "partial" } else { "done" })
+            .bind(&partial_error)
             .bind(&doc.id)
             .execute(pool)
-            .await;
+            .await { return DocOutcome::Failed { error: format!("保存抽取结果失败: {}", e) }; }
+            // Criminal documents never feed the civil aggregate.  Seed the criminal profile only
+            // when absent, preserving every field previously confirmed in the criminal UI.
+            if matches!(crate::ingest::reliability::classify_domain(fields.case_type.as_deref(), &text_md), crate::ingest::reliability::Domain::Criminal) {
+                let profile_result = match crate::db::criminal_cases::get_criminal_case_profile(pool, case_id).await {
+                    Ok(Some(existing)) => crate::db::criminal_cases::upsert_criminal_case_profile(pool, crate::db::criminal_cases::UpsertCriminalCaseProfileInput {
+                        case_id: case_id.to_string(), current_stage: existing.current_stage.or(fields.case_stage.clone()),
+                        procedure_type: existing.procedure_type.or(Some("criminal".into())), suspected_charge: existing.suspected_charge.or(fields.cause.clone()),
+                        suspect_or_defendant_name: existing.suspect_or_defendant_name.or_else(|| fields.defendants.first().cloned()),
+                        victim_name: existing.victim_name.or_else(|| fields.plaintiffs.first().cloned()),
+                        client_name: existing.client_name.or_else(|| fields.party_contacts.first().map(|x| x.name.clone()).flatten()),
+                        client_relationship: existing.client_relationship, detention_center: existing.detention_center,
+                        coercive_measure_type: existing.coercive_measure_type, notes: existing.notes.or(fields.case_note.clone()),
+                        case_subtype: existing.case_subtype, defense_role: existing.defense_role,
+                        detention_date: existing.detention_date, arrest_request_date: existing.arrest_request_date,
+                        arrest_review_received_date: existing.arrest_review_received_date,
+                        arrest_decision_date: existing.arrest_decision_date, arrest_date: existing.arrest_date,
+                        bail_start_date: existing.bail_start_date,
+                        residential_surveillance_start_date: existing.residential_surveillance_start_date,
+                        transfer_for_prosecution_date: existing.transfer_for_prosecution_date,
+                        prosecution_received_date: existing.prosecution_received_date,
+                        first_instance_accepted_date: existing.first_instance_accepted_date,
+                        second_instance_accepted_date: existing.second_instance_accepted_date,
+                        judgment_received_date: existing.judgment_received_date,
+                        ruling_received_date: existing.ruling_received_date,
+                        user_overrides_json: existing.user_overrides_json,
+                    }).await,
+                    Ok(None) => crate::db::criminal_cases::upsert_criminal_case_profile(pool, crate::db::criminal_cases::UpsertCriminalCaseProfileInput {
+                        case_id: case_id.to_string(), current_stage: fields.case_stage.clone(), procedure_type: Some("criminal".into()),
+                        suspected_charge: fields.cause.clone(), suspect_or_defendant_name: fields.defendants.first().cloned(), victim_name: fields.plaintiffs.first().cloned(),
+                        client_name: fields.party_contacts.first().and_then(|x| x.name.clone()), notes: fields.case_note.clone(), ..Default::default()
+                    }).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = profile_result {
+                    let detail = format!("刑事画像保存失败: {}", e);
+                    let _ = sqlx::query("UPDATE documents SET extraction_status = 'partial', last_error = ? WHERE id = ?")
+                        .bind(&detail).bind(&doc.id).execute(pool).await;
+                    return DocOutcome::Failed { error: detail };
+                }
+            }
+            // Only the explicit work-record whitelist reaches the pending ledger.  This uses the
+            // cached extraction text and never schedules OCR/LLM again.
+            if crate::ingest::reliability::is_work_record_filename(&doc.filename, doc.category.as_deref()) {
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                if let Err(e) = crate::db::case_work_items::upsert_document_candidate(
+                    pool, case_id, &doc.id, &doc.filename, &today, doc.stage.clone(), text_md.clone(), None,
+                ).await {
+                    let detail = format!("工作候选保存失败: {}", e);
+                    let _ = sqlx::query("UPDATE documents SET extraction_status = 'partial', last_error = ? WHERE id = ?").bind(&detail).bind(&doc.id).execute(pool).await;
+                    return DocOutcome::Failed { error: detail };
+                }
+            }
+            // The invoice contract is part of the same LLM response; a successful document pass
+            // therefore creates/updates one reviewable income draft without another OCR/LLM call.
+            if let Some(invoice) = fields.invoice.clone() {
+                if let Some(invoice_no) = invoice.invoice_no.filter(|v| !v.trim().is_empty()) {
+                    if let Err(e) = crate::db::income_records::sync_invoice_draft(pool,
+                        crate::db::income_records::InvoiceDraftInput { case_id: Some(case_id.into()),
+                            source_document_id: doc.id.clone(), source_filename: doc.filename.clone(),
+                            invoice_date: invoice.invoice_date, invoice_no, invoice_total: invoice.invoice_total,
+                            invoice_buyer: invoice.invoice_buyer, invoice_seller: invoice.invoice_seller,
+                            invoice_type: invoice.invoice_type }).await {
+                        let detail = format!("发票收入草稿保存失败: {}", e);
+                        let _ = sqlx::query("UPDATE documents SET extraction_status = 'partial', last_error = ? WHERE id = ?").bind(&detail).bind(&doc.id).execute(pool).await;
+                        return DocOutcome::Failed { error: detail };
+                    }
+                }
+            }
             DocOutcome::Extracted
         }
         ExtractResult::Skipped { reason, metrics: _ } => {
@@ -734,8 +852,16 @@ async fn process_one_doc(
             let extracted_text_path = match write_extracted_md(case_id, &doc.id, &text_md) {
                 Ok(p) => Some(p),
                 Err(e) => {
-                    crate::dlog!("[pipeline] TextOnly 写 extracts/.md 失败: {}", e);
-                    None
+                    let detail = format!("保存抽取正文失败: {}", e);
+                    crate::dlog!("[pipeline] TextOnly {}", detail);
+                    let _ = sqlx::query(
+                        "UPDATE documents SET extraction_status = 'failed', last_error = ? WHERE id = ?",
+                    )
+                    .bind(&detail)
+                    .bind(&doc.id)
+                    .execute(pool)
+                    .await;
+                    return DocOutcome::Failed { error: detail };
                 }
             };
             let _ = sqlx::query(
