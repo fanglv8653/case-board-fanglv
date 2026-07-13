@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "方律案件看板",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "identifier": "com.fanglv.caseboard",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -58,7 +58,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBQTlBM0I1MThGOUQ4MjUKUldRbDJQa1l0YU9wV3MwSnI0U2ROK0JsWFZzOCtJWUxvMW9OeHlOaDRObjVPMnVXODdQbHE4SHgK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1MkRGODBFOTM2RTA0MjIKUldRaUJHNlREdmd0UmVEWm1tU1NkTUY2R3JHQ0lmc2xEK09oN1JiTWdzMmdpRkJiaVk3L0JXRHYK",
       "endpoints": [
         "https://raw.githubusercontent.com/fanglv8653/case-board-fanglv/main/release/latest.json"
       ],

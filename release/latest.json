@@ -1,0 +1,11 @@
+{
+  "version": "0.6.1",
+  "notes": "配置新的 Tauri updater 签名信任链，为后续自动更新建立安全基础。",
+  "pub_date": "2026-07-13T09:10:43Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UmNQSXplWWxMaCsxcFZOZk9LaGgvNm1UY0xGZ3JaZTJiRW04WWNqOE4wQ1BqM1JwRmNWNE5qd0o0TW5oMVBGK2dVc0dJMmh4NFBBNFhIcFU3UE96NkEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzOTMzODE1CWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNi4xX3g2NC1zZXR1cC5leGUKa21lRU5qK3o5eGkxSEFCN3JzRlQ3MnJpcGpXQ05wNDRHMm5yQ1BUdk94d2VFc1dTQ3c4dVdWV3JhWFdDTGp2d1JFRlNKcjVib0YrcVRtMlh2Ym1VREE9PQo=",
+      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.6.1-fanglv/FanglvCaseBoard_0.6.1_x64-setup.exe"
+    }
+  }
+}
