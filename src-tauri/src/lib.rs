@@ -780,6 +780,37 @@ async fn upsert_criminal_case_profile(
 }
 
 #[tauri::command]
+async fn save_criminal_sentencing_estimate(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_sentencing_estimates::SaveCriminalSentencingEstimateInput,
+) -> Result<db::criminal_sentencing_estimates::CriminalSentencingEstimate, String> {
+    db::criminal_sentencing_estimates::save_criminal_sentencing_estimate(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn list_criminal_sentencing_estimates(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::criminal_sentencing_estimates::CriminalSentencingEstimate>, String> {
+    db::criminal_sentencing_estimates::list_criminal_sentencing_estimates(pool.inner(), &case_id)
+        .await
+}
+
+#[tauri::command]
+async fn get_criminal_sentencing_estimate(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    estimate_id: String,
+) -> Result<db::criminal_sentencing_estimates::CriminalSentencingEstimate, String> {
+    db::criminal_sentencing_estimates::get_criminal_sentencing_estimate(
+        pool.inner(),
+        &case_id,
+        &estimate_id,
+    )
+    .await
+}
+
+#[tauri::command]
 async fn list_criminal_extraction_candidates(
     pool: tauri::State<'_, SqlitePool>,
     case_id: String,
@@ -5595,6 +5626,9 @@ pub fn run() {
             delete_case_work_item,
             get_criminal_case_profile,
             upsert_criminal_case_profile,
+            save_criminal_sentencing_estimate,
+            list_criminal_sentencing_estimates,
+            get_criminal_sentencing_estimate,
             list_criminal_extraction_candidates,
             confirm_criminal_extraction_candidate_batch,
             reject_criminal_extraction_candidate_batch,

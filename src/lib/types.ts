@@ -428,6 +428,33 @@ export interface CriminalCaseProfileUpsertInput {
   user_overrides_json?: string | null;
 }
 
+export interface CriminalSentencingEstimateSaveInput {
+  case_id: string;
+  expected_profile_revision: number;
+  input_snapshot: unknown;
+  output_min_months: number;
+  output_max_months: number | null;
+  output_snapshot: unknown;
+  process_snapshot: unknown;
+  basis_snapshot: unknown;
+  created_source: string;
+}
+
+export interface CriminalSentencingEstimate {
+  id: string;
+  case_id: string;
+  profile_case_id: string;
+  profile_revision: number;
+  input_snapshot: unknown;
+  output_min_months: number;
+  output_max_months: number | null;
+  output_snapshot: unknown;
+  process_snapshot: unknown;
+  basis_snapshot: unknown;
+  created_source: string;
+  created_at: string;
+}
+
 export interface CaseStageItem {
   id: string;
   case_id: string;

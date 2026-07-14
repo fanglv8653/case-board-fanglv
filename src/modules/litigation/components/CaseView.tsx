@@ -32,6 +32,7 @@ import { buildMarkMap, type Importance } from "../lib/docMarks";
 import { markOrganizeStarted, useOrganizing } from "../lib/organizeStatus";
 import { formatRelativeTime, shortenPath } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import type { SentencingPrefill } from "@/modules/tools/sentencing/prefill";
 
 import { groupByStage } from "../lib/groupByStage";
 import { CaseChatPanel } from "./chat/CaseChatPanel";
@@ -72,6 +73,7 @@ export function CaseView({
   editingDoc,
   onCloseEditor,
   onArtifactCreated,
+  onOpenSentencing,
   domain = "civil",
 }: {
   cases: Case[];
@@ -100,6 +102,7 @@ export function CaseView({
   onCloseEditor: () => void;
   /** V0.3 D2 · chat 落了 save_artifact 文书后的回调:reload + 自动进编辑器打开(docId 空=仅 reload) */
   onArtifactCreated: (docId: string) => void;
+  onOpenSentencing?: (prefill: SentencingPrefill) => void;
   /**
    * 案件领域(2026-06-17)。"criminal" = 刑事 tab:snapshot 标签按刑事适配
    * (罪名 / 被告人 / 检察院·公安 …),AI 助手只保留「刑事深度分析」单 chip。默认 "civil"。
@@ -507,7 +510,7 @@ export function CaseView({
                 selectedCase &&
                 domain === "criminal" && (
                   <div className="mt-5">
-                    <CriminalCasePanel caseId={selectedCase.id} />
+                    <CriminalCasePanel caseId={selectedCase.id} onOpenSentencing={onOpenSentencing} />
                   </div>
                 )}
               {!loading && !error && documents.length > 0 && selectedCase && (
@@ -521,7 +524,7 @@ export function CaseView({
                   />
 
                   {domain === "criminal" && (
-                    <CriminalCasePanel caseId={selectedCase.id} />
+                    <CriminalCasePanel caseId={selectedCase.id} onOpenSentencing={onOpenSentencing} />
                   )}
 
                   {/* 原文件(默认折叠) */}

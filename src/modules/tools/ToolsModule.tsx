@@ -19,6 +19,8 @@
 import { useEffect, useState } from "react";
 
 import type { InterestPrefill } from "./calculators/InterestCalculator";
+import { SentencingCalculator } from "./sentencing/SentencingCalculator";
+import type { SentencingPrefill } from "./sentencing/prefill";
 import {
   ArrowLeft,
   Briefcase,
@@ -66,7 +68,8 @@ type LegalToolId =
   | "courier"
   | "ticktick"
   | "feishu"
-  | "courtfiling";
+  | "courtfiling"
+  | "sentencing";
 
 interface LegalTool {
   id: LegalToolId;
@@ -76,6 +79,12 @@ interface LegalTool {
 }
 
 const LEGAL_TOOLS: LegalTool[] = [
+  {
+    id: "sentencing",
+    title: "刑事量刑辅助测算",
+    desc: "按罪名、数额、地区、犯罪日期、事实档位与量刑情节进行区间测算",
+    icon: Gavel,
+  },
   {
     id: "number",
     title: "数字大写转换器",
@@ -123,12 +132,15 @@ const LEGAL_TOOLS: LegalTool[] = [
 export function ToolsModule({
   initialTool,
   interestPrefill,
+  sentencingPrefill,
   routeNonce,
 }: {
   /** 2026-05-25:从执行模块「→ 算剩余执行款」跳过来时,自动打开对应工具 */
   initialTool?: LegalToolId | null;
   /** 给 InterestCalculator 的预填(本金 / 起算日 / 备注)*/
   interestPrefill?: InterestPrefill | null;
+  /** 从刑事案件入口传入；只包含精确罪名候选与画像 revision。 */
+  sentencingPrefill?: SentencingPrefill | null;
   /** 自增 nonce:即使 initialTool 不变也强制重新打开(重复跳转用) */
   routeNonce?: number;
 }) {
@@ -352,6 +364,9 @@ export function ToolsModule({
                 }
                 prefill={interestPrefill}
               />
+            )}
+            {tool.id === "sentencing" && (
+              <SentencingCalculator key={routeNonce ?? 0} prefill={sentencingPrefill} />
             )}
           </div>
         </div>

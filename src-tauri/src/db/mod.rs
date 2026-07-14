@@ -32,6 +32,7 @@ pub mod court_filing;
 pub mod credits;
 pub mod criminal_cases;
 pub mod criminal_extraction_candidates;
+pub mod criminal_sentencing_estimates;
 pub mod document_tags;
 pub mod documents;
 pub mod income_records;

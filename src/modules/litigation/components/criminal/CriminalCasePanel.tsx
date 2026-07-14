@@ -16,7 +16,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Gavel, GripVertical, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
@@ -57,6 +57,7 @@ import type {
   CriminalDeadlineItemUpsertInput,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { buildSentencingPrefill, type SentencingPrefill } from "@/modules/tools/sentencing/prefill";
 import {
   resolveStructuredListJson,
   structuredListToText,
@@ -149,13 +150,20 @@ const PRIORITY_OPTIONS = [
   ["urgent", "紧急"],
 ];
 
-export function CriminalCasePanel({ caseId }: { caseId: string }) {
+export function CriminalCasePanel({
+  caseId,
+  onOpenSentencing,
+}: {
+  caseId: string;
+  onOpenSentencing?: (prefill: SentencingPrefill) => void;
+}) {
   const [profileForm, setProfileForm] = useState<ProfileForm>({
     case_id: caseId,
     ...EMPTY_PROFILE,
   });
   const [chargeHistoryText, setChargeHistoryText] = useState("");
   const [chargeHistoryInitialText, setChargeHistoryInitialText] = useState("");
+  const [profileRevision, setProfileRevision] = useState<number | null>(null);
   const [coDefendantsText, setCoDefendantsText] = useState("");
   const [coDefendantsInitialText, setCoDefendantsInitialText] = useState("");
   const [stages, setStages] = useState<CaseStageItem[]>([]);
@@ -209,6 +217,7 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
           listCriminalExtractionCandidates(caseId),
         ]);
       setProfileForm(toProfileForm(caseId, profile));
+      setProfileRevision(profile?.profile_revision ?? null);
       const nextChargeHistoryText = structuredListToText(
         profile?.charge_history_json,
         "charge",
@@ -582,10 +591,27 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
             维护刑事画像、办案时间轴和机关联系人。期限属于办案提醒，条件规则需人工确认。
           </p>
         </div>
-        <Button type="button" variant="ghost" size="sm" onClick={reload}>
-          <RefreshCw className="size-3.5" />
-          刷新
-        </Button>
+        <div className="flex items-center gap-2">
+          {onOpenSentencing && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onOpenSentencing(buildSentencingPrefill({
+                caseId,
+                profileRevision,
+                suspectedCharge: profileForm.suspected_charge,
+                chargeHistoryJson: profileForm.charge_history_json,
+              }))}
+            >
+              <Gavel className="size-3.5" />
+              量刑辅助测算
+            </Button>
+          )}
+          <Button type="button" variant="ghost" size="sm" onClick={reload}>
+            <RefreshCw className="size-3.5" />
+            刷新
+          </Button>
+        </div>
       </div>
 
       {error && (

@@ -25,6 +25,7 @@ import { toast, dismissToast, ToastViewport } from "@/components/ui/toast";
 import { TransactionModule } from "@/modules/transaction";
 import { ToolsModule } from "@/modules/tools";
 import type { InterestPrefill } from "@/modules/tools/calculators/InterestCalculator";
+import type { SentencingPrefill } from "@/modules/tools/sentencing/prefill";
 import { TeamModule } from "@/modules/team/TeamModule";
 import { ExecutionModule } from "@/modules/execution";
 import { IncomeModule } from "@/modules/income/IncomeModule";
@@ -155,11 +156,12 @@ function App() {
   const [reportLoading, setReportLoading] = useState(false);
   /** 2026-05-25 · 工具模块预填(从执行案件「算执行款」跳过来时带数据:本金/起算日/还款记录)*/
   const [toolsRoute, setToolsRoute] = useState<{
-    tool: "interest" | "courtfiling" | null;
+    tool: "interest" | "courtfiling" | "sentencing" | null;
     interestPrefill: InterestPrefill | null;
+    sentencingPrefill: SentencingPrefill | null;
     /** 自增 nonce:即使 tool 不变也强制 ToolsModule 重新打开(用于「重复跳转」) */
     nonce: number;
-  }>({ tool: null, interestPrefill: null, nonce: 0 });
+  }>({ tool: null, interestPrefill: null, sentencingPrefill: null, nonce: 0 });
   /**
    * 2026-05-25 V0.1.8 · 设置 page 是否有未保存改动(从 SettingsModal page 模式上报)。
    * 切别的 tab 时会先 confirm,避免静默丢修改。
@@ -349,7 +351,7 @@ function App() {
   // 「辅助在线立案」标签页(那里能一键装环境)。用全局事件避免深层 prop 钻透。
   useEffect(() => {
     const handler = () => {
-      setToolsRoute((r) => ({ tool: "courtfiling", interestPrefill: null, nonce: r.nonce + 1 }));
+      setToolsRoute((r) => ({ tool: "courtfiling", interestPrefill: null, sentencingPrefill: null, nonce: r.nonce + 1 }));
       void setActiveModuleSafe("tools");
     };
     window.addEventListener("caseboard:open-filing-env", handler);
@@ -1028,6 +1030,15 @@ function App() {
     editingDoc,
     onCloseEditor: handleCloseEditor,
     onArtifactCreated: handleArtifactCreated,
+    onOpenSentencing: (prefill: SentencingPrefill) => {
+      setToolsRoute((route) => ({
+        tool: "sentencing",
+        interestPrefill: null,
+        sentencingPrefill: prefill,
+        nonce: route.nonce + 1,
+      }));
+      void setActiveModuleSafe("tools");
+    },
   };
 
   const workspaceBody = (
@@ -1183,7 +1194,7 @@ function App() {
         {activeModule === "execution" && (
           <ExecutionModule
             onCalculateInterest={(prefill) => {
-              setToolsRoute((r) => ({ tool: "interest", interestPrefill: prefill, nonce: r.nonce + 1 }));
+              setToolsRoute((r) => ({ tool: "interest", interestPrefill: prefill, sentencingPrefill: null, nonce: r.nonce + 1 }));
               setActiveModuleSafe("tools");
             }}
           />
@@ -1194,6 +1205,7 @@ function App() {
           <ToolsModule
             initialTool={toolsRoute.tool}
             interestPrefill={toolsRoute.interestPrefill}
+            sentencingPrefill={toolsRoute.sentencingPrefill}
             routeNonce={toolsRoute.nonce}
           />
         )}

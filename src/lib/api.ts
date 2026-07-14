@@ -65,6 +65,8 @@ import type {
   CaseWorkItemUpsertInput,
   CriminalCaseProfile,
   CriminalCaseProfileUpsertInput,
+  CriminalSentencingEstimate,
+  CriminalSentencingEstimateSaveInput,
   CriminalExtractionCandidateBatch,
   CriminalExtractionCandidateDetail,
   CriminalExtractionCandidateReviewResult,
@@ -744,6 +746,34 @@ export function upsertCriminalCaseProfile(
   input: CriminalCaseProfileUpsertInput,
 ): Promise<CriminalCaseProfile> {
   return invoke<CriminalCaseProfile>("upsert_criminal_case_profile", { input });
+}
+
+export function saveCriminalSentencingEstimate(
+  input: CriminalSentencingEstimateSaveInput,
+): Promise<CriminalSentencingEstimate> {
+  return invoke<CriminalSentencingEstimate>(
+    "save_criminal_sentencing_estimate",
+    { input },
+  );
+}
+
+export function listCriminalSentencingEstimates(
+  caseId: string,
+): Promise<CriminalSentencingEstimate[]> {
+  return invoke<CriminalSentencingEstimate[]>(
+    "list_criminal_sentencing_estimates",
+    { caseId },
+  );
+}
+
+export function getCriminalSentencingEstimate(
+  caseId: string,
+  estimateId: string,
+): Promise<CriminalSentencingEstimate> {
+  return invoke<CriminalSentencingEstimate>(
+    "get_criminal_sentencing_estimate",
+    { caseId, estimateId },
+  );
 }
 
 export function listCriminalExtractionCandidates(
