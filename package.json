@@ -1,11 +1,18 @@
 {
   "name": "caseboard",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:logic": "node scripts/run-logic-tests.mjs",
+    "validate:source": "node scripts/release-gate.mjs --mode source",
+    "validate:release": "node scripts/release-gate.mjs --mode release",
     "preview": "vite preview",
     "tauri": "tauri"
   },

@@ -22,13 +22,13 @@ import {
   BookText,
   SlidersHorizontal,
   User,
+  ShieldCheck,
 } from "lucide-react";
 import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
 import { confirmDialog } from "@/lib/dialog";
 
 import { Button } from "@/components/ui/button";
 import { HoverHint } from "@/components/HoverHint";
-import { GroupQrCode } from "@/components/GroupQrCode";
 import { KbSemanticIndexCard } from "@/components/KbSemanticIndexCard";
 import {
   createLocalKb,
@@ -189,7 +189,7 @@ export type SettingsTab =
   | "kb" // 知识库:本地法律知识库 + 语义索引
   | "datasource" // 数据源:元典 + 外部 MCP(企查查/万得/北大法宝)
   | "toggles" // 功能开关:首页清爽开关
-  | "general"; // 通用:个人信息 / 加群 / 快递100
+  | "general"; // 通用:个人信息 / 快递100
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Brain }[] = [
   { id: "general", label: "通用", icon: User },
@@ -249,6 +249,7 @@ export function SettingsModal({
   // 2026-06-16 · 设置页内部标签页。默认「通用」(作者要求点开设置先看通用);
   // 导入缺 LLM key 跳设置时父组件传 initialTab="brain" 深链到大脑(a92ae91 校验的是 LLM key)。
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "general");
+  const [privacySummaryOpen, setPrivacySummaryOpen] = useState(false);
 
   // 2026-05-25 V0.1.6 · token 在线验证状态
   const [mineruStatus, setMineruStatus] = useState<VerifyStatus>("idle");
@@ -741,6 +742,28 @@ export function SettingsModal({
                   </Section>
               )}
 
+              {/* ── 通用:本地可读的隐私说明入口 ── */}
+              {tab === "general" && (
+                <Section
+                  title="隐私与数据说明"
+                  desc="先在应用内了解数据写入与外部传输边界，再决定是否启用云端能力。"
+                  fill
+                >
+                  <button
+                    type="button"
+                    onClick={() => setPrivacySummaryOpen(true)}
+                    className="flex w-full items-center justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50/70 px-3 py-2.5 text-left transition-colors hover:border-sky-300 hover:bg-sky-100"
+                    aria-haspopup="dialog"
+                  >
+                    <span className="flex items-center gap-2 text-sm font-medium text-sky-800">
+                      <ShieldCheck className="size-4" />
+                      查看隐私与数据说明
+                    </span>
+                    <span className="text-xs text-sky-700">应用内可读</span>
+                  </button>
+                </Section>
+              )}
+
               {/* ── 功能开关:首页日程日历 ── */}
               {tab === "toggles" && (
                 <>
@@ -828,30 +851,6 @@ export function SettingsModal({
                     </label>
                   </Section>
                 </>
-              )}
-
-              {/* ── 通用:微信扫码加群(缩略图悬停放大;托管 lawtools.top,过期换图不必重新发版) ── */}
-              {tab === "general" && (
-                  <Section title="微信扫码加群" fill>
-                    <div className="flex items-center gap-3">
-                      <div className="group relative shrink-0">
-                        <GroupQrCode
-                          size={60}
-                          className="cursor-pointer rounded border border-border"
-                        />
-                        {/* 悬停放大浮层:向下展开,z 高于下方卡片,不挡鼠标 */}
-                        <div className="pointer-events-none absolute left-0 top-full z-50 mt-2 hidden group-hover:block">
-                          <GroupQrCode
-                            size={300}
-                            className="rounded-md border border-border shadow-xl"
-                          />
-                        </div>
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        鼠标悬停二维码放大,微信扫码进群 —— 反馈、提需求、看更新。
-                      </p>
-                    </div>
-                  </Section>
               )}
 
               {/* V0.3:本地模型已隐藏 → 只走云端。三个 API key(MinerU / DeepSeek / 元典)常显,
@@ -1575,22 +1574,119 @@ export function SettingsModal({
 
   if (isPage) {
     return (
-      <div className="mx-auto flex h-full w-full max-w-5xl flex-col overflow-hidden">
-        {body}
-      </div>
+      <>
+        <div className="mx-auto flex h-full w-full max-w-5xl flex-col overflow-hidden">
+          {body}
+        </div>
+        {privacySummaryOpen && (
+          <PrivacySummaryDialog onClose={() => setPrivacySummaryOpen(false)} />
+        )}
+      </>
     );
   }
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 px-4 py-8 backdrop-blur-sm animate-in fade-in-0 duration-200"
-      onClick={handleClose}
-    >
+    <>
       <div
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-in zoom-in-95 fade-in-0 duration-300 ease-out"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 px-4 py-8 backdrop-blur-sm animate-in fade-in-0 duration-200"
+        onClick={handleClose}
+      >
+        <div
+          className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-in zoom-in-95 fade-in-0 duration-300 ease-out"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {body}
+        </div>
+      </div>
+      {privacySummaryOpen && (
+        <PrivacySummaryDialog onClose={() => setPrivacySummaryOpen(false)} />
+      )}
+    </>
+  );
+}
+
+const PRIVACY_POLICY_URL =
+  "https://github.com/fanglv8653/case-board-fanglv/blob/main/PRIVACY.md";
+
+function PrivacySummaryDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/35 px-4 py-8 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="privacy-summary-title"
+        className="max-h-[85vh] w-full max-w-xl overflow-auto rounded-xl border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {body}
-      </div>
+        <header className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+          <div>
+            <h3
+              id="privacy-summary-title"
+              className="flex items-center gap-2 text-base font-semibold text-foreground"
+            >
+              <ShieldCheck className="size-5 text-sky-700" />
+              隐私与数据说明
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              以下摘要保存在应用内，无需联网即可阅读。
+            </p>
+          </div>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="关闭隐私说明">
+            <X className="size-4" />
+          </Button>
+        </header>
+
+        <div className="space-y-4 px-5 py-4 text-sm text-foreground">
+          <PrivacySummaryItem title="本地写入">
+            案件、文档索引、设置和运行日志默认写入本机应用数据目录。请自行管理设备权限、备份与删除。
+          </PrivacySummaryItem>
+          <PrivacySummaryItem title="云端 LLM / OCR">
+            只有在你配置并使用云端大模型或 OCR 时，所选材料及完成任务所需的上下文才可能发送给对应服务商处理。提交前请确认材料可外发并尽量脱敏。
+          </PrivacySummaryItem>
+          <PrivacySummaryItem title="第三方集成">
+            元典、MCP 等第三方能力仅在你配置并主动使用时连接；相关服务按各自规则处理查询内容、访问令牌和返回结果。
+          </PrivacySummaryItem>
+          <PrivacySummaryItem title="条件遥测">
+            应用不以广告追踪为目的。只有构建版本在编译时启用遥测且具备必要配置时，才会发送粗粒度运行诊断；更新检查等外部请求按你实际启用和触发的功能发生。
+          </PrivacySummaryItem>
+          <PrivacySummaryItem title="反馈不会自动发送">
+            只有你主动生成时，应用才会在桌面创建本地 Markdown 反馈文件。请先预览并移除不应外发的案件信息和个人信息，再自行决定是否通过应用外渠道发送；应用本身不自动上传反馈。
+          </PrivacySummaryItem>
+        </div>
+
+        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3">
+          <button
+            type="button"
+            onClick={() =>
+              openUrl(PRIVACY_POLICY_URL).catch((e) => console.warn("openUrl failed", e))
+            }
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-sky-700 hover:text-sky-800"
+          >
+            <ExternalLink className="size-3.5" />
+            查看完整 PRIVACY.md（需联网）
+          </button>
+          <Button type="button" size="sm" onClick={onClose}>
+            我已了解
+          </Button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function PrivacySummaryItem({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-background/60 px-3 py-2.5">
+      <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">{children}</p>
     </div>
   );
 }

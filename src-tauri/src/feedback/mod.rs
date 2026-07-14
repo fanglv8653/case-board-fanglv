@@ -1,12 +1,12 @@
 //! 用户反馈通道(2026-05-24 e · 作者拍板的"MD 文件方案")。
 //!
 //! 流程:
-//!   1. 前端调 `collect_diagnostic_info()` 拿一份"无标识"的系统快照
-//!      (版本、OS、provider、统计数字 — 永不含案件名/当事人/文档内容)
+//!   1. 前端调 `collect_diagnostic_info()` 拿一份去标识系统快照
+//!      (版本、OS、provider、统计数字、文件类型摘要和脱敏日志)
 //!   2. 前端弹窗显示快照预览 + 用户描述输入框
 //!   3. 用户确认 → 调 `save_feedback_to_desktop(snapshot, description)`
 //!   4. 拼成 MD 写到 ~/Desktop/案件看板反馈_<timestamp>.md
-//!   5. 用户手工把 MD 发给作者(微信/邮件/飞书等)
+//!   5. 用户预览后自行决定是否把 MD 发给项目维护者
 //!
 //! 隐私铁律:
 //!   - 不含案件名 / 当事人 / 案号 / 文档内容
@@ -41,7 +41,7 @@ pub struct DiagnosticInfo {
     /// 数据库聚合统计(数字,无 ID)
     pub stats: AppStats,
 
-    /// 最近失败的抽取记录(最多 5 条,只含 filename + extraction_status)
+    /// 最近失败的抽取记录；filename 仅保留扩展名级摘要。
     pub recent_failures: Vec<RecentFailure>,
 
     /// 2026-05-26 V0.1.11:Settings 关键配置(脱敏 - api_key / token 全替换成 [SET]/[EMPTY])
@@ -190,7 +190,7 @@ pub struct SettingsSnapshot {
 /// 系统级诊断(2026-05-26 V0.1.11)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
-    /// 数据目录绝对路径(脱敏前——这里 /Users/<username>/Library/... 一般不含当事人名)
+    /// 数据目录占位符；真实绝对路径不进入反馈载荷。
     pub data_dir: String,
     /// 数据目录是否可写(权限自检)
     pub data_dir_writable: bool,
@@ -268,6 +268,23 @@ fn key_status(opt: &Option<String>) -> String {
     match opt.as_deref() {
         Some(s) if !s.trim().is_empty() => "[SET]".into(),
         _ => "[EMPTY]".into(),
+    }
+}
+
+fn deidentified_file_summary(filename: &str) -> String {
+    let extension = std::path::Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 12
+                && value.chars().all(|ch| ch.is_ascii_alphanumeric())
+        })
+        .map(|value| value.to_ascii_lowercase());
+    match extension {
+        Some(extension) => format!("<document>.{}", extension),
+        None => "<document>".to_string(),
     }
 }
 
@@ -386,7 +403,7 @@ fn collect_system_info() -> SystemInfo {
         .map(|kb| kb as f64 / 1024.0 / 1024.0);
 
     SystemInfo {
-        data_dir,
+        data_dir: "<local-data-dir>".to_string(),
         data_dir_writable: writable,
         db_size_mb,
         extracts_files,
@@ -500,7 +517,7 @@ pub async fn collect(
         .into_iter()
         .map(
             |(filename, category, created_at, last_error)| RecentFailure {
-                filename,
+                filename: deidentified_file_summary(&filename),
                 category,
                 created_at,
                 last_error,
@@ -509,16 +526,30 @@ pub async fn collect(
         .collect();
 
     // 2026-05-26 V0.1.11 加:settings 脱敏快照 + 系统级 + stderr ring buffer + 前端 console
-    let settings_snapshot = build_settings_snapshot(&settings);
+    let mut settings_snapshot = build_settings_snapshot(&settings);
+    if settings_snapshot.local_model_dir.is_some() {
+        settings_snapshot.local_model_dir = Some("<local-model-dir>".to_string());
+    }
     let system_info = collect_system_info();
     let stderr_tail = crate::diagnostic_log::snapshot();
 
     // 2026-05-26 V0.1.12:最近 200 条抽取 metrics + 按 backend 聚合
     // (metrics_tail 现直接是 Vec<MetricRow>,原逐字段手抄随 B3/B8 收口删除)
-    let metrics_tail: Vec<MetricSample> = crate::db::metrics::query_recent(pool, 200)
+    let mut metrics_tail: Vec<MetricSample> = crate::db::metrics::query_recent(pool, 200)
         .await
         .unwrap_or_default();
+    for sample in &mut metrics_tail {
+        sample.filename = deidentified_file_summary(&sample.filename);
+    }
     let metrics_summary = summarize_metrics(&metrics_tail);
+
+    let console_errors = console_errors
+        .into_iter()
+        .map(|mut item| {
+            item.message = sanitize_paths(&item.message);
+            item
+        })
+        .collect();
 
     // 2026-05-27 V0.1.13+:案件 AI 助手用量统计(只取数字 + meta,**绝不**含 content)
     let chat_usage = summarize_chat_usage(pool).await.unwrap_or_default();
@@ -1352,11 +1383,11 @@ fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
     md.push('\n');
 
     md.push_str("---\n\n");
-    md.push_str("> 此反馈由 CaseBoard 自动生成,**不包含案件名、当事人、文档内容**。\n");
+    md.push_str("> 此反馈由 CaseBoard 自动生成；自动诊断不包含案件名、当事人、文档内容、完整路径或原始文件名。\n");
     md.push_str(
         "> 反馈方 ID 是匿名 UUID 前 8 位,跟用户名/邮箱无关,只用于关联「同一人多次反馈」。\n",
     );
-    md.push_str("> 把这个 MD 文件发给作者即可,无需粘贴文字。\n");
+    md.push_str("> 请先预览这个 MD 文件，再自行决定是否发送给项目维护者。\n");
 
     // 安全网:整份 MD 再过一次 sanitize_paths,兜底 stderr/console 里可能漏的路径
     sanitize_paths(&md)
@@ -1425,7 +1456,6 @@ pub(crate) fn sanitize_paths(s: &str) -> String {
             // 看 path 前一个字符是不是引号(quoted 模式下,空格不算结束)
             let is_quoted = s[..i].chars().last().map(is_quote).unwrap_or(false);
 
-            let path_start = i;
             let mut j = i + prefix_len;
             while j < len {
                 let ch = s[j..].chars().next().unwrap();
@@ -1457,14 +1487,7 @@ pub(crate) fn sanitize_paths(s: &str) -> String {
                 }
                 j += ch.len_utf8();
             }
-            let path = &s[path_start..j];
-            // basename:最后一个 `/` 之后(可能为空,如 `/Users/`)
-            let basename = path.rsplit_once('/').map(|(_, b)| b).unwrap_or("");
             out.push_str("<path>");
-            if !basename.is_empty() {
-                out.push('/');
-                out.push_str(basename);
-            }
             i = j;
         } else {
             // 不在前缀位置,推一个字符
@@ -1473,5 +1496,44 @@ pub(crate) fn sanitize_paths(s: &str) -> String {
             i += ch.len_utf8();
         }
     }
-    out
+    // Windows 绝对路径可能含用户名、案件目录和文件名。为避免空格/中文路径的
+    // 边界误判，只要一行出现盘符绝对路径，就将该行路径后的诊断细节整体收窄。
+    out.lines()
+        .map(|line| {
+            let bytes = line.as_bytes();
+            let path_start = bytes.windows(3).position(|window| {
+                window[0].is_ascii_alphabetic()
+                    && window[1] == b':'
+                    && (window[2] == b'\\' || window[2] == b'/')
+            });
+            match path_start {
+                Some(index) => format!("{}<path>", &line[..index]),
+                None => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::{deidentified_file_summary, sanitize_paths};
+
+    #[test]
+    fn feedback_filename_summary_keeps_only_safe_extension() {
+        assert_eq!(deidentified_file_summary("张三诉李四起诉状.PDF"), "<document>.pdf");
+        assert_eq!(deidentified_file_summary("当事人身份证"), "<document>");
+        assert!(!deidentified_file_summary("王某案卷.docx").contains("王某"));
+    }
+
+    #[test]
+    fn feedback_path_sanitizer_removes_unix_and_windows_identifiers() {
+        let unix = sanitize_paths("failed: /Users/lawyer/cases/张三/起诉状.pdf");
+        assert!(!unix.contains("张三"));
+        assert!(!unix.contains("起诉状"));
+        assert!(unix.contains("<path>"));
+
+        let windows = sanitize_paths(r"failed: D:\案件\李四\判决书.docx: access denied");
+        assert_eq!(windows, "failed: <path>");
+    }
 }

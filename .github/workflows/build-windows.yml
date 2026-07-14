@@ -6,6 +6,10 @@ name: Build Windows
 # macOS 的 dmg 在本机用 scripts/release.sh 打包,这里只补 Windows 包。
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "待验证的发布标签，必须严格为 v<source-version>-fanglv"
+        required: true
 
 jobs:
   build-windows:
@@ -33,6 +37,37 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Source version, license and release-boundary gate
+        run: pnpm validate:source
+
+      - name: Node logic and UI contract tests
+        run: pnpm test:logic
+
+      - name: TypeScript check
+        run: pnpm exec tsc --noEmit
+
+      - name: Vite build
+        run: pnpm build
+
+      - name: Rust check and tests
+        run: |
+          cargo check --workspace --all-targets --locked
+          cargo test --workspace --locked
+
+      - name: Require updater signing secrets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is required"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required"
+          }
+          Write-Host "Updater signing secrets are present (values not printed)."
+
       # 应用内更新签名:私钥来自仓库 Actions secret(加密存储,fork 的 PR 拿不到)。
       # 注入后 createUpdaterArtifacts 会为 NSIS 安装包生成同名 .sig 签名文件。
       # 匿名使用统计:注入 anon/publishable key(低权限,只能写 usage_events;
@@ -50,6 +85,10 @@ jobs:
       - name: Smoke run (catch startup crash)
         shell: pwsh
         run: |
+          $env:CASEBOARD_DATA_DIR = Join-Path $env:RUNNER_TEMP "caseboard-smoke-data"
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP "caseboard-smoke-webview2"
+          New-Item -ItemType Directory -Force $env:CASEBOARD_DATA_DIR | Out-Null
+          New-Item -ItemType Directory -Force $env:WEBVIEW2_USER_DATA_FOLDER | Out-Null
           Get-ChildItem target/release -Filter *.exe | ForEach-Object { Write-Host "exe: $($_.Name)" }
           $cand = @("target/release/caseboard.exe", "target/release/案件看板.exe") | Where-Object { Test-Path $_ }
           if (-not $cand) {
@@ -60,23 +99,67 @@ jobs:
           $exe = $cand | Select-Object -First 1
           if (-not $exe) { Write-Error "no runnable exe found in target/release"; exit 1 }
           Write-Host "smoke target: $exe"
-          $p = Start-Process -FilePath $exe -PassThru `
-                 -RedirectStandardError smoke-err.txt -RedirectStandardOutput smoke-out.txt
-          Start-Sleep -Seconds 12
-          if ($p.HasExited) {
-            Write-Host "==== APP EXITED EARLY (code $($p.ExitCode)) ===="
-            Write-Host "---- stderr ----"; Get-Content smoke-err.txt -ErrorAction SilentlyContinue
-            Write-Host "---- stdout ----"; Get-Content smoke-out.txt -ErrorAction SilentlyContinue
-            Write-Host "---- crash.log ----"
-            Get-Content "$env:APPDATA/CaseBoard/data/crash.log" -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse "$env:APPDATA" -Filter crash.log -ErrorAction SilentlyContinue |
-              ForEach-Object { Write-Host "found: $($_.FullName)"; Get-Content $_.FullName }
-            exit 1
-          } else {
-            Stop-Process -Id $p.Id -Force
-            Write-Host "Smoke OK — app alive after 12s"
-            Get-Content smoke-err.txt -ErrorAction SilentlyContinue | Select-Object -First 40
+          try {
+            $p = Start-Process -FilePath $exe -PassThru `
+                   -RedirectStandardError smoke-err.txt -RedirectStandardOutput smoke-out.txt
+            Start-Sleep -Seconds 12
+            if ($p.HasExited) {
+              Write-Host "APP EXITED EARLY (code $($p.ExitCode))"
+              Get-Content smoke-err.txt -ErrorAction SilentlyContinue
+              Get-Content smoke-out.txt -ErrorAction SilentlyContinue
+              Get-Content (Join-Path $env:CASEBOARD_DATA_DIR "crash.log") -ErrorAction SilentlyContinue
+              throw "isolated smoke process exited early"
+            }
+            Write-Host "Smoke OK - app alive after 12s"
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
+
+      - name: Locate exact updater artifacts
+        id: artifacts
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $expectedTag = "v$version-fanglv"
+          if ("${{ inputs.release_tag }}" -ne $expectedTag) {
+            throw "release_tag must be $expectedTag"
+          }
+          $installers = @(Get-ChildItem target/release/bundle/nsis -File -Filter "*-setup.exe")
+          $signatures = @(Get-ChildItem target/release/bundle/nsis -File -Filter "*.sig")
+          if ($installers.Count -ne 1) { throw "expected exactly one NSIS installer" }
+          if ($signatures.Count -ne 1) { throw "expected exactly one updater .sig" }
+          if ($signatures[0].FullName -ne "$($installers[0].FullName).sig") {
+            throw "updater .sig must have the exact installer basename"
+          }
+          "installer=$($installers[0].FullName)" >> $env:GITHUB_OUTPUT
+          "signature=$($signatures[0].FullName)" >> $env:GITHUB_OUTPUT
+          "artifact_dir=$($installers[0].DirectoryName)" >> $env:GITHUB_OUTPUT
+
+      - name: Verify final installer updater minisign
+        run: >-
+          cargo run --locked --manifest-path src-tauri/Cargo.toml
+          --example verify_updater_signature --
+          src-tauri/tauri.conf.json
+          "${{ steps.artifacts.outputs.signature }}"
+          "${{ steps.artifacts.outputs.installer }}"
+
+      - name: Record Authenticode status without making a false claim
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature -LiteralPath "${{ steps.artifacts.outputs.installer }}"
+          Write-Host "Authenticode status: $($signature.Status)"
+          Write-Host "Updater minisign verification above is independent from Windows Authenticode."
+          if ($signature.Status -notin @("Valid", "NotSigned")) {
+            throw "unexpected Authenticode status: $($signature.Status)"
+          }
+
+      - name: Generate validated local latest.json draft
+        run: >-
+          node scripts/release-gate.mjs --mode release
+          --tag "${{ inputs.release_tag }}"
+          --artifact-dir "${{ steps.artifacts.outputs.artifact_dir }}"
+          --base-url "https://github.com/fanglv8653/case-board-fanglv/releases/download"
+          --draft-output "${{ runner.temp }}/latest.json"
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
@@ -85,4 +168,5 @@ jobs:
           path: |
             target/release/bundle/nsis/*.exe
             target/release/bundle/nsis/*.sig
+            ${{ runner.temp }}/latest.json
           if-no-files-found: error

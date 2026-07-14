@@ -131,7 +131,7 @@ fn migrate_legacy_data_dir_if_needed(current: &Path, legacy: &Path) -> Result<()
         return Ok(());
     }
 
-    copy_dir_missing_only(&legacy, current)?;
+    copy_dir_missing_only(legacy, current)?;
     crate::dlog!(
         "[db] 已从旧数据目录 {} 复制到新数据目录 {}",
         legacy.display(),

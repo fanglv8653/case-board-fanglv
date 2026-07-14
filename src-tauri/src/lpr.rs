@@ -213,10 +213,11 @@ async fn read_html(client: &reqwest::Client, url: &str) -> Result<String, String
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
+    let user_agent = concat!("CaseBoard-LPR-Reference/", env!("CARGO_PKG_VERSION"));
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(Policy::limited(3))
-        .user_agent("CaseBoard-LPR-Reference/0.6.2")
+        .user_agent(user_agent)
         .build()
         .map_err(|e| e.to_string())
 }

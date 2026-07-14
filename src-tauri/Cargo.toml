@@ -1,6 +1,6 @@
 [package]
 name = "caseboard"
-version = "0.6.1"
+version = "0.6.2"
 description = "方律案件看板 · Fanglv CaseBoard"
 authors = ["Fanglv", "CaseBoard Contributors"]
 edition = "2021"
@@ -16,6 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+minisign-verify = "0.2.5"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }

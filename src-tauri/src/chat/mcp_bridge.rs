@@ -204,7 +204,7 @@ pub struct McpClient {
 }
 
 enum ClientInner {
-    Stdio(Mutex<McpIo>),
+    Stdio(Box<Mutex<McpIo>>),
     Http(HttpConn),
 }
 
@@ -229,7 +229,9 @@ impl McpClient {
     pub async fn connect(cfg: &McpServerConfig) -> Result<Self, String> {
         let inner = match &cfg.transport {
             McpTransport::Stdio { command, args, env } => {
-                ClientInner::Stdio(Mutex::new(connect_stdio(command, args, env).await?))
+                ClientInner::Stdio(Box::new(Mutex::new(
+                    connect_stdio(command, args, env).await?,
+                )))
             }
             McpTransport::Http { url, headers } => {
                 ClientInner::Http(HttpConn::connect(url, headers).await?)

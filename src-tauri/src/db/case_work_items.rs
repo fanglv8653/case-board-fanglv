@@ -238,6 +238,7 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<u64, String> {
 
 /// Persist only whitelisted document-extract candidates.  The fingerprint is kept in the
 /// existing external_record_id column, so a rescan updates the same pending candidate.
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_document_candidate(
     pool: &SqlitePool,
     case_id: &str,

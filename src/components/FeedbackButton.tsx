@@ -8,9 +8,9 @@
  *   4. Rust 写文件到 ~/Desktop/案件看板反馈_*.md
  *   5. Toast 提示路径 + 「在 Finder 中显示」按钮
  *
- * 隐私铁律:
- *   - 自动信息**永不含**案件名 / 当事人 / 文档内容
- *   - 匿名 client_id(UUID 前 8 位)用于关联同人多次反馈,无标识用户身份
+ * 隐私边界:
+ *   - 自动信息不包含案件名、当事人、文档内容、完整路径或原始文件名
+ *   - 稳定 client_id 的前 8 位用于关联同一安装的多次反馈
  */
 
 import { useEffect, useState } from "react";
@@ -126,7 +126,7 @@ function FeedbackModal({ onClose }: { onClose: () => void }) {
             >
               <span>
                 ▾ 自动收集的信息({Object.keys(diag).length} 项,不含案件名 /
-                当事人 / 文档内容)
+                当事人 / 文档内容 / 完整路径 / 原始文件名)
               </span>
               {showDiag ? (
                 <ChevronUp className="size-3.5" />
@@ -199,6 +199,7 @@ function SavedFeedbackPanel({
   savedPath: string;
   onClose: () => void;
 }) {
+  const savedFilename = savedPath.split(/[\\/]/).pop() ?? "案件看板反馈.md";
   return (
     <ModalShell onClose={onClose} title="反馈文件已生成">
       <div className="space-y-3">
@@ -207,14 +208,14 @@ function SavedFeedbackPanel({
           <div className="min-w-0 flex-1 text-sm">
             <p className="font-medium text-emerald-900">已保存到桌面</p>
             <p className="mt-0.5 break-all font-mono text-label text-emerald-800/80">
-              {savedPath}
+              桌面/{savedFilename}
             </p>
           </div>
         </div>
 
         <p className="text-xs text-muted-foreground">
-          反馈已保存为 Markdown 文件(不含案件名 / 当事人 / 文档内容)。点「在 Finder
-          中显示」即可手动发送给项目维护者。
+          反馈已保存为 Markdown 文件(自动诊断不含案件名 / 当事人 / 文档内容 / 完整路径 / 原始文件名)。
+          请先预览文件，再自行决定是否发送给项目维护者。
         </p>
 
         <div className="flex flex-wrap justify-end gap-2 pt-2">

@@ -168,7 +168,7 @@ pub struct Settings {
     pub kb_semantic_auto_index: Option<bool>,
 
     /// 2026-05-24 e:匿名反馈识别码(UUID v4),首次启动时自动生成 + 持久化。
-    /// 跟用户名/邮箱无关 — 作者拿到反馈 MD 后可以识别"这个 ID 之前反馈过"。
+    /// 跟用户名/邮箱无关 — 维护者拿到用户主动发送的反馈 MD 后可关联同一安装的多次反馈。
     /// 用户能在设置里清空重生成(类比换匿名 ID)。
     pub client_id: Option<String>,
 
@@ -508,7 +508,7 @@ pub fn write_settings(settings: &Settings) -> Result<(), String> {
 /// 2026-05-24 e:确保 client_id 存在(给反馈通道用的匿名识别码)。
 ///
 /// 如果 settings.client_id 为空,生成新 UUID v4 并持久化;返回最终的 client_id。
-/// 跟用户名/邮箱无关,纯随机。作者拿到反馈 MD 可识别"是否同一个人多次反馈"。
+/// 跟用户名/邮箱无关,纯随机。维护者拿到用户主动发送的反馈 MD 后可关联同一安装。
 pub fn ensure_client_id() -> Result<String, String> {
     let mut s = read_settings()?;
     if let Some(existing) = s.client_id.as_ref() {

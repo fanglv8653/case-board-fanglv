@@ -17,6 +17,7 @@ execFileSync(
     "commonjs",
     "--moduleResolution",
     "node",
+    "--rewriteRelativeImportExtensions",
     "--outDir",
     outDir,
     "--rootDir",

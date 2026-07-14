@@ -115,6 +115,7 @@ pub async fn list_batch_fields(
     .map_err(|e| e.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_extraction_candidate(
     pool: &SqlitePool,
     case_id: &str,

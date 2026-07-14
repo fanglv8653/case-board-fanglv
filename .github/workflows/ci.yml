@@ -25,6 +25,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Source version, license and release-boundary gate
+        run: pnpm validate:source
+
+      - name: Node logic and UI contract tests
+        run: pnpm test:logic
+
       - name: TypeScript check
         run: pnpm exec tsc --noEmit
 
@@ -43,16 +51,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: ". -> target"
 
-      - name: Install Tauri system deps (macOS no-op)
-        run: |
-          echo "macOS doesn't need extra Tauri system deps"
+      - name: Rust format check (release-prep files)
+        run: >-
+          rustfmt --edition 2021 --check
+          src-tauri/src/lpr.rs
+          src-tauri/examples/verify_updater_signature.rs
 
-      - name: cargo fmt --check
-        working-directory: src-tauri
-        run: cargo fmt --all -- --check
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked
 
       - name: cargo clippy
-        working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
