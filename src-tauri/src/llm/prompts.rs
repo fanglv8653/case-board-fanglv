@@ -19,10 +19,19 @@ pub fn case_fields_extraction_with_hint(
 ) -> String {
     let domain = crate::ingest::reliability::classify_domain(category, text);
     if matches!(domain, crate::ingest::reliability::Domain::Criminal) {
-        return format!(r#"你是刑事案件材料信息抽取助手。只输出 JSON，绝不把刑事材料按民事起诉状解释。
-抽取犯罪嫌疑人/被告人、被害人、委托关系、涉嫌罪名、办案机关、强制措施、羁押地点、当前阶段和关键日期；不确定填 null/[]，不得编造。
-兼容字段中 case_type 必须为\"刑事\"，court 填办案机关，cause 填涉嫌罪名，case_stage 填刑事阶段，key_dates 仅刑事程序日期。plaintiffs、defendants、third_parties、claim_amount、preservations 必须分别为 []、[]、[]、null、[]。
-文件名：{}\n文档类型：{}\n正文：\n---\n{}\n---\n只返回 JSON。"#, filename.unwrap_or(""), category.unwrap_or(""), text.trim());
+        return format!(
+            r#"你是刑事案件材料信息抽取助手。只输出 JSON，绝不把刑事材料按民事起诉状解释。
+抽取犯罪嫌疑人/被告人、被害人、涉嫌罪名、强制措施、羁押地点、当前阶段、罪名变化、量刑建议、判决刑期、量刑情节和关键日期；不确定填 null/[]，不得编造。
+兼容字段中 case_type 必须为\"刑事\"，court 填办案机关，cause 填涉嫌罪名，case_stage 填刑事阶段；plaintiffs、defendants、third_parties、claim_amount、preservations 必须分别为 []、[]、[]、null、[]。
+必须增加 criminal 对象。每个普通字段格式都是 {{"value": 值或null, "confidence": 0到1或null, "evidence": 正文短摘录或null}}。
+criminal 字段包括 document_type（仅可为起诉意见书/起诉书/判决书/裁定书/拘留通知书/逮捕通知书/取保候审决定书/认罪认罚具结书/量刑建议书/讯问笔录/其他刑事材料）、current_stage、procedure_type、suspected_charge、suspect_or_defendant_name、victim_name、detention_center、coercive_measure_type、guilty_plea_status、sentencing_recommendation、sentence_term、restitution_amount、restitution_status、victim_forgiveness、surrender_status、meritorious_service_status。
+criminal.charge_changes 是数组，每项 {{"stage":...,"charge":...,"confidence":...,"evidence":...}}；criminal.key_dates 是数组，每项 {{"event_type":...,"date":"YYYY-MM-DD", "confidence":...,"evidence":...}}。关键日期类型仅可为 detention_date、arrest_request_date、arrest_review_received_date、arrest_decision_date、arrest_date、bail_start_date、residential_surveillance_start_date、transfer_for_prosecution_date、prosecution_received_date、first_instance_accepted_date、second_instance_accepted_date、judgment_received_date、ruling_received_date、supplementary_investigation_1_date、supplementary_investigation_2_date、judgment_effective_date、death_penalty_review_start_date。
+confidence 只是识别把握度，不代表法律真实性；没有可核对原文时 evidence 填 null 并降低 confidence。
+文件名：{}\n文档类型：{}\n正文：\n---\n{}\n---\n只返回 JSON。"#,
+            filename.unwrap_or(""),
+            category.unwrap_or(""),
+            text.trim()
+        );
     }
     // 根据 category 给出有针对性的提示
     let hint = match category {

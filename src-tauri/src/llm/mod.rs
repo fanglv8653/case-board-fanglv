@@ -86,13 +86,69 @@ pub struct ExtractedFields {
     /// 电子发票字段；仅材料明确为电子发票时填写，供收入草稿同步使用。
     #[serde(default)]
     pub invoice: Option<InvoiceExtract>,
+    /// 刑事材料专用结构；仅刑事领域 prompt 填写。来源文档信息由后端补充。
+    #[serde(default)]
+    pub criminal: Option<CriminalDocumentExtraction>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CriminalExtractValue<T> {
+    pub value: Option<T>,
+    pub confidence: Option<f64>,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CriminalChargeChange {
+    pub stage: Option<String>,
+    pub charge: Option<String>,
+    pub confidence: Option<f64>,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CriminalKeyDateExtraction {
+    pub event_type: Option<String>,
+    pub date: Option<String>,
+    pub confidence: Option<f64>,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CriminalDocumentExtraction {
+    pub document_type: CriminalExtractValue<String>,
+    pub current_stage: CriminalExtractValue<String>,
+    pub procedure_type: CriminalExtractValue<String>,
+    pub suspected_charge: CriminalExtractValue<String>,
+    pub suspect_or_defendant_name: CriminalExtractValue<String>,
+    pub victim_name: CriminalExtractValue<String>,
+    pub detention_center: CriminalExtractValue<String>,
+    pub coercive_measure_type: CriminalExtractValue<String>,
+    pub guilty_plea_status: CriminalExtractValue<String>,
+    pub sentencing_recommendation: CriminalExtractValue<String>,
+    pub sentence_term: CriminalExtractValue<String>,
+    pub restitution_amount: CriminalExtractValue<f64>,
+    pub restitution_status: CriminalExtractValue<String>,
+    pub victim_forgiveness: CriminalExtractValue<String>,
+    pub surrender_status: CriminalExtractValue<String>,
+    pub meritorious_service_status: CriminalExtractValue<String>,
+    pub charge_changes: Vec<CriminalChargeChange>,
+    pub key_dates: Vec<CriminalKeyDateExtraction>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InvoiceExtract {
-    pub invoice_date: Option<String>, pub invoice_no: Option<String>, pub invoice_total: Option<f64>,
-    pub invoice_buyer: Option<String>, pub invoice_seller: Option<String>, pub invoice_type: Option<String>,
+    pub invoice_date: Option<String>,
+    pub invoice_no: Option<String>,
+    pub invoice_total: Option<f64>,
+    pub invoice_buyer: Option<String>,
+    pub invoice_seller: Option<String>,
+    pub invoice_type: Option<String>,
     pub case_clue: Option<String>,
 }
 

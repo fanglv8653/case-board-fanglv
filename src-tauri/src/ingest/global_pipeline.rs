@@ -52,6 +52,33 @@ pub async fn run_global_extract(
 ) -> GlobalExtractReport {
     let start = std::time::Instant::now();
 
+    let case_type: Option<String> = match sqlx::query_scalar("SELECT case_type FROM cases WHERE id = ?")
+        .bind(case_id)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(case_type) => case_type,
+        Err(error) => return GlobalExtractReport {
+            case_id: case_id.into(), docs_included: 0, table_ok: false, report_ok: false,
+            report_path: None, elapsed_ms: start.elapsed().as_millis(),
+            error: Some(format!("读取案件领域失败，已停止全案聚合: {error}")),
+        },
+    };
+    if matches!(
+        crate::ingest::reliability::classify_domain(case_type.as_deref(), ""),
+        crate::ingest::reliability::Domain::Criminal
+    ) {
+        return GlobalExtractReport {
+            case_id: case_id.into(),
+            docs_included: 0,
+            table_ok: true,
+            report_ok: false,
+            report_path: None,
+            elapsed_ms: start.elapsed().as_millis(),
+            error: Some("刑事案件已跳过民事全案聚合；请在刑事识别候选中审核结果".into()),
+        };
+    }
+
     // 1. 拿 done 文档清单 + extracted_text_path
     type DocRow = (String, Option<String>, Option<String>, Option<String>);
     let rows: Vec<DocRow> = match sqlx::query_as(
@@ -509,4 +536,26 @@ async fn write_table_to_cases(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod criminal_gate_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn criminal_case_never_enters_civil_global_extract() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        let case = crate::db::cases::create_case(&pool, crate::db::cases::NewCase {
+            name: "刑事分流测试".into(), case_type: "criminal".into(),
+            source_folder: format!("D:/tmp/{}", uuid::Uuid::new_v4()),
+        }).await.unwrap();
+        let config = crate::llm::LlmConfig {
+            endpoint: "http://127.0.0.1:1/v1/chat/completions".into(), model: "unused".into(),
+            api_key: None, timeout_secs: 1, temperature: 0.0,
+        };
+        let report = run_global_extract(&pool, &case.id, &config).await;
+        assert!(report.table_ok);
+        assert_eq!(report.docs_included, 0);
+        assert!(report.error.unwrap().contains("跳过民事全案聚合"));
+    }
 }

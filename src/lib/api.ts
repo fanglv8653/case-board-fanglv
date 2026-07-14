@@ -22,6 +22,11 @@ import type {
   CaseWorkItemUpsertInput,
   CriminalCaseProfile,
   CriminalCaseProfileUpsertInput,
+  CriminalExtractionCandidateBatch,
+  CriminalExtractionCandidateDetail,
+  CriminalExtractionCandidateReviewResult,
+  ConfirmCriminalExtractionCandidateBatchInput,
+  CriminalCaseReextractReport,
   CriminalDeadlineItem,
   CriminalDeadlineRefreshReport,
   CriminalDeadlineItemUpsertInput,
@@ -696,6 +701,41 @@ export function upsertCriminalCaseProfile(
   input: CriminalCaseProfileUpsertInput,
 ): Promise<CriminalCaseProfile> {
   return invoke<CriminalCaseProfile>("upsert_criminal_case_profile", { input });
+}
+
+export function listCriminalExtractionCandidates(
+  caseId: string,
+): Promise<CriminalExtractionCandidateDetail[]> {
+  return invoke<CriminalExtractionCandidateDetail[]>(
+    "list_criminal_extraction_candidates",
+    { caseId },
+  );
+}
+
+export function confirmCriminalExtractionCandidateBatch(
+  input: ConfirmCriminalExtractionCandidateBatchInput,
+): Promise<CriminalExtractionCandidateReviewResult> {
+  return invoke<CriminalExtractionCandidateReviewResult>(
+    "confirm_criminal_extraction_candidate_batch",
+    { input },
+  );
+}
+
+export function rejectCriminalExtractionCandidateBatch(
+  batchId: string,
+): Promise<CriminalExtractionCandidateBatch> {
+  return invoke<CriminalExtractionCandidateBatch>(
+    "reject_criminal_extraction_candidate_batch",
+    { batchId },
+  );
+}
+
+export function reextractCriminalCaseMaterials(
+  caseId: string,
+): Promise<CriminalCaseReextractReport> {
+  return invoke<CriminalCaseReextractReport>("reextract_criminal_case_materials", {
+    caseId,
+  });
 }
 
 export function listCaseStageItems(caseId: string): Promise<CaseStageItem[]> {

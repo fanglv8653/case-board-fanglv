@@ -31,6 +31,7 @@ pub mod contract_preferences;
 pub mod court_filing;
 pub mod credits;
 pub mod criminal_cases;
+pub mod criminal_extraction_candidates;
 pub mod document_tags;
 pub mod documents;
 pub mod income_records;

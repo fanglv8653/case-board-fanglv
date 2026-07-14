@@ -775,7 +775,40 @@ async fn upsert_criminal_case_profile(
     pool: tauri::State<'_, SqlitePool>,
     input: db::criminal_cases::UpsertCriminalCaseProfileInput,
 ) -> Result<db::criminal_cases::CriminalCaseProfile, String> {
-    db::criminal_cases::upsert_criminal_case_profile(pool.inner(), input).await
+    db::criminal_cases::upsert_criminal_case_profile_manual(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn list_criminal_extraction_candidates(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::criminal_extraction_candidates::CriminalExtractionCandidateDetail>, String> {
+    db::criminal_extraction_candidates::list_case_candidates(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn confirm_criminal_extraction_candidate_batch(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_extraction_candidates::ConfirmCandidateBatchInput,
+) -> Result<db::criminal_extraction_candidates::CandidateReviewResult, String> {
+    db::criminal_extraction_candidates::confirm_candidate_batch(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn reject_criminal_extraction_candidate_batch(
+    pool: tauri::State<'_, SqlitePool>,
+    batch_id: String,
+) -> Result<db::criminal_extraction_candidates::CriminalExtractionCandidateBatch, String> {
+    db::criminal_extraction_candidates::reject_candidate_batch(pool.inner(), &batch_id).await
+}
+
+#[tauri::command]
+async fn reextract_criminal_case_materials(
+    app: tauri::AppHandle,
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<ingest::pipeline::CriminalCaseReextractReport, String> {
+    ingest::pipeline::reextract_criminal_case_materials(app, pool.inner(), &case_id).await
 }
 
 #[tauri::command]
@@ -5555,6 +5588,10 @@ pub fn run() {
             delete_case_work_item,
             get_criminal_case_profile,
             upsert_criminal_case_profile,
+            list_criminal_extraction_candidates,
+            confirm_criminal_extraction_candidate_batch,
+            reject_criminal_extraction_candidate_batch,
+            reextract_criminal_case_materials,
             list_case_stage_items,
             upsert_case_stage_item,
             delete_case_stage_item,

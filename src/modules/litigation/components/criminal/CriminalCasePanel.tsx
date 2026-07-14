@@ -26,11 +26,15 @@ import {
   deleteCaseWorkItem,
   deleteCaseStageItem,
   deleteCriminalDeadlineItem,
+  confirmCriminalExtractionCandidateBatch,
   getCriminalCaseProfile,
   listCaseAgencyContacts,
   listCaseStageItems,
   listCaseWorkItems,
   listCriminalDeadlineItems,
+  listCriminalExtractionCandidates,
+  reextractCriminalCaseMaterials,
+  rejectCriminalExtractionCandidateBatch,
   refreshCriminalDeadlines,
   reorderCaseStageItems,
   upsertCaseAgencyContact,
@@ -48,6 +52,7 @@ import type {
   CaseWorkItemUpsertInput,
   CriminalCaseProfile,
   CriminalCaseProfileUpsertInput,
+  CriminalExtractionCandidateDetail,
   CriminalDeadlineItem,
   CriminalDeadlineItemUpsertInput,
 } from "@/lib/types";
@@ -60,6 +65,15 @@ import {
   needsApplicabilityOverrideReason,
   resolveDeadlineStageId,
 } from "./criminalTimelineRules";
+import {
+  CriminalExtractionReviewPanel,
+  type CriminalCandidateDecisionInput,
+} from "./CriminalExtractionReviewPanel";
+import {
+  valuesAreEqual,
+  parseProtectedFieldKeys,
+  type CriminalExtractionCandidateBatchView,
+} from "./criminalExtractionReviewModels";
 
 type ProfileForm = CriminalCaseProfileUpsertInput;
 type StageForm = CaseStageItemUpsertInput;
@@ -152,6 +166,9 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingList, setSavingList] = useState(false);
   const [refreshingDeadlines, setRefreshingDeadlines] = useState(false);
+  const [recognizingMaterials, setRecognizingMaterials] = useState(false);
+  const [submittingCandidateBatchId, setSubmittingCandidateBatchId] = useState<string | null>(null);
+  const [candidateBatches, setCandidateBatches] = useState<CriminalExtractionCandidateBatchView[]>([]);
   const [reorderingStages, setReorderingStages] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageForm, setStageForm] = useState<StageForm | null>(null);
@@ -182,13 +199,14 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const [profile, stageRows, deadlineRows, contactRows, workRows] =
+      const [profile, stageRows, deadlineRows, contactRows, workRows, candidateRows] =
         await Promise.all([
           getCriminalCaseProfile(caseId),
           listCaseStageItems(caseId),
           listCriminalDeadlineItems(caseId),
           listCaseAgencyContacts(caseId),
           listCaseWorkItems({ case_id: caseId }),
+          listCriminalExtractionCandidates(caseId),
         ]);
       setProfileForm(toProfileForm(caseId, profile));
       const nextChargeHistoryText = structuredListToText(
@@ -207,12 +225,78 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
       setDeadlines(deadlineRows);
       setContacts(contactRows);
       setWorkItems(workRows);
+      setCandidateBatches(toCandidateBatchViews(profile, candidateRows));
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
   }, [caseId]);
+
+  const recognizeMaterials = async () => {
+    setRecognizingMaterials(true);
+    try {
+      const report = await reextractCriminalCaseMaterials(caseId);
+      const warning = report.failed_count > 0
+        ? `，失败 ${report.failed_count} 项${report.errors.length ? `：${report.errors.join("；")}` : ""}`
+        : "";
+      toast(
+        `材料识别已启动：复用正文 ${report.cached_count} 份，安排 OCR ${report.scheduled_ocr_count} 份${warning}`,
+        report.failed_count > 0 ? "error" : "success",
+      );
+      await reload();
+    } catch (e) {
+      toast(`重新识别案件材料失败：${e}`, "error");
+    } finally {
+      setRecognizingMaterials(false);
+    }
+  };
+
+  const confirmCandidateBatch = async (
+    batchId: string,
+    expectedProfileRevision: number,
+    decisions: CriminalCandidateDecisionInput[],
+  ) => {
+    setSubmittingCandidateBatchId(batchId);
+    try {
+      const result = await confirmCriminalExtractionCandidateBatch({
+        batch_id: batchId,
+        expected_profile_revision: expectedProfileRevision,
+        decisions,
+      });
+      const protectedNote = result.protected_fields.length
+        ? `；${result.protected_fields.length} 个字段因人工保护未覆盖`
+        : "";
+      toast(`已应用 ${result.applied_fields.length} 个候选字段${protectedNote}`, "success");
+      await reload();
+    } catch (e) {
+      const message = String(e);
+      toast(
+        message.includes("revision") || message.includes("其他操作更新")
+          ? "刑事画像已变化，候选已刷新，请重新确认。"
+          : `候选确认失败：${message}`,
+        "error",
+      );
+      if (message.includes("revision") || message.includes("其他操作更新")) {
+        await reload();
+      }
+    } finally {
+      setSubmittingCandidateBatchId(null);
+    }
+  };
+
+  const rejectCandidateBatch = async (batchId: string) => {
+    setSubmittingCandidateBatchId(batchId);
+    try {
+      await rejectCriminalExtractionCandidateBatch(batchId);
+      toast("整批识别结果已拒绝", "success");
+      await reload();
+    } catch (e) {
+      toast(`整批拒绝失败：${e}`, "error");
+    } finally {
+      setSubmittingCandidateBatchId(null);
+    }
+  };
 
   useEffect(() => {
     void reload();
@@ -509,6 +593,16 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
           刑事信息加载失败：{error}
         </div>
       )}
+
+      <CriminalExtractionReviewPanel
+        batches={candidateBatches}
+        loading={loading}
+        recognizing={recognizingMaterials}
+        submittingBatchId={submittingCandidateBatchId}
+        onRecognize={recognizeMaterials}
+        onConfirm={confirmCandidateBatch}
+        onRejectBatch={rejectCandidateBatch}
+      />
 
       <Panel title="刑事画像">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -1684,6 +1778,48 @@ function EditorActions({
       </Button>
     </div>
   );
+}
+
+function toCandidateBatchViews(
+  profile: CriminalCaseProfile | null,
+  details: CriminalExtractionCandidateDetail[],
+): CriminalExtractionCandidateBatchView[] {
+  const profileValues = (profile ?? {}) as Record<string, unknown>;
+  const protectedState = parseProtectedFieldKeys(profile?.user_overrides_json);
+
+  return details.map(({ batch, fields }) => ({
+    ...batch,
+    profile_revision: profile?.profile_revision ?? 0,
+    fields: fields.map((field) => {
+      const currentValueJson = profileFieldValueJson(field.field_key, profileValues[field.field_key]);
+      return {
+        ...field,
+        current_value_json: currentValueJson,
+        is_user_protected:
+          protectedState.corrupt || protectedState.keys.has(field.field_key),
+        protection_reason: protectedState.corrupt
+          ? "人工保护记录异常，已禁止确认。请先在刑事画像中修复并保存。"
+          : protectedState.keys.has(field.field_key)
+            ? "该字段已有人工修改保护，候选不能覆盖；如需调整，请在刑事画像中手工编辑。"
+            : null,
+        has_conflict:
+          currentValueJson != null &&
+          currentValueJson !== "null" &&
+          currentValueJson !== '""' &&
+          !valuesAreEqual(currentValueJson, field.value_json),
+      };
+    }),
+  }));
+}
+
+function profileFieldValueJson(fieldKey: string, value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (fieldKey.endsWith("_json") && typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function toProfileForm(

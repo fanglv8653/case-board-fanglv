@@ -64,6 +64,7 @@ pub struct CriminalCaseProfile {
     pub extraction_meta_json: Option<String>,
     pub notes: Option<String>,
     pub user_overrides_json: Option<String>,
+    pub profile_revision: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -889,8 +890,9 @@ SELECT
     death_penalty_review_start_date,
     extraction_meta_json,
     notes,
-    user_overrides_json,
-    created_at,
+      user_overrides_json,
+      profile_revision,
+      created_at,
     updated_at
 FROM criminal_case_profiles
 "#;
@@ -989,7 +991,43 @@ pub async fn upsert_criminal_case_profile(
     pool: &SqlitePool,
     input: UpsertCriminalCaseProfileInput,
 ) -> Result<CriminalCaseProfile, String> {
+    upsert_criminal_case_profile_impl(pool, input, false).await
+}
+
+/// 刑事详情页人工保存入口：整行画像、人工保护集与 revision 在同一事务提交。
+pub async fn upsert_criminal_case_profile_manual(
+    pool: &SqlitePool,
+    input: UpsertCriminalCaseProfileInput,
+) -> Result<CriminalCaseProfile, String> {
+    upsert_criminal_case_profile_impl(pool, input, true).await
+}
+
+async fn upsert_criminal_case_profile_impl(
+    pool: &SqlitePool,
+    input: UpsertCriminalCaseProfileInput,
+    manual: bool,
+) -> Result<CriminalCaseProfile, String> {
     let computed = compute_criminal_case_profile_input(input)?;
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let old = if manual {
+        let sql = format!("{PROFILE_SELECT} WHERE case_id = ?");
+        sqlx::query_as::<_, CriminalCaseProfile>(&sql)
+            .bind(&computed.case_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+    let mut overrides = if manual {
+        match old.as_ref().and_then(|p| p.user_overrides_json.as_deref()) {
+            Some(raw) => serde_json::from_str::<serde_json::Value>(raw)
+                .map_err(|e| format!("人工覆盖记录损坏，已停止保存: {e}"))?,
+            None => serde_json::json!({"fields": {}}),
+        }
+    } else {
+        serde_json::Value::Null
+    };
     sqlx::query(
         "INSERT INTO criminal_case_profiles (
             case_id, current_stage, procedure_type, case_subtype, defense_role,
@@ -1099,13 +1137,124 @@ pub async fn upsert_criminal_case_profile(
     .bind(&computed.extraction_meta_json)
     .bind(&computed.notes)
     .bind(&computed.user_overrides_json)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
-    get_criminal_case_profile(pool, &computed.case_id)
-        .await?
-        .ok_or_else(|| "刑事画像写入后读取失败".to_string())
+    let sql = format!("{PROFILE_SELECT} WHERE case_id = ?");
+    let mut saved = sqlx::query_as::<_, CriminalCaseProfile>(&sql)
+        .bind(&computed.case_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "刑事画像写入后读取失败".to_string())?;
+    if manual {
+        saved =
+            apply_manual_profile_protection(&mut tx, old.as_ref(), saved, &mut overrides).await?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(saved)
+}
+
+async fn apply_manual_profile_protection(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    old: Option<&CriminalCaseProfile>,
+    mut saved: CriminalCaseProfile,
+    overrides: &mut serde_json::Value,
+) -> Result<CriminalCaseProfile, String> {
+    let object = overrides
+        .as_object_mut()
+        .ok_or_else(|| "人工覆盖记录必须是 JSON 对象，已停止保存".to_string())?;
+    let fields = object
+        .entry("fields")
+        .or_insert_with(|| serde_json::json!({}));
+    let fields = fields
+        .as_object_mut()
+        .ok_or_else(|| "人工覆盖记录 fields 必须是对象，已停止保存".to_string())?;
+
+    let old_value = old
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let saved_value = serde_json::to_value(&saved).map_err(|e| e.to_string())?;
+    const MANUAL_FIELDS: &[&str] = &[
+        "current_stage",
+        "procedure_type",
+        "case_subtype",
+        "defense_role",
+        "suspected_charge",
+        "suspect_or_defendant_name",
+        "victim_name",
+        "client_name",
+        "client_relationship",
+        "detention_center",
+        "coercive_measure_type",
+        "detention_date",
+        "arrest_request_date",
+        "arrest_review_received_date",
+        "arrest_decision_date",
+        "arrest_date",
+        "bail_start_date",
+        "residential_surveillance_start_date",
+        "transfer_for_prosecution_date",
+        "prosecution_received_date",
+        "first_instance_accepted_date",
+        "second_instance_accepted_date",
+        "judgment_received_date",
+        "ruling_received_date",
+        "stage_sort_mode",
+        "guilty_plea_status",
+        "sentencing_recommendation",
+        "sentence_term",
+        "charge_history_json",
+        "restitution_amount",
+        "restitution_status",
+        "victim_forgiveness",
+        "surrender_status",
+        "meritorious_service_status",
+        "co_defendants_json",
+        "supplementary_investigation_1_date",
+        "supplementary_investigation_2_date",
+        "judgment_effective_date",
+        "death_penalty_review_start_date",
+        "notes",
+    ];
+    let mut changed = false;
+    for key in MANUAL_FIELDS {
+        let before = old_value
+            .get(*key)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let after = saved_value
+            .get(*key)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if before != after {
+            fields.insert(
+                (*key).to_string(),
+                serde_json::json!({
+                    "value": after,
+                    "source": "manual",
+                    "updated_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            changed = true;
+        }
+    }
+    let next_revision = old.map_or(0, |p| p.profile_revision) + i64::from(changed);
+    sqlx::query(
+        "UPDATE criminal_case_profiles SET user_overrides_json=?, profile_revision=?, updated_at=datetime('now') WHERE case_id=?",
+    )
+    .bind(serde_json::to_string(overrides).map_err(|e| e.to_string())?)
+    .bind(next_revision)
+    .bind(&saved.case_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    saved.user_overrides_json = Some(serde_json::to_string(overrides).map_err(|e| e.to_string())?);
+    saved.profile_revision = next_revision;
+    Ok(saved)
 }
 
 pub async fn list_case_stage_items(
@@ -2005,6 +2154,28 @@ mod tests {
             .items
             .iter()
             .any(|item| item.rule_code.as_deref() == Some("CRIM_FAST_TRACK_10D")));
+    }
+
+    #[tokio::test]
+    async fn manual_profile_save_tracks_changes_and_explicit_null_in_one_revision() {
+        let pool = crate::db::init_pool(":memory:").await.expect("migrate database");
+        let case_id = test_case(&pool).await;
+        let original_overrides = r#"{"fields":{"legacy_key":{"value":"keep"}},"unknown":"keep"}"#;
+        upsert_criminal_case_profile(&pool, UpsertCriminalCaseProfileInput {
+            case_id: case_id.clone(), current_stage: Some("侦查".into()), suspected_charge: Some("盗窃罪".into()),
+            user_overrides_json: Some(original_overrides.into()), ..Default::default()
+        }).await.unwrap();
+        let saved = upsert_criminal_case_profile_manual(&pool, UpsertCriminalCaseProfileInput {
+            case_id, current_stage: None, suspected_charge: Some("诈骗罪".into()),
+            user_overrides_json: Some(original_overrides.into()), ..Default::default()
+        }).await.unwrap();
+        assert_eq!(saved.profile_revision, 1);
+        assert!(saved.current_stage.is_none());
+        let overrides: serde_json::Value = serde_json::from_str(saved.user_overrides_json.as_deref().unwrap()).unwrap();
+        assert_eq!(overrides["unknown"], "keep");
+        assert!(overrides["fields"].get("legacy_key").is_some());
+        assert_eq!(overrides["fields"]["current_stage"]["value"], serde_json::Value::Null);
+        assert_eq!(overrides["fields"]["suspected_charge"]["value"], "诈骗罪");
     }
 
     #[tokio::test]

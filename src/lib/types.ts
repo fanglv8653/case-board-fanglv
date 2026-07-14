@@ -377,6 +377,7 @@ export interface CriminalCaseProfile {
   extraction_meta_json: string | null;
   notes: string | null;
   user_overrides_json: string | null;
+  profile_revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -466,6 +467,76 @@ export interface CaseStageItemUpsertInput {
   raw_payload_json?: string | null;
   notes?: string | null;
   sort_order?: number | null;
+}
+
+export interface CriminalExtractionCandidateBatch {
+  id: string;
+  case_id: string;
+  source_document_id: string | null;
+  source_filename: string;
+  document_type: string | null;
+  model_name: string;
+  schema_version: string;
+  source_fingerprint: string;
+  result_fingerprint: string;
+  technical_status: "success" | "partial" | "failed";
+  review_status:
+    | "pending"
+    | "partially_confirmed"
+    | "confirmed"
+    | "rejected"
+    | "superseded";
+  warning_json: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  reviewed_at: string | null;
+}
+
+export interface CriminalExtractionCandidateField {
+  id: string;
+  batch_id: string;
+  field_key: string;
+  value_json: string;
+  source_document_id: string | null;
+  source_filename: string;
+  evidence_excerpt: string | null;
+  confidence: number | null;
+  review_status: "pending" | "accepted" | "rejected" | "protected";
+  decision_note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CriminalExtractionCandidateDetail {
+  batch: CriminalExtractionCandidateBatch;
+  fields: CriminalExtractionCandidateField[];
+}
+
+export interface CriminalExtractionCandidateDecision {
+  field_key: string;
+  decision: "accept" | "reject";
+  note?: string | null;
+}
+
+export interface ConfirmCriminalExtractionCandidateBatchInput {
+  batch_id: string;
+  expected_profile_revision: number;
+  decisions: CriminalExtractionCandidateDecision[];
+}
+
+export interface CriminalExtractionCandidateReviewResult {
+  batch: CriminalExtractionCandidateBatch;
+  profile_revision: number;
+  applied_fields: string[];
+  protected_fields: string[];
+}
+
+export interface CriminalCaseReextractReport {
+  cached_count: number;
+  scheduled_ocr_count: number;
+  failed_count: number;
+  errors: string[];
 }
 
 export interface ReorderCaseStageItemsInput {
