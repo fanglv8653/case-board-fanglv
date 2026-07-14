@@ -14,6 +14,8 @@ import { Calendar } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import { CalculatorDisclaimer } from "./ui";
+
 import {
   addDaysIso,
   diffDaysIso,
@@ -149,6 +151,7 @@ function IntervalPanel() {
             <StatItem label="月" value={String(result.months)} />
             <StatItem label="年" value={result.years} />
           </dl>
+          <CalculatorDisclaimer />
         </div>
       ) : (
         <Placeholder>选择两个日期开始计算</Placeholder>
@@ -234,6 +237,7 @@ function CalcPanel() {
               </>
             )}
           </p>
+          <CalculatorDisclaimer />
         </div>
       ) : (
         <Placeholder>选择起始日期开始推算</Placeholder>

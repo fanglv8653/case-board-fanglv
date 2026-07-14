@@ -5,7 +5,7 @@
  *   - 残疾/死亡赔偿金:人身损害赔偿解释第 12/15 条;年限按 20 年,60 岁起每岁减 1 年,75 岁以上按 5 年
  *   - 伤残系数:1 级 100% … 10 级 10%(实务工具化口径)
  *   - 丧葬费:解释第 14 条,上年度职工月平均工资 × 6
- *   - 被扶养人生活费:解释第 16/17 条,**计入残疾/死亡赔偿金、只计一次**(不重复加总);多人年总额不超人均消费支出(见依据,需律师复核)
+ *   - 被扶养人生活费:解释第 16/17 条,**计入残疾/死亡赔偿金、只计一次**(不重复加总);多人按剩余年限分段应用年度消费支出上限
  *   - 交强险/商业险/侵权人:民法典第 1213 条等;此处「总损失 / 尚需主张」为简化估算,严格顺序见依据
  *   - 营养费、精神损害抚慰金:由用户按医嘱/酌定输入,不写死(解释第 11 条、民法典第 1183 条)
  * 地区标准(人均可支配收入/人均消费支出/职工月平均工资)由用户填本地现行值,不内置易过期省份数据。
@@ -65,6 +65,8 @@ export interface TrafficResult {
   disabilityComp: number; // 残疾赔偿金
   deathComp: number; // 死亡赔偿金
   dependentComp: number; // 被扶养人生活费(计入上面,单列展示)
+  dependentCompUncapped: number; // 多人年度封顶前金额
+  dependentCapApplied: boolean;
   funeralComp: number;
   itemsSubtotal: number; // 实际费用各项小计(医疗等)
   materialSubtotal: number; // 物质损失合计(含残疾/死亡/被扶养/丧葬)
@@ -73,6 +75,70 @@ export interface TrafficResult {
   claimTotal: number; // 责任比例后合计(物质 + 精神)
   insurancePaid: number;
   remaining: number; // 尚需向侵权人主张(简化估算)
+}
+
+export interface DependentCompensationResult {
+  uncapped: number;
+  capped: number;
+  capApplied: boolean;
+}
+
+/**
+ * 被扶养人生活费按剩余扶养年限分段合并。
+ *
+ * 单人年度份额先乘丧失劳动能力程度并除以其他扶养义务人数；同一时段的
+ * 多人年度份额相加后，以人均消费支出为年度上限。按年限边界分段可兼容
+ * 1.5 年等小数年限，且不会把伤残系数再次错误套到年度上限。
+ */
+export function calculateDependentCompensation(
+  perCapitaConsumption: number,
+  lossOfCapacityCoef: number,
+  dependents: Dependent[],
+): DependentCompensationResult {
+  const consumption = Math.max(0, perCapitaConsumption);
+  const coef = Math.max(0, lossOfCapacityCoef);
+  if (!(consumption > 0) || !(coef > 0)) {
+    return { uncapped: 0, capped: 0, capApplied: false };
+  }
+
+  const normalized = dependents
+    .map((dependent) => ({
+      years: Number.isFinite(dependent.years) ? Math.max(0, dependent.years) : 0,
+      supporters:
+        Number.isFinite(dependent.supporters) && dependent.supporters > 0
+          ? dependent.supporters
+          : 1,
+    }))
+    .filter((dependent) => dependent.years > 0);
+
+  const uncapped = normalized.reduce(
+    (sum, dependent) =>
+      sum + (consumption * dependent.years * coef) / dependent.supporters,
+    0,
+  );
+
+  const boundaries = Array.from(
+    new Set([0, ...normalized.map((dependent) => dependent.years)]),
+  ).sort((a, b) => a - b);
+  let capped = 0;
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    const annualCombined = normalized.reduce(
+      (sum, dependent) =>
+        dependent.years > start
+          ? sum + (consumption * coef) / dependent.supporters
+          : sum,
+      0,
+    );
+    capped += Math.min(consumption, annualCombined) * (end - start);
+  }
+
+  return {
+    uncapped,
+    capped,
+    capApplied: capped + 1e-8 < uncapped,
+  };
 }
 
 /** 赔偿年限:≤60 → 20;60–75 → 20-(age-60);≥75 → 5。 */
@@ -107,14 +173,12 @@ export function calculateTraffic(input: TrafficInput): TrafficResult {
 
   // 被扶养人生活费:逐人 = 人均消费支出 × 抚养年限 × 系数 / 扶养义务人数;伤残按系数、死亡按 1。
   const depCoef = input.isDeath ? 1 : input.isDisability ? coef : 0;
-  const dependentComp =
-    input.perCapitaConsumption > 0 && depCoef > 0
-      ? input.dependents.reduce((sum, d) => {
-          const sup = d.supporters > 0 ? d.supporters : 1;
-          const yrs = d.years > 0 ? d.years : 0;
-          return sum + (input.perCapitaConsumption * yrs * depCoef) / sup;
-        }, 0)
-      : 0;
+  const dependentResult = calculateDependentCompensation(
+    input.perCapitaConsumption,
+    depCoef,
+    input.dependents,
+  );
+  const dependentComp = dependentResult.capped;
 
   const funeralComp = input.useFuneralAuto
     ? Math.max(0, input.avgMonthlyWage) * 6
@@ -151,6 +215,8 @@ export function calculateTraffic(input: TrafficInput): TrafficResult {
     disabilityComp,
     deathComp,
     dependentComp,
+    dependentCompUncapped: dependentResult.uncapped,
+    dependentCapApplied: dependentResult.capApplied,
     funeralComp,
     itemsSubtotal,
     materialSubtotal,

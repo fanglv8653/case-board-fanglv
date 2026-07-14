@@ -8,7 +8,7 @@
 
 import { useMemo, useState } from "react";
 
-import { DetailRow } from "./ui";
+import { CalculatorDisclaimer, DetailRow } from "./ui";
 import { LegalBasisButton, LegalBasisModal } from "../components/LegalBasisModal";
 import { TRAFFIC_ACCIDENT_BASIS } from "../lib/legalBasisData";
 import { calculateTraffic, formatYuan } from "../lib/trafficAccident";
@@ -216,7 +216,8 @@ export function TrafficAccidentCompensationCalculator() {
             + 添加被扶养人
           </button>
           <p className="mt-1 text-[10px] text-muted-foreground">
-            伤残按伤残系数、死亡按全额计;多人年总额不超人均消费支出(见依据,需复核)。
+            伤残按伤残系数、死亡按全额计；系统按剩余年限分段合并，并自动应用多人年度上限。
+            仍需核对扶养年限、扶养义务人数和适用统计口径。
           </p>
         </Section>
       )}
@@ -289,7 +290,22 @@ export function TrafficAccidentCompensationCalculator() {
             />
           )}
           {result.dependentComp > 0 && (
-            <DetailRow label="被扶养人生活费(已计入,单列)" value={formatYuan(result.dependentComp)} />
+            <>
+              <DetailRow
+                label="被扶养人生活费(年度封顶前)"
+                value={formatYuan(result.dependentCompUncapped)}
+              />
+              <DetailRow
+                label="被扶养人生活费(年度封顶后·已计入)"
+                value={formatYuan(result.dependentComp)}
+              />
+              {result.dependentCapApplied && (
+                <DetailRow
+                  label="多人年度上限调减"
+                  value={`− ${formatYuan(result.dependentCompUncapped - result.dependentComp)}`}
+                />
+              )}
+            </>
           )}
           {isDeath && <DetailRow label="丧葬费" value={formatYuan(result.funeralComp)} />}
           <DetailRow label="物质损失合计" value={formatYuan(result.materialSubtotal)} strong />
@@ -305,6 +321,7 @@ export function TrafficAccidentCompensationCalculator() {
           估算口径:被扶养人生活费已计入残疾/死亡赔偿金只计一次;精神损害单列(酌定、非确定给付);
           保险按「已赔扣减」简化,严格交强险先行→商业险→侵权人按责顺序见「计算依据」。地区标准请填本地现行公布值。
         </p>
+        <CalculatorDisclaimer />
       </div>
 
       <LegalBasisModal

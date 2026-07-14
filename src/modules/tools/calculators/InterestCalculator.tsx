@@ -10,11 +10,17 @@
  * 法律依据:利息 / 执行款 两套独立弹窗。
  */
 
-import { useState } from "react";
-import { Check, Copy, Plus, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Copy, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { DetailRow, TabBtn } from "./ui";
+import {
+  getLprSnapshot,
+  openUrl,
+  refreshLprData,
+  type LprSnapshot,
+} from "@/lib/api";
+import { CalculatorDisclaimer, DetailRow, TabBtn } from "./ui";
 
 import {
   LegalBasisButton,
@@ -38,11 +44,28 @@ import {
   type RateType,
   type Repayment,
 } from "../lib/interestCalc";
-import type { LprTerm } from "../lib/lprData";
+import {
+  applyCachedLprPoints,
+  LPR_DATA,
+  PBOC_LPR_SOURCE_URL,
+  type LprTerm,
+} from "../lib/lprData";
 import { numberToChineseUppercase } from "../lib/numberToChinese";
 import { todayIso } from "../lib/dateMath";
 
 type Mode = "interest" | "execution";
+
+interface LprViewState {
+  latestDate: string;
+  latest1y: number;
+  latest5y: number;
+  sourceUrl: string;
+  lastSuccessAt: string | null;
+  origin: "official_cache" | "builtin";
+  stale: boolean;
+  message: string | null;
+  failed: boolean;
+}
 
 export function InterestCalculator({
   prefill,
@@ -56,6 +79,63 @@ export function InterestCalculator({
   const [basisOpen, setBasisOpen] = useState<null | "interest" | "execution">(
     null,
   );
+  const [lprState, setLprState] = useState<LprViewState>(() =>
+    makeLprViewState(null),
+  );
+  const [refreshingLpr, setRefreshingLpr] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getLprSnapshot()
+      .then((snapshot) => {
+        if (cancelled) return;
+        applyCachedLprPoints(snapshot.points);
+        setLprState(
+          makeLprViewState(
+            snapshot,
+            snapshot.last_error
+              ? `上次更新失败，使用截至 ${latestRuntimePoint().date} 的本地数据`
+              : null,
+            Boolean(snapshot.last_error),
+          ),
+        );
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLprState(
+          makeLprViewState(
+            null,
+            `读取官方缓存失败，使用截至 ${latestRuntimePoint().date} 的内置基线`,
+            true,
+          ),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleRefreshLpr = async () => {
+    setRefreshingLpr(true);
+    try {
+      const result = await refreshLprData();
+      applyCachedLprPoints(result.snapshot.points);
+      const latestDate = latestRuntimePoint().date;
+      const failed = result.status === "fallback";
+      const message = failed
+        ? `更新失败，使用截至 ${latestDate} 的本地数据`
+        : result.warning;
+      setLprState(makeLprViewState(result.snapshot, message, failed));
+    } catch {
+      setLprState((current) => ({
+        ...current,
+        failed: true,
+        message: `更新失败，使用截至 ${current.latestDate} 的本地数据`,
+      }));
+    } finally {
+      setRefreshingLpr(false);
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -85,6 +165,12 @@ export function InterestCalculator({
         </LegalBasisButton>
       </div>
 
+      <LprDataStatus
+        state={lprState}
+        refreshing={refreshingLpr}
+        onRefresh={handleRefreshLpr}
+      />
+
       {mode === "interest" ? (
         <InterestPanel prefill={prefill} />
       ) : (
@@ -104,6 +190,119 @@ export function InterestCalculator({
         sections={EXECUTION_BASIS}
       />
     </div>
+  );
+}
+
+function latestRuntimePoint() {
+  const latest = LPR_DATA[LPR_DATA.length - 1];
+  if (!latest) throw new Error("LPR运行数据为空");
+  return latest;
+}
+
+function makeLprViewState(
+  snapshot: LprSnapshot | null,
+  message: string | null = null,
+  failed = false,
+): LprViewState {
+  const latest = latestRuntimePoint();
+  const cachedLatest = snapshot?.points.find(
+    (point) => point.publication_date === latest.date,
+  );
+  return {
+    latestDate: latest.date,
+    latest1y: latest.lpr1y,
+    latest5y: latest.lpr5y,
+    sourceUrl: cachedLatest?.source_url || PBOC_LPR_SOURCE_URL,
+    lastSuccessAt: snapshot?.last_success_at ?? null,
+    origin: cachedLatest ? "official_cache" : "builtin",
+    stale: snapshot ? shouldShowStale(snapshot.stale) : false,
+    message,
+    failed,
+  };
+}
+
+function shouldShowStale(backendStale: boolean, now = new Date()): boolean {
+  if (!backendStale) return false;
+  const beijing = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  const day = beijing.getUTCDate();
+  const hour = beijing.getUTCHours();
+  return day > 20 || (day === 20 && hour >= 10);
+}
+
+function formatUpdateTime(value: string | null): string {
+  if (!value) return "尚无官方缓存更新记录";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN");
+}
+
+function LprDataStatus({
+  state,
+  refreshing,
+  onRefresh,
+}: {
+  state: LprViewState;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="rounded-md border border-border bg-card px-4 py-3 text-xs">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-medium text-foreground">LPR 数据状态</p>
+            <span className="rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground">
+              {state.origin === "official_cache" ? "当前使用官方缓存" : "当前使用内置基线"}
+            </span>
+            {state.stale && (
+              <span className="text-[10px] text-amber-700">本月尚无已核验新公布点</span>
+            )}
+          </div>
+          <p className="text-muted-foreground">
+            最新公布日 <span className="font-mono text-foreground">{state.latestDate}</span>
+            {" · "}1 年期 <span className="font-mono text-foreground">{state.latest1y}%</span>
+            {" · "}5 年期以上 <span className="font-mono text-foreground">{state.latest5y}%</span>
+          </p>
+          <p className="text-muted-foreground">
+            来源：
+            <button
+              type="button"
+              onClick={() =>
+                void openUrl(state.sourceUrl).catch((error) =>
+                  console.warn("openUrl failed", error),
+                )
+              }
+              className="text-foreground underline underline-offset-2"
+            >
+              中国人民银行官方公告
+            </button>
+            {" · "}上次成功更新：{formatUpdateTime(state.lastSuccessAt)}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={refreshing}
+          onClick={onRefresh}
+          className="h-8 gap-1 text-xs"
+        >
+          <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          {refreshing ? "正在更新" : "从人民银行更新"}
+        </Button>
+      </div>
+      {state.message && (
+        <p
+          role="status"
+          className={`mt-2 rounded border px-2.5 py-1.5 ${
+            state.failed
+              ? "border-red-300 bg-red-50 text-red-800"
+              : "border-amber-300 bg-amber-50 text-amber-900"
+          }`}
+        >
+          {state.message}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -273,6 +472,7 @@ function InterestPanel({ prefill }: { prefill?: InterestPrefill | null } = {}) {
               </div>
             )}
           </div>
+          <CalculatorDisclaimer />
         </div>
       )}
     </div>
@@ -1073,6 +1273,7 @@ function ExecResultMerged({
         <AmountHeadline label="多案合并 · 应付总额" amount={result.total} />
       </div>
       <BreakdownDl result={result} />
+      <CalculatorDisclaimer />
     </div>
   );
 }
@@ -1090,6 +1291,7 @@ function ExecResultSingle({
         <AmountHeadline label={`${caseInfo.name} · 应付总额`} amount={result.total} size="sm" />
       </div>
       <BreakdownDl result={result} />
+      <CalculatorDisclaimer />
     </div>
   );
 }

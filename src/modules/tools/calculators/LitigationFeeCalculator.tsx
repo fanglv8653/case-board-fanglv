@@ -11,7 +11,7 @@
 
 import { useMemo, useState } from "react";
 
-import { DetailRow, TabBtn } from "./ui";
+import { CalculatorDisclaimer, DetailRow, TabBtn } from "./ui";
 
 import {
   LegalBasisButton,
@@ -118,6 +118,9 @@ function DivorcePanel() {
 
   return (
     <div className="space-y-4">
+      <div className="rounded-md border border-amber-300/70 bg-amber-50/70 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+        离婚案件法定基础受理费为每件 50–300 元；本计算器当前按 200 元估算，实际以受理法院及所在地具体标准为准。
+      </div>
       <Checkbox
         checked={hasSplit}
         onChange={setHasSplit}
@@ -186,6 +189,7 @@ function ResultDisplay({
           <DetailRow label="合计" value={formatFeeYuan(total)} strong />
         </dl>
       )}
+      <CalculatorDisclaimer />
     </div>
   );
 }

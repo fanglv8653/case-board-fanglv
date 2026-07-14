@@ -8,7 +8,7 @@
  *   - calcExecution: 多案合并 / 单独计算的入口
  */
 
-import { getLprForDate, LPR_DATA, type LprTerm } from "./lprData";
+import { getLprForDate, LPR_DATA, type LprTerm } from "./lprData.ts";
 
 /* ============================ 基础工具 ============================ */
 

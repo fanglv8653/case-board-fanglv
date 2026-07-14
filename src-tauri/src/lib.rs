@@ -18,6 +18,7 @@ pub mod ingest;
 pub mod lifecycle;
 pub mod llm;
 pub mod local_kb;
+pub mod lpr;
 pub mod proc_util;
 // 私人专属功能 Rust 侧(双轨发布模型)。开源仓此文件为桩(命令返回 Err),照样编译。
 pub mod case_bundle;
@@ -5501,6 +5502,7 @@ pub fn run() {
 
             // 团队版:已配置团队 → 后台启动监听+广播+周期同步(失败只记日志不阻启动)
             let team_pool = pool.clone();
+            let lpr_pool = pool.clone();
             app.manage(pool);
             // chat 模块全局 cancel 注册表(V0.1.13+)
             app.manage(chat::ChatCancelRegistry::default());
@@ -5523,6 +5525,9 @@ pub fn run() {
             // 匿名使用遥测(只在编译期注入了 key 的 release 构建启用;dev/test 静默)。
             // fire-and-forget,失败不影响启动。
             telemetry::start();
+
+            // LPR 官方数据按北京时间到期策略后台刷新；失败只保留本地缓存，不阻塞启动。
+            lpr::spawn_startup_refresh(lpr_pool);
 
             // V0.3:老版本(1.x)升级 / 新装用户兜底自动创建本地知识库,让「越用越省钱」
             // (法规/案例自动写回 + 本地命中)开箱即用。独立线程跑(含 FS IO + 可能的 macOS
@@ -5548,6 +5553,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            lpr::get_lpr_snapshot,
+            lpr::refresh_lpr_data,
             scan_case_folder,
             import_case_folder,
             plan_import_folder,

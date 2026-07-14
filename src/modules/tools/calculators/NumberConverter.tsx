@@ -11,6 +11,8 @@ import { Check, Copy, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+import { CalculatorDisclaimer } from "./ui";
+
 import {
   numberToChineseReadout,
   numberToChineseUppercase,
@@ -146,6 +148,7 @@ export function NumberConverter() {
         >
           {upper || "请输入金额"}
         </div>
+        {upper && <CalculatorDisclaimer />}
       </div>
 
       {/* 普通读法 */}

@@ -10,10 +10,13 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
 
+import { openUrl } from "@/lib/api";
+
 /* ============================ 数据结构 ============================ */
 export type Block =
   | { type: "para"; text: string }
   | { type: "citation"; text: string } // 小字灰色,引用法条出处
+  | { type: "link"; text: string; href: string }
   | { type: "strong"; text: string }
   | { type: "table"; headers: string[]; rows: (string | { strong: string })[][] }
   | { type: "note"; text: string }; // 比 citation 更小的尾注
@@ -117,6 +120,20 @@ function BlockRenderer({ block }: { block: Block }) {
         <p className="text-label leading-relaxed text-muted-foreground">
           —— {block.text}
         </p>
+      );
+    case "link":
+      return (
+        <button
+          type="button"
+          onClick={() =>
+            void openUrl(block.href).catch((error) =>
+              console.warn("openUrl failed", error),
+            )
+          }
+          className="block break-all text-left text-label text-foreground underline underline-offset-2"
+        >
+          {block.text}
+        </button>
       );
     case "note":
       return (

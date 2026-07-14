@@ -1,10 +1,9 @@
 /**
- * LPR 历史数据 + 查询函数 — 100% 移植自 lawtools.top/interest.html。
+ * LPR 离线基线与运行时数据。
  *
- * 数据从 2019-08-20(中国人民银行公布 LPR 新机制起点)到 2026-06-22,
- * 每月一档,80 个数据点。日期对应公布日,利率适用于其后至下次公布前。
- *
- * 维护:每月 20 日左右人民银行公布最新 LPR,需要在数组末尾追加一条。
+ * 内置基线共 83 个公布点，从 2019-08-20 到已核实的 2026-06-22。
+ * 它用于离线计算，不因历史迁移来源而当然视为官方实时数据；运行时会把
+ * 后端保存的人民银行官方缓存按发布日期覆盖进来。
  */
 
 export interface LprPoint {
@@ -13,7 +12,16 @@ export interface LprPoint {
   lpr5y: number; // 5 年期以上 LPR(%)
 }
 
-export const LPR_DATA: LprPoint[] = [
+export interface CachedLprPoint {
+  publication_date: string;
+  lpr_1y: number;
+  lpr_5y: number;
+}
+
+export const PBOC_LPR_SOURCE_URL =
+  "https://www.pbc.gov.cn/zhengcehuobisi/125207/125213/125440/3876551/index.html";
+
+export const BUILTIN_LPR_DATA: readonly LprPoint[] = [
   { date: "2019-08-20", lpr1y: 4.25, lpr5y: 4.85 },
   { date: "2019-09-20", lpr1y: 4.2, lpr5y: 4.85 },
   { date: "2019-10-21", lpr1y: 4.2, lpr5y: 4.85 },
@@ -24,10 +32,10 @@ export const LPR_DATA: LprPoint[] = [
   { date: "2020-03-20", lpr1y: 4.05, lpr5y: 4.75 },
   { date: "2020-04-20", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2020-05-20", lpr1y: 3.85, lpr5y: 4.65 },
-  { date: "2020-06-20", lpr1y: 3.85, lpr5y: 4.65 },
+  { date: "2020-06-22", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2020-07-20", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2020-08-20", lpr1y: 3.85, lpr5y: 4.65 },
-  { date: "2020-09-20", lpr1y: 3.85, lpr5y: 4.65 },
+  { date: "2020-09-21", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2020-10-20", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2020-11-20", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2020-12-21", lpr1y: 3.85, lpr5y: 4.65 },
@@ -39,7 +47,7 @@ export const LPR_DATA: LprPoint[] = [
   { date: "2021-06-21", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2021-07-20", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2021-08-20", lpr1y: 3.85, lpr5y: 4.65 },
-  { date: "2021-09-20", lpr1y: 3.85, lpr5y: 4.65 },
+  { date: "2021-09-22", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2021-10-20", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2021-11-22", lpr1y: 3.85, lpr5y: 4.65 },
   { date: "2021-12-20", lpr1y: 3.8, lpr5y: 4.65 },
@@ -70,13 +78,13 @@ export const LPR_DATA: LprPoint[] = [
   { date: "2024-01-22", lpr1y: 3.45, lpr5y: 4.2 },
   { date: "2024-02-20", lpr1y: 3.45, lpr5y: 3.95 },
   { date: "2024-03-20", lpr1y: 3.45, lpr5y: 3.95 },
-  { date: "2024-04-20", lpr1y: 3.45, lpr5y: 3.95 },
+  { date: "2024-04-22", lpr1y: 3.45, lpr5y: 3.95 },
   { date: "2024-05-20", lpr1y: 3.45, lpr5y: 3.95 },
   { date: "2024-06-20", lpr1y: 3.45, lpr5y: 3.95 },
   { date: "2024-07-22", lpr1y: 3.35, lpr5y: 3.85 },
   { date: "2024-08-20", lpr1y: 3.35, lpr5y: 3.85 },
   { date: "2024-09-20", lpr1y: 3.35, lpr5y: 3.85 },
-  { date: "2024-10-20", lpr1y: 3.1, lpr5y: 3.6 },
+  { date: "2024-10-21", lpr1y: 3.1, lpr5y: 3.6 },
   { date: "2024-11-20", lpr1y: 3.1, lpr5y: 3.6 },
   { date: "2024-12-20", lpr1y: 3.1, lpr5y: 3.6 },
   { date: "2025-01-20", lpr1y: 3.1, lpr5y: 3.6 },
@@ -98,6 +106,70 @@ export const LPR_DATA: LprPoint[] = [
   { date: "2026-05-20", lpr1y: 3.0, lpr5y: 3.5 },
   { date: "2026-06-22", lpr1y: 3.0, lpr5y: 3.5 },
 ];
+
+/** 保持数组引用稳定，供既有计算模块静态导入。 */
+export const LPR_DATA: LprPoint[] = BUILTIN_LPR_DATA.map((point) => ({ ...point }));
+
+function isIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+}
+
+function assertValidPoint(point: LprPoint, label: string): void {
+  if (!isIsoDate(point.date)) throw new Error(`${label}包含无效发布日期：${point.date}`);
+  if (
+    !Number.isFinite(point.lpr1y) ||
+    !Number.isFinite(point.lpr5y) ||
+    point.lpr1y <= 0 ||
+    point.lpr5y <= 0 ||
+    point.lpr1y >= 20 ||
+    point.lpr5y >= 20
+  ) {
+    throw new Error(`${label}包含无效利率：${point.date}`);
+  }
+}
+
+/**
+ * 官方缓存覆盖同日基线，并按日期升序去重。
+ * 缓存内部如出现同日冲突值则拒绝合并，避免前端静默选择其中一个。
+ */
+export function mergeLprPoints(
+  baseline: readonly LprPoint[],
+  cached: readonly CachedLprPoint[],
+): LprPoint[] {
+  const merged = new Map<string, LprPoint>();
+  for (const point of baseline) {
+    assertValidPoint(point, "内置基线");
+    merged.set(point.date, { ...point });
+  }
+
+  const seenCache = new Map<string, LprPoint>();
+  for (const point of cached) {
+    const normalized = {
+      date: point.publication_date,
+      lpr1y: point.lpr_1y,
+      lpr5y: point.lpr_5y,
+    };
+    assertValidPoint(normalized, "官方缓存");
+    const existing = seenCache.get(normalized.date);
+    if (
+      existing &&
+      (existing.lpr1y !== normalized.lpr1y || existing.lpr5y !== normalized.lpr5y)
+    ) {
+      throw new Error(`官方缓存同一发布日期存在冲突值：${normalized.date}`);
+    }
+    seenCache.set(normalized.date, normalized);
+  }
+
+  for (const point of seenCache.values()) merged.set(point.date, point);
+  return [...merged.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** 原位更新运行时数组，使既有静态导入继续看到最新数据。 */
+export function applyCachedLprPoints(cached: readonly CachedLprPoint[]): LprPoint[] {
+  const next = mergeLprPoints(BUILTIN_LPR_DATA, cached);
+  LPR_DATA.splice(0, LPR_DATA.length, ...next);
+  return LPR_DATA;
+}
 
 export type LprTerm = "1y" | "5y+";
 

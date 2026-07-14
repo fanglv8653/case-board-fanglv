@@ -9,6 +9,49 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+export interface LprPoint {
+  publication_date: string;
+  lpr_1y: number;
+  lpr_5y: number;
+  source_url: string;
+  fetched_at: string;
+}
+
+export interface LprSnapshot {
+  points: LprPoint[];
+  latest_published_date: string | null;
+  latest_1y: number | null;
+  latest_5y: number | null;
+  source_url: string | null;
+  last_success_at: string | null;
+  last_attempt_at: string | null;
+  stale: boolean;
+  last_error: string | null;
+  data_origin: string;
+}
+
+export type LprRefreshStatus =
+  | "updated"
+  | "up_to_date"
+  | "not_published"
+  | "in_progress"
+  | "fallback";
+
+export interface LprRefreshResult {
+  status: LprRefreshStatus;
+  added_count: number;
+  snapshot: LprSnapshot;
+  warning: string | null;
+}
+
+export function getLprSnapshot(): Promise<LprSnapshot> {
+  return invoke<LprSnapshot>("get_lpr_snapshot");
+}
+
+export function refreshLprData(): Promise<LprRefreshResult> {
+  return invoke<LprRefreshResult>("refresh_lpr_data");
+}
+
 import type {
   Case,
   CaseInstance,

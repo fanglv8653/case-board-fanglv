@@ -68,3 +68,12 @@ export function DetailRow({
     </div>
   );
 }
+
+/** 计算结果统一风险提示；应放在每个结果卡片内部。 */
+export function CalculatorDisclaimer() {
+  return (
+    <p className="border-t border-border/70 pt-2 text-[10px] leading-relaxed text-muted-foreground">
+      本计算结果仅供参考，不构成正式法律意见。具体金额以法院裁判、有效规则或正式报价为准。
+    </p>
+  );
+}

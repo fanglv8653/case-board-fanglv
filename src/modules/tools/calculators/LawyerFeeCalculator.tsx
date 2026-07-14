@@ -10,7 +10,7 @@
 
 import { useMemo, useState } from "react";
 
-import { DetailRow, TabBtn } from "./ui";
+import { CalculatorDisclaimer, DetailRow, TabBtn } from "./ui";
 
 import {
   calculateFixed,
@@ -177,6 +177,7 @@ function ResultCard({
         <p className="mt-0.5 text-xs text-muted-foreground">{sub}</p>
       </div>
       {children}
+      <CalculatorDisclaimer />
     </div>
   );
 }

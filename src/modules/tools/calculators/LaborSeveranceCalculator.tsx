@@ -7,7 +7,7 @@
 
 import { useMemo, useState } from "react";
 
-import { DetailRow, TabBtn } from "./ui";
+import { CalculatorDisclaimer, DetailRow, TabBtn } from "./ui";
 import { LegalBasisButton, LegalBasisModal } from "../components/LegalBasisModal";
 import { LABOR_SEVERANCE_BASIS } from "../lib/legalBasisData";
 import {
@@ -179,6 +179,7 @@ export function LaborSeveranceCalculator() {
           <p className="text-[10px] leading-relaxed text-muted-foreground">
             结果为估算,适用前提以个案为准:N+1 仅限第 40 条、2N 仅限违法解除/终止。点右上「计算依据」查看法条。
           </p>
+          <CalculatorDisclaimer />
         </div>
       ) : (
         <Placeholder>填入入职/解除日期与平均工资,实时计算</Placeholder>
