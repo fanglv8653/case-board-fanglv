@@ -16,6 +16,7 @@ import type {
   CaseAgencyContactUpsertInput,
   CaseStageItem,
   CaseStageItemUpsertInput,
+  ReorderCaseStageItemsInput,
   CaseWorkItem,
   CaseWorkItemFilter,
   CaseWorkItemUpsertInput,
@@ -709,6 +710,12 @@ export function upsertCaseStageItem(
 
 export function deleteCaseStageItem(id: string): Promise<number> {
   return invoke<number>("delete_case_stage_item", { id });
+}
+
+export function reorderCaseStageItems(
+  input: ReorderCaseStageItemsInput,
+): Promise<CaseStageItem[]> {
+  return invoke<CaseStageItem[]>("reorder_case_stage_items", { input });
 }
 
 export function listCriminalDeadlineItems(

@@ -359,6 +359,22 @@ export interface CriminalCaseProfile {
   second_instance_accepted_date: string | null;
   judgment_received_date: string | null;
   ruling_received_date: string | null;
+  stage_sort_mode: "auto" | "manual";
+  guilty_plea_status: string | null;
+  sentencing_recommendation: string | null;
+  sentence_term: string | null;
+  charge_history_json: string | null;
+  restitution_amount: number | null;
+  restitution_status: string | null;
+  victim_forgiveness: string | null;
+  surrender_status: string | null;
+  meritorious_service_status: string | null;
+  co_defendants_json: string | null;
+  supplementary_investigation_1_date: string | null;
+  supplementary_investigation_2_date: string | null;
+  judgment_effective_date: string | null;
+  death_penalty_review_start_date: string | null;
+  extraction_meta_json: string | null;
   notes: string | null;
   user_overrides_json: string | null;
   created_at: string;
@@ -391,6 +407,22 @@ export interface CriminalCaseProfileUpsertInput {
   second_instance_accepted_date?: string | null;
   judgment_received_date?: string | null;
   ruling_received_date?: string | null;
+  stage_sort_mode?: "auto" | "manual" | null;
+  guilty_plea_status?: string | null;
+  sentencing_recommendation?: string | null;
+  sentence_term?: string | null;
+  charge_history_json?: string | null;
+  restitution_amount?: number | null;
+  restitution_status?: string | null;
+  victim_forgiveness?: string | null;
+  surrender_status?: string | null;
+  meritorious_service_status?: string | null;
+  co_defendants_json?: string | null;
+  supplementary_investigation_1_date?: string | null;
+  supplementary_investigation_2_date?: string | null;
+  judgment_effective_date?: string | null;
+  death_penalty_review_start_date?: string | null;
+  extraction_meta_json?: string | null;
   notes?: string | null;
   user_overrides_json?: string | null;
 }
@@ -411,6 +443,7 @@ export interface CaseStageItem {
   external_record_id: string | null;
   raw_payload_json: string | null;
   notes: string | null;
+  sort_order: number | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -432,6 +465,12 @@ export interface CaseStageItemUpsertInput {
   external_record_id?: string | null;
   raw_payload_json?: string | null;
   notes?: string | null;
+  sort_order?: number | null;
+}
+
+export interface ReorderCaseStageItemsInput {
+  case_id: string;
+  ordered_ids: string[];
 }
 
 export interface CriminalDeadlineItem {
@@ -451,6 +490,7 @@ export interface CriminalDeadlineItem {
   priority: string;
   status: string;
   source_type: string;
+  applicability_status: "confirmed" | "needs_confirmation" | "not_applicable";
   source_law: string | null;
   source_article: string | null;
   source_url: string | null;
@@ -481,6 +521,7 @@ export interface CriminalDeadlineItemUpsertInput {
   priority?: string | null;
   status?: string | null;
   source_type?: string | null;
+  applicability_status?: "confirmed" | "needs_confirmation" | "not_applicable" | null;
   source_law?: string | null;
   source_article?: string | null;
   source_url?: string | null;
@@ -496,6 +537,7 @@ export interface CriminalDeadlineRefreshReport {
   generated_count: number;
   updated_count: number;
   preserved_count: number;
+  needs_confirmation_count: number;
   skipped_count: number;
   items: CriminalDeadlineItem[];
 }

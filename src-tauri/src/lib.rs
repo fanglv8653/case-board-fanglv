@@ -803,6 +803,14 @@ async fn delete_case_stage_item(
 }
 
 #[tauri::command]
+async fn reorder_case_stage_items(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_cases::ReorderCaseStageItemsInput,
+) -> Result<Vec<db::criminal_cases::CaseStageItem>, String> {
+    db::criminal_cases::reorder_case_stage_items(pool.inner(), input).await
+}
+
+#[tauri::command]
 async fn list_criminal_deadline_items(
     pool: tauri::State<'_, SqlitePool>,
     case_id: String,
@@ -5550,6 +5558,7 @@ pub fn run() {
             list_case_stage_items,
             upsert_case_stage_item,
             delete_case_stage_item,
+            reorder_case_stage_items,
             list_criminal_deadline_items,
             summarize_case_work_duration,
             refresh_criminal_deadlines,
