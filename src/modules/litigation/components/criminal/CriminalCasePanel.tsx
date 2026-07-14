@@ -1,5 +1,22 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { GripVertical, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
@@ -14,6 +31,8 @@ import {
   listCaseStageItems,
   listCaseWorkItems,
   listCriminalDeadlineItems,
+  refreshCriminalDeadlines,
+  reorderCaseStageItems,
   upsertCaseAgencyContact,
   upsertCaseWorkItem,
   upsertCaseStageItem,
@@ -33,6 +52,14 @@ import type {
   CriminalDeadlineItemUpsertInput,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  resolveStructuredListJson,
+  structuredListToText,
+} from "./criminalProfileJson";
+import {
+  needsApplicabilityOverrideReason,
+  resolveDeadlineStageId,
+} from "./criminalTimelineRules";
 
 type ProfileForm = CriminalCaseProfileUpsertInput;
 type StageForm = CaseStageItemUpsertInput;
@@ -68,6 +95,22 @@ const EMPTY_PROFILE: Omit<ProfileForm, "case_id"> = {
   second_instance_accepted_date: "",
   judgment_received_date: "",
   ruling_received_date: "",
+  stage_sort_mode: "auto",
+  guilty_plea_status: "",
+  sentencing_recommendation: "",
+  sentence_term: "",
+  charge_history_json: "",
+  restitution_amount: null,
+  restitution_status: "",
+  victim_forgiveness: "",
+  surrender_status: "",
+  meritorious_service_status: "",
+  co_defendants_json: "",
+  supplementary_investigation_1_date: "",
+  supplementary_investigation_2_date: "",
+  judgment_effective_date: "",
+  death_penalty_review_start_date: "",
+  extraction_meta_json: "",
   notes: "",
   user_overrides_json: "",
 };
@@ -97,6 +140,10 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
     case_id: caseId,
     ...EMPTY_PROFILE,
   });
+  const [chargeHistoryText, setChargeHistoryText] = useState("");
+  const [chargeHistoryInitialText, setChargeHistoryInitialText] = useState("");
+  const [coDefendantsText, setCoDefendantsText] = useState("");
+  const [coDefendantsInitialText, setCoDefendantsInitialText] = useState("");
   const [stages, setStages] = useState<CaseStageItem[]>([]);
   const [deadlines, setDeadlines] = useState<CriminalDeadlineItem[]>([]);
   const [contacts, setContacts] = useState<CaseAgencyContact[]>([]);
@@ -104,11 +151,32 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingList, setSavingList] = useState(false);
+  const [refreshingDeadlines, setRefreshingDeadlines] = useState(false);
+  const [reorderingStages, setReorderingStages] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageForm, setStageForm] = useState<StageForm | null>(null);
   const [deadlineForm, setDeadlineForm] = useState<DeadlineForm | null>(null);
   const [contactForm, setContactForm] = useState<ContactForm | null>(null);
   const [workForm, setWorkForm] = useState<WorkForm | null>(null);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const timelineGroups = useMemo(() => {
+    const grouped = new Map<string, CriminalDeadlineItem[]>();
+    const unassigned: CriminalDeadlineItem[] = [];
+    for (const deadline of deadlines) {
+      const stageId = resolveDeadlineStageId(deadline, stages);
+      if (!stageId) {
+        unassigned.push(deadline);
+        continue;
+      }
+      const items = grouped.get(stageId) ?? [];
+      items.push(deadline);
+      grouped.set(stageId, items);
+    }
+    return { grouped, unassigned };
+  }, [deadlines, stages]);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -123,6 +191,18 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
           listCaseWorkItems({ case_id: caseId }),
         ]);
       setProfileForm(toProfileForm(caseId, profile));
+      const nextChargeHistoryText = structuredListToText(
+        profile?.charge_history_json,
+        "charge",
+      );
+      const nextCoDefendantsText = structuredListToText(
+        profile?.co_defendants_json,
+        "name",
+      );
+      setChargeHistoryText(nextChargeHistoryText);
+      setChargeHistoryInitialText(nextChargeHistoryText);
+      setCoDefendantsText(nextCoDefendantsText);
+      setCoDefendantsInitialText(nextCoDefendantsText);
       setStages(stageRows);
       setDeadlines(deadlineRows);
       setContacts(contactRows);
@@ -141,7 +221,23 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
   const saveProfile = async () => {
     setSavingProfile(true);
     try {
-      await upsertCriminalCaseProfile(cleanProfile(profileForm));
+      await upsertCriminalCaseProfile(
+        cleanProfile({
+          ...profileForm,
+          charge_history_json: resolveStructuredListJson({
+            rawJson: profileForm.charge_history_json,
+            initialText: chargeHistoryInitialText,
+            currentText: chargeHistoryText,
+            key: "charge",
+          }),
+          co_defendants_json: resolveStructuredListJson({
+            rawJson: profileForm.co_defendants_json,
+            initialText: coDefendantsInitialText,
+            currentText: coDefendantsText,
+            key: "name",
+          }),
+        }),
+      );
       toast("刑事画像已保存", "success");
       await reload();
     } catch (e) {
@@ -174,6 +270,13 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
       toast("请填写期限名称", "error");
       return;
     }
+    const originalDeadline = deadlineForm.id
+      ? deadlines.find((item) => item.id === deadlineForm.id)
+      : null;
+    if (needsApplicabilityOverrideReason(originalDeadline, deadlineForm)) {
+      toast("自动期限的适用性已变更，请填写人工修正原因", "error");
+      return;
+    }
     setSavingList(true);
     try {
       await upsertCriminalDeadlineItem(cleanDeadline(deadlineForm));
@@ -202,6 +305,48 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
       toast(`机关联系人保存失败:${e}`, "error");
     } finally {
       setSavingList(false);
+    }
+  };
+
+  const refreshDeadlines = async () => {
+    setRefreshingDeadlines(true);
+    try {
+      const report = await refreshCriminalDeadlines(caseId);
+      toast(
+        `期限已刷新：新增 ${report.generated_count}，更新 ${report.updated_count}，保留 ${report.preserved_count}，待确认 ${report.needs_confirmation_count}，跳过 ${report.skipped_count}`,
+        "success",
+      );
+      await reload();
+    } catch (e) {
+      toast(`期限刷新失败：${e}`, "error");
+    } finally {
+      setRefreshingDeadlines(false);
+    }
+  };
+
+  const handleStageDragEnd = async ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id || reorderingStages) return;
+    const previous = stages;
+    const oldIndex = previous.findIndex((item) => item.id === active.id);
+    const newIndex = previous.findIndex((item) => item.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    const reordered = arrayMove(previous, oldIndex, newIndex);
+    setStages(reordered);
+    setReorderingStages(true);
+    try {
+      const persisted = await reorderCaseStageItems({
+        case_id: caseId,
+        ordered_ids: reordered.map((item) => item.id),
+      });
+      setStages(persisted);
+      setProfileForm((current) => ({ ...current, stage_sort_mode: "manual" }));
+      toast("阶段顺序已保存", "success");
+    } catch (e) {
+      setStages(previous);
+      toast(`阶段排序保存失败，已恢复原顺序：${e}`, "error");
+      await reload();
+    } finally {
+      setReorderingStages(false);
     }
   };
 
@@ -350,7 +495,7 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
           </p>
           <h2 className="mt-1 text-lg font-semibold tracking-tight">刑事案件工作区</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            人工维护画像、阶段、期限和机关联系人。期限仅记录和提醒，不自动生成规则。
+            维护刑事画像、办案时间轴和机关联系人。期限属于办案提醒，条件规则需人工确认。
           </p>
         </div>
         <Button type="button" variant="ghost" size="sm" onClick={reload}>
@@ -494,6 +639,119 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
               />
             </div>
           </Field>
+          <Field label="认罪认罚">
+            <TextInput
+              value={profileForm.guilty_plea_status ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, guilty_plea_status: v })}
+              placeholder="未确认 / 已签署具结书"
+            />
+          </Field>
+          <Field label="量刑建议">
+            <TextInput
+              value={profileForm.sentencing_recommendation ?? ""}
+              onChange={(v) =>
+                setProfileForm({ ...profileForm, sentencing_recommendation: v })
+              }
+            />
+          </Field>
+          <Field label="判决刑期">
+            <TextInput
+              value={profileForm.sentence_term ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, sentence_term: v })}
+            />
+          </Field>
+          <Field label="退赃退赔金额">
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={profileForm.restitution_amount ?? ""}
+              onChange={(event) =>
+                setProfileForm({
+                  ...profileForm,
+                  restitution_amount:
+                    event.currentTarget.value === ""
+                      ? null
+                      : Number(event.currentTarget.value),
+                })
+              }
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
+            />
+          </Field>
+          <Field label="退赃退赔状态">
+            <TextInput
+              value={profileForm.restitution_status ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, restitution_status: v })}
+            />
+          </Field>
+          <Field label="被害人谅解">
+            <TextInput
+              value={profileForm.victim_forgiveness ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, victim_forgiveness: v })}
+            />
+          </Field>
+          <Field label="自首情况">
+            <TextInput
+              value={profileForm.surrender_status ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, surrender_status: v })}
+            />
+          </Field>
+          <Field label="立功情况">
+            <TextInput
+              value={profileForm.meritorious_service_status ?? ""}
+              onChange={(v) =>
+                setProfileForm({ ...profileForm, meritorious_service_status: v })
+              }
+            />
+          </Field>
+          <Field label="第一次退补日期">
+            <DateInput
+              value={profileForm.supplementary_investigation_1_date ?? ""}
+              onChange={(v) =>
+                setProfileForm({ ...profileForm, supplementary_investigation_1_date: v })
+              }
+            />
+          </Field>
+          <Field label="第二次退补日期">
+            <DateInput
+              value={profileForm.supplementary_investigation_2_date ?? ""}
+              onChange={(v) =>
+                setProfileForm({ ...profileForm, supplementary_investigation_2_date: v })
+              }
+            />
+          </Field>
+          <Field label="判决生效日期">
+            <DateInput
+              value={profileForm.judgment_effective_date ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, judgment_effective_date: v })}
+            />
+          </Field>
+          <Field label="死刑复核起始日期">
+            <DateInput
+              value={profileForm.death_penalty_review_start_date ?? ""}
+              onChange={(v) =>
+                setProfileForm({ ...profileForm, death_penalty_review_start_date: v })
+              }
+            />
+          </Field>
+          <Field label="罪名历史" className="md:col-span-2">
+            <textarea
+              value={chargeHistoryText}
+              onChange={(event) => setChargeHistoryText(event.currentTarget.value)}
+              rows={3}
+              placeholder="每行填写一个曾涉及或变更后的罪名"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
+            />
+          </Field>
+          <Field label="同案犯" className="md:col-span-1">
+            <textarea
+              value={coDefendantsText}
+              onChange={(event) => setCoDefendantsText(event.currentTarget.value)}
+              rows={3}
+              placeholder="每行填写一人"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
+            />
+          </Field>
           <Field label="备注" className="md:col-span-3">
             <textarea
               value={profileForm.notes ?? ""}
@@ -514,19 +772,43 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
       </Panel>
 
       <Panel
-        title="阶段节点"
+        title="办案时间轴"
         action={
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setStageForm(newStageForm(caseId))}
-          >
-            <Plus className="size-3.5" />
-            添加阶段
-          </Button>
+          <div className="flex flex-wrap items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => void refreshDeadlines()}
+              disabled={refreshingDeadlines || reorderingStages}
+            >
+              <RefreshCw className={cn("size-3.5", refreshingDeadlines && "animate-spin")} />
+              {refreshingDeadlines ? "刷新中" : "刷新期限"}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setDeadlineForm(newDeadlineForm(caseId))}
+            >
+              <Plus className="size-3.5" />
+              添加期限
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setStageForm(newStageForm(caseId))}
+            >
+              <Plus className="size-3.5" />
+              添加阶段
+            </Button>
+          </div>
         }
       >
+        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
+          期限仅作为办案提醒；条件规则需人工确认，具体时点和特殊情形应结合案件事实核对，不替代法律判断。
+        </div>
         {stageForm && (
           <StageEditor
             form={stageForm}
@@ -536,90 +818,64 @@ export function CriminalCasePanel({ caseId }: { caseId: string }) {
             saving={savingList}
           />
         )}
-        <ListState emptyText="还没有阶段节点，可先补录当前诉讼阶段。">
-          {stages.map((item) => (
-            <ListRow key={item.id}>
-              <div className="min-w-0">
-                <p className="font-medium text-foreground">{item.stage_label}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {[item.major_stage, labelStatus(item.status), item.started_at, item.due_at]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-                {item.notes && (
-                  <p className="mt-1 text-xs text-muted-foreground">{item.notes}</p>
-                )}
-              </div>
-              <RowActions
-                onEdit={() => setStageForm(stageToForm(caseId, item))}
-                onDelete={() => void removeStage(item)}
-              />
-            </ListRow>
-          ))}
-        </ListState>
-      </Panel>
-
-      <Panel
-        title="期限节点"
-        action={
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setDeadlineForm(newDeadlineForm(caseId))}
-          >
-            <Plus className="size-3.5" />
-            添加期限
-          </Button>
-        }
-      >
         {deadlineForm && (
           <DeadlineEditor
             form={deadlineForm}
+            stages={stages}
             onChange={setDeadlineForm}
             onCancel={() => setDeadlineForm(null)}
             onSave={saveDeadline}
             saving={savingList}
           />
         )}
-        <ListState emptyText="还没有期限节点。本轮只支持人工录入，不自动生成期限规则。">
-          {deadlines.map((item) => (
-            <ListRow key={item.id}>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-medium text-foreground">{item.title}</p>
-                  <span className="rounded-full bg-muted px-2 py-0.5 text-caption text-muted-foreground">
-                    {labelStatus(item.status)}
-                  </span>
-                  <span className="rounded-full bg-muted px-2 py-0.5 text-caption text-muted-foreground">
-                    {labelPriority(item.priority)}
-                  </span>
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {[
-                    item.major_stage,
-                    item.minor_stage,
-                    item.effective_due_at ? `到期 ${item.effective_due_at}` : null,
-                    item.reminder_at ? `提醒 ${item.reminder_at}` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-                {(item.source_law || item.source_article || item.calculation_note) && (
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {[item.source_law, item.source_article, item.calculation_note]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </p>
-                )}
+        {stages.length === 0 ? (
+          <ListState emptyText="还没有阶段节点，可先补录当前办案阶段。">
+            {null}
+          </ListState>
+        ) : (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={(event) => void handleStageDragEnd(event)}
+          >
+            <SortableContext
+              items={stages.map((item) => item.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <div className={cn("space-y-3", reorderingStages && "pointer-events-none opacity-70")}>
+                {stages.map((item, index) => (
+                  <SortableStageCard
+                    key={item.id}
+                    item={item}
+                    index={index}
+                    deadlines={timelineGroups.grouped.get(item.id) ?? []}
+                    onEditStage={() => setStageForm(stageToForm(caseId, item))}
+                    onDeleteStage={() => void removeStage(item)}
+                    onEditDeadline={(deadline) =>
+                      setDeadlineForm(deadlineToForm(caseId, deadline))
+                    }
+                    onDeleteDeadline={(deadline) => void removeDeadline(deadline)}
+                  />
+                ))}
               </div>
-              <RowActions
-                onEdit={() => setDeadlineForm(deadlineToForm(caseId, item))}
-                onDelete={() => void removeDeadline(item)}
-              />
-            </ListRow>
-          ))}
-        </ListState>
+            </SortableContext>
+          </DndContext>
+        )}
+        {timelineGroups.unassigned.length > 0 && (
+          <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 p-3">
+            <p className="mb-2 text-sm font-semibold">未归入阶段的期限</p>
+            <div className="space-y-2">
+              {timelineGroups.unassigned.map((deadline) => (
+                <DeadlineTimelineRow
+                  key={deadline.id}
+                  item={deadline}
+                  onEdit={() => setDeadlineForm(deadlineToForm(caseId, deadline))}
+                  onDelete={() => void removeDeadline(deadline)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
       </Panel>
 
       <Panel
@@ -957,6 +1213,158 @@ function RowActions({
   );
 }
 
+function SortableStageCard({
+  item,
+  index,
+  deadlines,
+  onEditStage,
+  onDeleteStage,
+  onEditDeadline,
+  onDeleteDeadline,
+}: {
+  item: CaseStageItem;
+  index: number;
+  deadlines: CriminalDeadlineItem[];
+  onEditStage: () => void;
+  onDeleteStage: () => void;
+  onEditDeadline: (item: CriminalDeadlineItem) => void;
+  onDeleteDeadline: (item: CriminalDeadlineItem) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: item.id,
+  });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn(
+        "rounded-lg border border-border bg-background p-3",
+        isDragging && "relative z-10 shadow-lg ring-1 ring-foreground/20",
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <button
+          type="button"
+          className="mt-0.5 cursor-grab rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground active:cursor-grabbing"
+          aria-label={`拖动排序：${item.stage_label}`}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="size-4" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="flex size-5 items-center justify-center rounded-full bg-foreground text-caption text-background">
+              {index + 1}
+            </span>
+            <p className="font-medium text-foreground">{item.stage_label}</p>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-caption text-muted-foreground">
+              {labelStatus(item.status)}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {[
+              item.major_stage,
+              item.started_at ? `开始 ${item.started_at}` : null,
+              item.due_at ? `到期 ${item.due_at}` : null,
+              item.completed_at ? `完成 ${item.completed_at}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ") || "尚未填写阶段日期"}
+          </p>
+          {item.notes && <p className="mt-1 text-xs text-muted-foreground">{item.notes}</p>}
+        </div>
+        <RowActions onEdit={onEditStage} onDelete={onDeleteStage} />
+      </div>
+      <div className="ml-8 mt-3 border-l border-border pl-3">
+        {deadlines.length === 0 ? (
+          <p className="py-1 text-xs text-muted-foreground">本阶段暂无期限节点。</p>
+        ) : (
+          <div className="space-y-2">
+            {deadlines.map((deadline) => (
+              <DeadlineTimelineRow
+                key={deadline.id}
+                item={deadline}
+                onEdit={() => onEditDeadline(deadline)}
+                onDelete={() => onDeleteDeadline(deadline)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DeadlineTimelineRow({
+  item,
+  onEdit,
+  onDelete,
+}: {
+  item: CriminalDeadlineItem;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const muted = item.applicability_status === "not_applicable";
+  return (
+    <div className={cn("flex items-start justify-between gap-2 rounded-md bg-muted/40 p-2", muted && "opacity-60")}>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <p className="text-sm font-medium text-foreground">{item.title}</p>
+          <DeadlineBadge>{labelStatus(item.status)}</DeadlineBadge>
+          <DeadlineBadge>{labelPriority(item.priority)}</DeadlineBadge>
+          <DeadlineBadge tone={item.applicability_status === "needs_confirmation" ? "warning" : "default"}>
+            {labelApplicability(item.applicability_status)}
+          </DeadlineBadge>
+          <DeadlineBadge>{item.source_type === "auto" ? "规则生成" : "人工录入"}</DeadlineBadge>
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {[
+            item.effective_due_at ? `有效到期 ${item.effective_due_at}` : "未设置到期日",
+            item.reminder_at ? `提醒 ${item.reminder_at}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+        {item.override_reason && (
+          <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+            人工覆盖：{item.override_reason}
+          </p>
+        )}
+        {(item.source_law || item.source_article || item.calculation_note) && (
+          <p className="mt-1 text-caption text-muted-foreground">
+            {[item.source_law, item.source_article, item.calculation_note]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+        )}
+      </div>
+      <RowActions onEdit={onEdit} onDelete={onDelete} />
+    </div>
+  );
+}
+
+function DeadlineBadge({
+  children,
+  tone = "default",
+}: {
+  children: ReactNode;
+  tone?: "default" | "warning";
+}) {
+  return (
+    <span
+      className={cn(
+        "rounded-full px-2 py-0.5 text-caption",
+        tone === "warning"
+          ? "bg-amber-500/15 text-amber-800 dark:text-amber-200"
+          : "bg-background text-muted-foreground",
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
 function StageEditor({
   form,
   onChange,
@@ -1030,12 +1438,14 @@ function StageEditor({
 
 function DeadlineEditor({
   form,
+  stages,
   onChange,
   onCancel,
   onSave,
   saving,
 }: {
   form: DeadlineForm;
+  stages: CaseStageItem[];
   onChange: (form: DeadlineForm) => void;
   onCancel: () => void;
   onSave: () => void;
@@ -1067,6 +1477,38 @@ function DeadlineEditor({
             value={form.status}
             options={DEADLINE_STATUS_OPTIONS}
             onChange={(v) => onChange({ ...form, status: v })}
+          />
+        </Field>
+        <Field label="所属阶段">
+          <select
+            value={form.stage_item_id ?? ""}
+            onChange={(event) =>
+              onChange({ ...form, stage_item_id: event.currentTarget.value || null })
+            }
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
+          >
+            <option value="">未归入阶段</option>
+            {stages.map((stage) => (
+              <option key={stage.id} value={stage.id}>
+                {stage.stage_label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="适用性">
+          <SelectInput
+            value={form.applicability_status ?? "confirmed"}
+            options={[
+              ["confirmed", "已确认"],
+              ["needs_confirmation", "待确认"],
+              ["not_applicable", "不适用"],
+            ]}
+            onChange={(v) =>
+              onChange({
+                ...form,
+                applicability_status: v as DeadlineForm["applicability_status"],
+              })
+            }
           />
         </Field>
         <Field label="触发日期">
@@ -1449,4 +1891,12 @@ function labelPriority(priority: string | null | undefined) {
     default:
       return priority || "普通";
   }
+}
+
+function labelApplicability(
+  status: CriminalDeadlineItem["applicability_status"] | null | undefined,
+) {
+  if (status === "needs_confirmation") return "待确认";
+  if (status === "not_applicable") return "不适用";
+  return "已确认";
 }
