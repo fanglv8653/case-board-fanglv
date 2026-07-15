@@ -66,14 +66,14 @@ struct BalanceResponse {
     balance_infos: Vec<BalanceInfo>,
 }
 
-/// 拉 DeepSeek 当前余额 + 计算今日消费 + 写当天快照。
+/// 拉 DeepSeek 当前余额 + 计算今日消费；仅在余额业务值变化时写当天快照。
 ///
 /// 流程:
 ///   1. 读 settings.cloud_llm_api_key
 ///   2. fetch GET /user/balance + Bearer Authorization
 ///   3. 找 currency=CNY 那条
 ///   4. 算今日消费:今天 0 点之前最近的一条快照 - 当前 totalBalance
-///   5. UPSERT 今天的快照(每天保留一条,刷新 fetched_at + total_balance)
+///   5. 与最近快照比较；首次有效值或余额变化时才 UPSERT 今天的快照
 pub async fn fetch_balance_and_persist(
     pool: &SqlitePool,
     api_key: &str,
@@ -132,33 +132,14 @@ pub async fn fetch_balance_and_persist(
     let today_str = today.format("%Y-%m-%d").to_string();
     let now_iso = chrono::Utc::now().to_rfc3339();
 
-    // 先尝试 INSERT(今天还没记过 → 当前 total 同时存入 total_balance + day_start_balance)。
-    // 已有今天的话 ON CONFLICT 只更新 total_balance / fetched_at,保留 day_start_balance。
-    sqlx::query(
-        "INSERT INTO deepseek_balance_snapshots \
-            (date, total_balance, granted_balance, topped_up_balance, fetched_at, day_start_balance) \
-         VALUES (?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(date) DO UPDATE SET \
-            total_balance = excluded.total_balance, \
-            granted_balance = excluded.granted_balance, \
-            topped_up_balance = excluded.topped_up_balance, \
-            fetched_at = excluded.fetched_at",
+    let day_start = persist_balance_if_changed(
+        pool,
+        &today_str,
+        &now_iso,
+        total,
+        granted,
+        topped_up,
     )
-    .bind(&today_str)
-    .bind(total)
-    .bind(granted)
-    .bind(topped_up)
-    .bind(&now_iso)
-    .bind(total) // 第一次插入时 day_start_balance = 当前 total
-    .execute(pool)
-    .await?;
-
-    // 读 day_start_balance(刚 INSERT/UPSERT 完肯定有值)
-    let day_start: Option<f64> = sqlx::query_scalar(
-        "SELECT day_start_balance FROM deepseek_balance_snapshots WHERE date = ?",
-    )
-    .bind(&today_str)
-    .fetch_optional(pool)
     .await?;
 
     let today_consumed = day_start.map(|ds| (ds - total).max(0.0));
@@ -170,6 +151,62 @@ pub async fn fetch_balance_and_persist(
         today_consumed,
         fetched_at: now_iso,
     })
+}
+
+/// 将一次成功取得的有效余额写入快照。
+///
+/// `deepseek_balance_snapshots` 每个自然日最多一行。为避免普通启动仅因时间变化
+/// 改写数据库，先与最近快照比较三个业务余额；完全相同时不执行任何写操作。
+/// 返回值仅在今天已有/新建快照时包含当天起始余额，用于计算今日消费。
+async fn persist_balance_if_changed(
+    pool: &SqlitePool,
+    today: &str,
+    fetched_at: &str,
+    total: f64,
+    granted: f64,
+    topped_up: f64,
+) -> Result<Option<f64>, sqlx::Error> {
+    type Snapshot = (String, f64, f64, f64, Option<f64>);
+    let latest: Option<Snapshot> = sqlx::query_as(
+        "SELECT date, total_balance, granted_balance, topped_up_balance, day_start_balance \
+         FROM deepseek_balance_snapshots ORDER BY date DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some((date, old_total, old_granted, old_topped_up, day_start)) = latest {
+        if old_total == total && old_granted == granted && old_topped_up == topped_up {
+            return Ok((date == today).then_some(day_start).flatten());
+        }
+    }
+
+    // 今天还没有快照时，当前余额同时作为日初余额；今天已有快照时只更新
+    // 三个业务余额和抓取时间，保留 day_start_balance。
+    sqlx::query(
+        "INSERT INTO deepseek_balance_snapshots \
+            (date, total_balance, granted_balance, topped_up_balance, fetched_at, day_start_balance) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(date) DO UPDATE SET \
+            total_balance = excluded.total_balance, \
+            granted_balance = excluded.granted_balance, \
+            topped_up_balance = excluded.topped_up_balance, \
+            fetched_at = excluded.fetched_at",
+    )
+    .bind(today)
+    .bind(total)
+    .bind(granted)
+    .bind(topped_up)
+    .bind(fetched_at)
+    .bind(total) // 第一次插入时 day_start_balance = 当前 total
+    .execute(pool)
+    .await?;
+
+    sqlx::query_scalar(
+        "SELECT day_start_balance FROM deepseek_balance_snapshots WHERE date = ?",
+    )
+    .bind(today)
+    .fetch_optional(pool)
+    .await
 }
 
 /// 读最近一条已缓存的余额(不发请求,用于启动时立刻显示一个值)。
@@ -206,4 +243,148 @@ pub async fn cached_balance(pool: &SqlitePool) -> Result<Option<DeepSeekBalance>
         today_consumed,
         fetched_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE deepseek_balance_snapshots (\
+                date TEXT PRIMARY KEY NOT NULL,\
+                total_balance REAL NOT NULL,\
+                granted_balance REAL NOT NULL DEFAULT 0,\
+                topped_up_balance REAL NOT NULL DEFAULT 0,\
+                fetched_at TEXT NOT NULL,\
+                day_start_balance REAL\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn snapshot_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM deepseek_balance_snapshots")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_valid_balance_creates_snapshot() {
+        let pool = test_pool().await;
+        let day_start = persist_balance_if_changed(
+            &pool,
+            "2026-07-15",
+            "2026-07-15T01:00:00Z",
+            100.0,
+            25.0,
+            75.0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(day_start, Some(100.0));
+        assert_eq!(snapshot_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn identical_balance_does_not_touch_snapshot_even_on_another_day() {
+        let pool = test_pool().await;
+        persist_balance_if_changed(
+            &pool,
+            "2026-07-15",
+            "2026-07-15T01:00:00Z",
+            100.0,
+            25.0,
+            75.0,
+        )
+        .await
+        .unwrap();
+
+        let same_day = persist_balance_if_changed(
+            &pool,
+            "2026-07-15",
+            "2026-07-15T02:00:00Z",
+            100.0,
+            25.0,
+            75.0,
+        )
+        .await
+        .unwrap();
+        let next_day = persist_balance_if_changed(
+            &pool,
+            "2026-07-16",
+            "2026-07-16T01:00:00Z",
+            100.0,
+            25.0,
+            75.0,
+        )
+        .await
+        .unwrap();
+
+        let fetched_at: String = sqlx::query_scalar(
+            "SELECT fetched_at FROM deepseek_balance_snapshots WHERE date = '2026-07-15'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(same_day, Some(100.0));
+        assert_eq!(next_day, None);
+        assert_eq!(snapshot_count(&pool).await, 1);
+        assert_eq!(fetched_at, "2026-07-15T01:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn meaningful_balance_change_updates_or_creates_snapshot() {
+        let pool = test_pool().await;
+        persist_balance_if_changed(
+            &pool,
+            "2026-07-15",
+            "2026-07-15T01:00:00Z",
+            100.0,
+            25.0,
+            75.0,
+        )
+        .await
+        .unwrap();
+
+        let day_start = persist_balance_if_changed(
+            &pool,
+            "2026-07-15",
+            "2026-07-15T02:00:00Z",
+            99.0,
+            24.0,
+            75.0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(day_start, Some(100.0));
+        assert_eq!(snapshot_count(&pool).await, 1);
+
+        persist_balance_if_changed(
+            &pool,
+            "2026-07-16",
+            "2026-07-16T01:00:00Z",
+            99.0,
+            24.0,
+            76.0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_count(&pool).await, 2);
+    }
+
+    #[tokio::test]
+    async fn missing_api_key_fails_before_any_snapshot_write() {
+        let pool = test_pool().await;
+        let error = fetch_balance_and_persist(&pool, "   ").await.unwrap_err();
+
+        assert!(matches!(error, DeepSeekError::NoApiKey));
+        assert_eq!(snapshot_count(&pool).await, 0);
+    }
 }

@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
 
       - name: Source version, license and release-boundary gate
         run: pnpm validate:source
@@ -45,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt, clippy
 
@@ -67,3 +67,34 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+
+  release-tooling:
+    name: Windows release tooling
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resumable release tests
+        shell: pwsh
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File scripts/test-release-resume.ps1
+
+      - name: Upgrade validation tests
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s scripts/windows-upgrade-validation/tests -v
+
+      - name: Screenshot helper self-test
+        shell: pwsh
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass
+          -File scripts/windows-upgrade-validation/capture-window.ps1
+          -SelfTest
+          -Output "$env:RUNNER_TEMP/caseboard-capture-self-test.png"
+          -AsciiTempRoot "$env:RUNNER_TEMP/caseboard-capture-temp"

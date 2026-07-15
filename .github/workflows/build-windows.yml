@@ -27,7 +27,7 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
 
       # 注意:Cargo workspace 的 target 在仓库根 target/(不在 src-tauri/target)。
       - uses: Swatinem/rust-cache@v2
