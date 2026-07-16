@@ -6,7 +6,7 @@
  * 三套:
  *   - LITIGATION_FEE_BASIS: 诉讼费(《诉讼费用交纳办法》第 13/14/22 条)
  *   - INTEREST_BASIS: 利息(《最高法关于审理民间借贷案件适用法律若干问题的规定》法释〔2020〕17 号 + LPR 历史)
- *   - EXECUTION_BASIS: 执行款(《民诉法》第 260 条 + 法释〔2014〕8 号 + 《民法典》第 561 条)
+ *   - EXECUTION_BASIS: 执行款(《民诉法》(2023修正)第 264 条 + 法释〔2014〕8 号 + 《民法典》第 561 条)
  */
 
 import type { LegalBasisSection } from "../components/LegalBasisModal";
@@ -161,7 +161,7 @@ export const EXECUTION_BASIS: LegalBasisSection[] = [
         type: "para",
         text: "被执行人未按判决、裁定和其他法律文书指定的期间履行给付金钱义务的,应当加倍支付迟延履行期间的债务利息。",
       },
-      { type: "citation", text: "《民事诉讼法》(2024 修正)第 260 条" },
+      { type: "citation", text: "《民事诉讼法》(2023修正)第 264 条" },
     ],
   },
   {
@@ -186,7 +186,7 @@ export const EXECUTION_BASIS: LegalBasisSection[] = [
     blocks: [
       { type: "para", text: "按照日万分之一点七五(0.0175%)计算。" },
       { type: "strong", text: "公式:" },
-      { type: "para", text: "加倍部分债务利息 = 本金 × 0.0175% × 迟延履行天数" },
+      { type: "para", text: "加倍部分债务利息 = 尚未清偿的金钱债务（不含一般利息）× 0.0175% × 迟延履行天数" },
       { type: "note", text: "基数不含已产生的一般债务利息" },
     ],
   },

@@ -14,21 +14,31 @@
 export function calculatePropertyFee(amountWan: number): number {
   const amount = amountWan * 10000;
   if (amount <= 10000) return 50;
+  // 分段超额累进（《诉讼费用交纳办法》第十三条第（一）款）。
+  // 原实现用速算扣除数（amount * rate - subtract），但第二档起 subtract
+  // 应为负值却写成了正值，导致超过 10 万元的案件全部偏少。改为直接分段
+  // 累加，不依赖速算扣除数，避免符号错误。
   const brackets = [
-    { limit: 100000, rate: 0.025, subtract: 200 },
-    { limit: 200000, rate: 0.02, subtract: 300 },
-    { limit: 500000, rate: 0.015, subtract: 1300 },
-    { limit: 1000000, rate: 0.01, subtract: 3800 },
-    { limit: 2000000, rate: 0.009, subtract: 4800 },
-    { limit: 5000000, rate: 0.008, subtract: 6800 },
-    { limit: 10000000, rate: 0.007, subtract: 11800 },
-    { limit: 20000000, rate: 0.006, subtract: 21800 },
-    { limit: Infinity, rate: 0.005, subtract: 41800 },
+    { limit: 100000, rate: 0.025 }, // 1 万 ~ 10 万
+    { limit: 200000, rate: 0.02 }, // 10 万 ~ 20 万
+    { limit: 500000, rate: 0.015 }, // 20 万 ~ 50 万
+    { limit: 1000000, rate: 0.01 }, // 50 万 ~ 100 万
+    { limit: 2000000, rate: 0.009 }, // 100 万 ~ 200 万
+    { limit: 5000000, rate: 0.008 }, // 200 万 ~ 500 万
+    { limit: 10000000, rate: 0.007 }, // 500 万 ~ 1000 万
+    { limit: 20000000, rate: 0.006 }, // 1000 万 ~ 2000 万
+    { limit: Infinity, rate: 0.005 }, // 2000 万+
   ];
+  let fee = 50; // 不超过 1 万元部分
+  let prevLimit = 10000;
   for (const b of brackets) {
-    if (amount <= b.limit) return Math.round(amount * b.rate - b.subtract);
+    if (amount <= prevLimit) break;
+    const taxable = Math.min(amount, b.limit) - prevLimit;
+    fee += taxable * b.rate;
+    if (amount <= b.limit) break;
+    prevLimit = b.limit;
   }
-  return 0; // 永远不会到这里
+  return Math.round(fee);
 }
 
 /**
