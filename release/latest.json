@@ -1,11 +1,11 @@
 {
-  "version": "0.6.2",
-  "notes": "方律案件看板 0.6.2：新增刑事案件模型与期限规则、刑事办案时间轴、案件财务与发票联动、LPR 刷新及隐私入口，并完善桌面端升级链路。升级前建议备份本地数据库。",
-  "pub_date": "2026-07-15T04:10:20Z",
+  "version": "0.6.4",
+  "notes": "方律案件看板 0.6.4。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
+  "pub_date": "2026-07-19T07:38:07.363Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UmNIWGhVWVFYN0NCaFV5dDZpNDgwUTIxeVozbTd2bGFHU3BVeC81ZnJlTTdJd3NnOGd4MzNmR2hURlp5K0tQSGlBVjd3QXRSVnNOaEhaeXVGc1dYV1FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MDg2MzkxCWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNi4yX3g2NC1zZXR1cC5leGUKZXBsRWs1eWJnZzA4ejUzS2pZcE16aGxiUTFIZlVJVnJxcmRSZ0FGR3FuWHYzcHA3Q1Y0MVgzbktzOEFwem9taHczUnQzUjlyNjZJTnhTWkNRd0ZDRHc9PQo=",
-      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.6.2-fanglv/FanglvCaseBoard_0.6.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UllmbjFkV1ZiRHRGMld5YUVhVVU2cFZHME5BRjNMc0lqanZ2R1M4WUtjWC9Uc1JDR2J0TTVlOTIvR3h0Qk1nV3JJY09jck4veHBkU2J5V2FqYmM3RlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NDQ2MTUwCWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNi40X3g2NC1zZXR1cC5leGUKQWRGbGV3ZTRtRnl5dE9kUVJQL1U2cWZ6OENXMHlTamZYTE9yRHpzWmlnb1daN0ljblhoUEorVjFCaGVxMnFsTkFXOGt4MS9wbDJwTVZQYUxRYkRvQUE9PQo=",
+      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.6.4-fanglv/FanglvCaseBoard_0.6.4_x64-setup.exe"
     }
   }
 }
