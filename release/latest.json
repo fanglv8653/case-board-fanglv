@@ -1,6 +1,6 @@
 {
   "version": "0.6.4",
-  "notes": "方律案件看板 0.6.4。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
+  "notes": "方律案件看板 0.6.4：新增刑事辩护 SOP 流程、提醒与工作记录；更新包已通过 updater minisign 校验，该签名不等于 Windows Authenticode。",
   "pub_date": "2026-07-19T07:38:07.363Z",
   "platforms": {
     "windows-x86_64": {
