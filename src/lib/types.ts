@@ -640,6 +640,224 @@ export interface CriminalDeadlineRefreshReport {
   items: CriminalDeadlineItem[];
 }
 
+export type CriminalWorkflowTaskStatus =
+  | "pending_confirmation"
+  | "unscheduled"
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "deferred"
+  | "ignored"
+  | "reopened"
+  | "not_applicable";
+
+export type CriminalTaskAction =
+  | "confirm_applicable"
+  | "not_applicable"
+  | "schedule"
+  | "start"
+  | "defer"
+  | "complete"
+  | "ignore"
+  | "reopen";
+
+export interface CriminalWorkflow {
+  id: string;
+  case_id: string;
+  template_version_id: string;
+  status: "active" | "closed";
+  current_stage_code: string | null;
+  started_at: string;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CriminalWorkflowTask {
+  id: string;
+  workflow_id: string;
+  case_id: string;
+  template_node_id: string;
+  node_code: string;
+  title: string;
+  stage_code: string;
+  stage_sort: number;
+  node_sort: number;
+  task_type: string;
+  applicability_status: "applicable" | "pending_confirmation" | "not_applicable";
+  status: CriminalWorkflowTaskStatus;
+  occurrence_key: string;
+  occurrence_no: number;
+  trigger_event: string;
+  trigger_event_id: string;
+  trigger_source_type: string;
+  trigger_source_ref_id: string | null;
+  planned_at: string | null;
+  original_planned_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  deferred_at: string | null;
+  ignored_at: string | null;
+  reopened_at: string | null;
+  result: string | null;
+  next_action: string | null;
+  duration_minutes: number | null;
+  disposition_reason: string | null;
+  client_feedback_recorded: boolean;
+  time_nature: "statutory_deadline_link" | "internal_service_target" | "unscheduled";
+  deadline_item_id: string | null;
+  work_item_id: string | null;
+  assigned_to: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CriminalTaskEvent {
+  id: string;
+  task_id: string;
+  case_id: string;
+  event_type: string;
+  actor: string;
+  event_id: string | null;
+  source_type: string | null;
+  source_ref_id: string | null;
+  from_status: string | null;
+  to_status: string | null;
+  reason: string | null;
+  payload_json: string;
+  created_at: string;
+}
+
+export type CriminalWorkflowConfirmedEvent =
+  | "case_created"
+  | "engagement_decision_confirmed"
+  | "detention_confirmed"
+  | "arrest_review_request_confirmed"
+  | "non_arrest_confirmed"
+  | "arrest_confirmed"
+  | "prosecution_transfer_confirmed"
+  | "plea_process_confirmed"
+  | "public_prosecution_confirmed"
+  | "court_acceptance_confirmed"
+  | "hearing_scheduled"
+  | "hearing_completed"
+  | "first_instance_judgment_received"
+  | "appeal_intention_confirmed"
+  | "appeal_confirmed"
+  | "second_instance_procedure_confirmed"
+  | "second_instance_decision_received"
+  | "second_instance_closed";
+
+interface RefreshCriminalWorkflowInputBase {
+  case_id: string;
+  event_code: CriminalWorkflowConfirmedEvent;
+  event_id: string;
+  confirmed_by: string;
+}
+
+export type RefreshCriminalWorkflowInput = RefreshCriminalWorkflowInputBase &
+  (
+    | {
+        source_type: "manual_confirmed";
+        source_ref_id?: string | null;
+      }
+    | {
+        source_type: "accepted_extraction_candidate";
+        source_ref_id: string;
+      }
+    | {
+        source_type: "workflow_confirmed";
+        source_ref_id: string;
+      }
+  );
+
+export interface RefreshCriminalWorkflowResult {
+  workflow: CriminalWorkflow;
+  generated_count: number;
+  preserved_count: number;
+  tasks: CriminalWorkflowTask[];
+}
+
+export interface CriminalTaskActionInput {
+  task_id: string;
+  action: CriminalTaskAction;
+  actor: string;
+  planned_at?: string | null;
+  result?: string | null;
+  next_action?: string | null;
+  duration_minutes?: number | null;
+  reason?: string | null;
+  client_feedback_recorded?: boolean | null;
+}
+
+export interface CreateCriminalTaskOccurrenceInput {
+  case_id: string;
+  node_code: string;
+  actor: string;
+  occurrence_key?: string | null;
+  planned_at?: string | null;
+}
+
+export interface CriminalTaskFilter {
+  case_id?: string | null;
+  statuses?: CriminalWorkflowTaskStatus[] | null;
+  planned_from?: string | null;
+  planned_to?: string | null;
+}
+
+export interface CriminalTaskSummaryRow {
+  case_id: string;
+  case_name: string;
+  task_id: string;
+  title: string;
+  stage_code: string;
+  task_type: string;
+  status: CriminalWorkflowTaskStatus;
+  applicability_status: "applicable" | "pending_confirmation" | "not_applicable";
+  planned_at: string | null;
+  client_feedback_required: boolean;
+}
+
+export interface CriminalDeadlineCalendarRow {
+  deadline_id: string;
+  case_id: string;
+  case_name: string;
+  title: string;
+  rule_code: string | null;
+  deadline_at: string;
+  status: string;
+  applicability_status: "confirmed";
+}
+
+export interface CriminalReminderDelivery {
+  id: string;
+  task_id: string;
+  case_id: string;
+  reminder_key: string;
+  channel: string;
+  scheduled_for: string;
+  status: "candidate" | "claimed" | "sent" | "failed";
+  claimed_at: string | null;
+  sent_at: string | null;
+  failed_at: string | null;
+  error_message: string | null;
+  attempt_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClaimCriminalRemindersInput {
+  now: string;
+  channel?: string | null;
+  limit?: number | null;
+}
+
+export interface MarkCriminalReminderInput {
+  delivery_id: string;
+  sent: boolean;
+  error_message?: string | null;
+}
+
 export interface CaseAgencyContact {
   id: string;
   case_id: string;

@@ -131,7 +131,7 @@ function Assert-RemoteAssetHash {
 }
 
 Write-Host "[preflight] repository=$Repository tag=$Tag assets=$($localAssets.Count)"
-Invoke-RetryNative -FilePath 'gh' -Arguments @('auth', 'status') -Label '检查 GitHub CLI 登录状态' | Out-Null
+Invoke-RetryNative -FilePath 'gh' -Arguments @('api', 'user', '--jq', '.login') -Label '检查 GitHub CLI API 登录状态' | Out-Null
 $tagOutput = Invoke-RetryNative -FilePath 'git' -Arguments @('-C', $root, 'ls-remote', '--tags', $GitRemote, "refs/tags/$Tag", "refs/tags/$Tag^{}") -Label '查询远端 tag'
 if (-not $tagOutput) { throw "远端 tag 不存在：$Tag" }
 if ($tagOutput -notmatch [regex]::Escape($ExpectedCommit)) {
@@ -164,7 +164,7 @@ if ($release.draft -or $release.prerelease) { throw '目标 Release 为 draft/pr
 foreach ($local in $localAssets) {
     $liveRelease = Get-LiveRelease
     if ($liveRelease) { $release = $liveRelease }
-    $remoteAssets = if ($liveRelease) { @($liveRelease.assets) } else { @() }
+    $remoteAssets = if ($liveRelease) { @($liveRelease.assets) } else { @($release.assets) }
     $plan = @(Get-CaseBoardAssetPlan -LocalAssets @($local) -RemoteAssets $remoteAssets)
     $item = $plan[0]
     if ($item.action -eq 'fail') { throw "远端同名资产不一致（$($item.reason)）：$($item.name)" }

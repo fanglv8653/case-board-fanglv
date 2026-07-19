@@ -23,6 +23,7 @@ import {
   SlidersHorizontal,
   User,
   ShieldCheck,
+  Bell,
 } from "lucide-react";
 import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
 import { confirmDialog } from "@/lib/dialog";
@@ -59,6 +60,15 @@ import type { Settings, McpServerConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { FEATURE_FLAGS, useFeatureFlag } from "@/lib/featureFlags";
 import { FONT_SCALE, useFontScale } from "@/lib/uiScale";
+import {
+  CRIMINAL_NOTIFICATION_SETTINGS_EVENT,
+  disableCriminalNotifications,
+  enableCriminalNotifications,
+  getCriminalNotificationPermission,
+  isCriminalNotificationEnabled,
+  sendCriminalNotificationTest,
+  type CriminalNotificationPermission,
+} from "@/lib/criminalNotifications";
 
 const SETTINGS_SAVED_EVENT = "caseboard:settings-saved";
 
@@ -1504,6 +1514,8 @@ export function SettingsModal({
                   字段(ocr_provider/llm_provider/ollama_*)保留在后端/types,以后接新本地模型再恢复 UI。 */}
 
               {/* ── 功能开关:首页清爽开关(featureFlags)── */}
+              {tab === "toggles" && <CriminalNotificationSettingsCard />}
+
               {tab === "toggles" && <FeatureFlagsCard />}
 
               {/* ── 数据源:外部工具(MCP)白名单(企查查/万得/北大法宝 等远程 HTTP)──
@@ -1795,6 +1807,129 @@ function Field({
         </span>
       )}
     </label>
+  );
+}
+
+/** 刑事任务系统通知。偏好只保存在本机，权限申请只由用户点击触发。 */
+function CriminalNotificationSettingsCard() {
+  const [enabled, setEnabled] = useState(isCriminalNotificationEnabled);
+  const [permission, setPermission] =
+    useState<CriminalNotificationPermission>("denied");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const sync = () => setEnabled(isCriminalNotificationEnabled());
+    window.addEventListener(CRIMINAL_NOTIFICATION_SETTINGS_EVENT, sync);
+    void getCriminalNotificationPermission().then(setPermission);
+    return () => {
+      window.removeEventListener(CRIMINAL_NOTIFICATION_SETTINGS_EVENT, sync);
+    };
+  }, []);
+
+  async function handleToggle() {
+    setMessage(null);
+    if (enabled) {
+      disableCriminalNotifications();
+      setPermission(await getCriminalNotificationPermission());
+      setMessage("自动提醒已关闭，应用内任务列表仍可正常使用。");
+      return;
+    }
+
+    setBusy(true);
+    const result = await enableCriminalNotifications();
+    setPermission(result);
+    setMessage(
+      result === "granted"
+        ? "已开启。应用运行期间会扫描并发送到期提醒。"
+        : result === "denied"
+          ? "系统未授予通知权限，自动提醒保持关闭；应用内提醒不受影响。"
+          : "无法访问系统通知，请检查 Windows 通知设置后重试。",
+    );
+    setBusy(false);
+  }
+
+  async function handleTest() {
+    setBusy(true);
+    const result = await sendCriminalNotificationTest();
+    setPermission(result);
+    setMessage(
+      result === "granted"
+        ? "测试提醒已交给 Windows；系统是否展示仍受通知设置和专注模式影响。"
+        : result === "denied"
+          ? "系统未授予通知权限，未发送测试提醒。"
+          : "测试提醒发送失败，请检查 Windows 通知设置。",
+    );
+    setBusy(false);
+  }
+
+  return (
+    <Section
+      title="刑事案件 Windows 提醒"
+      desc="提醒仅在案件看板运行期间扫描和发送；关闭应用后不会驻留后台。"
+      fill
+    >
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <Bell className="mt-0.5 size-4 shrink-0 text-sky-600" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-foreground">
+              {enabled ? "自动提醒已开启" : "自动提醒已关闭"}
+            </p>
+            <p className="text-label text-muted-foreground">
+              只有点击开启或发送测试提醒时才会申请系统权限；权限拒绝后不会后台循环弹窗。
+            </p>
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-label="刑事案件 Windows 自动提醒"
+          aria-checked={enabled}
+          disabled={busy}
+          onClick={() => void handleToggle()}
+          className={cn(
+            "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50",
+            enabled ? "bg-emerald-600" : "bg-muted",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block size-4 rounded-full bg-white shadow transition-transform",
+              enabled ? "translate-x-4.5" : "translate-x-0.5",
+            )}
+          />
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void handleTest()}
+        >
+          {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Bell className="size-3.5" />}
+          发送测试提醒
+        </Button>
+        <span className="text-caption text-muted-foreground">
+          权限状态：
+          {permission === "granted"
+            ? "已授权"
+            : permission === "denied"
+              ? "未授权"
+              : "不可用"}
+        </span>
+      </div>
+      {message && (
+        <p className="rounded-md bg-muted px-2.5 py-2 text-caption text-muted-foreground">
+          {message}
+        </p>
+      )}
+      <p className="text-label leading-relaxed text-muted-foreground">
+        数据库中的“已发送”只表示通知已交付给系统，不代表用户已经阅读；案件内提醒和办理记录始终保留。
+      </p>
+    </Section>
   );
 }
 

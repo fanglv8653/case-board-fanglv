@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Calendar,
+  CheckSquare,
   ChevronLeft,
   ChevronRight,
   FolderOpen,
@@ -24,6 +25,7 @@ import type { FeishuCalendarEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import type { UpcomingEvent } from "./HomeView";
+import { AGENDA_SOURCE_META, agendaDotClass, type HomeAgendaKind } from "./homeAgendaViewModel";
 
 /* ------------------------------------------------------------------ */
 /* 类型                                                                  */
@@ -33,7 +35,7 @@ interface CalendarEvent {
   date: string; // YYYY-MM-DD
   title: string;
   source: "feishu" | "local";
-  kind?: "hearing" | "deadline" | "todo" | "manual";
+  kind: HomeAgendaKind;
   caseId?: string;
   eventId?: string; // 飞书事件ID
   appLink?: string; // 飞书日历链接
@@ -174,6 +176,7 @@ export function CalendarBoard({
         date: fe.start_date,
         title: fe.summary,
         source: "feishu",
+        kind: "feishu",
         eventId: fe.event_id,
         appLink: fe.app_link ?? undefined,
         description: fe.description ?? undefined,
@@ -318,8 +321,7 @@ export function CalendarBoard({
           const hasEvents = day.events.length > 0;
           const isSelected =
             selectedDate && isSameDay(day.date, selectedDate);
-          const hasFeishu = day.events.some((e) => e.source === "feishu");
-          const hasLocal = day.events.some((e) => e.source === "local");
+          const sourceKinds = [...new Set(day.events.map((event) => event.kind))].slice(0, 5);
 
           return (
             <button
@@ -349,22 +351,15 @@ export function CalendarBoard({
               {/* 事件指示点 */}
               {hasEvents && (
                 <div className="absolute bottom-1 flex gap-0.5">
-                  {hasFeishu && (
+                  {sourceKinds.map((kind) => (
                     <div
+                      key={kind}
                       className={cn(
                         "size-1.5 rounded-full",
-                        isSelected ? "bg-background" : "bg-blue-500",
+                        isSelected ? "bg-background" : agendaDotClass(kind),
                       )}
                     />
-                  )}
-                  {hasLocal && (
-                    <div
-                      className={cn(
-                        "size-1.5 rounded-full",
-                        isSelected ? "bg-background" : "bg-amber-500",
-                      )}
-                    />
-                  )}
+                  ))}
                 </div>
               )}
             </button>
@@ -373,15 +368,13 @@ export function CalendarBoard({
       </div>
 
       {/* 图例 */}
-      <div className="mt-3 flex items-center gap-4 text-caption text-muted-foreground">
-        <div className="flex items-center gap-1">
-          <div className="size-2 rounded-full bg-blue-500" />
-          <span>飞书日历</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <div className="size-2 rounded-full bg-amber-500" />
-          <span>案件事件</span>
-        </div>
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-muted-foreground">
+        {(Object.entries(AGENDA_SOURCE_META) as [HomeAgendaKind, (typeof AGENDA_SOURCE_META)[HomeAgendaKind]][]).map(([kind, meta]) => (
+          <div key={kind} className="flex items-center gap-1">
+            <div className={cn("size-2 rounded-full", meta.dotClass)} />
+            <span>{meta.label}</span>
+          </div>
+        ))}
       </div>
 
       {/* 选中日期的事件列表 */}
@@ -409,12 +402,14 @@ export function CalendarBoard({
                     expandedEvent === i && "rounded-b-none bg-accent/50",
                   )}
                 >
-                  {e.source === "feishu" ? (
+                  {e.kind === "feishu" ? (
                     <Calendar className="size-3.5 shrink-0 text-blue-600" />
                   ) : e.kind === "hearing" ? (
-                    <Gavel className="size-3.5 shrink-0 text-amber-600" />
+                    <Gavel className="size-3.5 shrink-0 text-rose-600" />
+                  ) : e.kind === "sop" || e.kind === "todo" ? (
+                    <CheckSquare className={cn("size-3.5 shrink-0", AGENDA_SOURCE_META[e.kind].iconClass)} />
                   ) : (
-                    <ShieldAlert className="size-3.5 shrink-0 text-amber-600" />
+                    <ShieldAlert className={cn("size-3.5 shrink-0", AGENDA_SOURCE_META[e.kind].iconClass)} />
                   )}
                   <span className="min-w-0 flex-1 truncate">
                     {e.title}

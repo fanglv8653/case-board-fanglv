@@ -36,6 +36,7 @@ import {
   reextractCriminalCaseMaterials,
   rejectCriminalExtractionCandidateBatch,
   refreshCriminalDeadlines,
+  refreshCriminalWorkflow,
   reorderCaseStageItems,
   upsertCaseAgencyContact,
   upsertCaseWorkItem,
@@ -75,6 +76,12 @@ import {
   parseProtectedFieldKeys,
   type CriminalExtractionCandidateBatchView,
 } from "./criminalExtractionReviewModels";
+import { CriminalWorkflowPanel } from "./CriminalWorkflowPanel";
+import {
+  appliedCandidateTriggerFields,
+  buildCriminalWorkflowTriggerEvents,
+  type CriminalWorkflowTriggerEvent,
+} from "./criminalWorkflowTriggers";
 
 type ProfileForm = CriminalCaseProfileUpsertInput;
 type StageForm = CaseStageItemUpsertInput;
@@ -261,6 +268,38 @@ export function CriminalCasePanel({
     }
   };
 
+  const refreshConfirmedWorkflowEvents = async (
+    events: CriminalWorkflowTriggerEvent[],
+    source: { type: "manual_confirmed" } | { type: "accepted_extraction_candidate"; refId: string },
+  ) => {
+    const failures: string[] = [];
+    for (const event of events) {
+      try {
+        if (source.type === "accepted_extraction_candidate") {
+          await refreshCriminalWorkflow({
+            case_id: caseId,
+            event_code: event.eventCode,
+            event_id: event.eventId,
+            confirmed_by: "local_user",
+            source_type: "accepted_extraction_candidate",
+            source_ref_id: source.refId,
+          });
+        } else {
+          await refreshCriminalWorkflow({
+            case_id: caseId,
+            event_code: event.eventCode,
+            event_id: event.eventId,
+            confirmed_by: "local_user",
+            source_type: "manual_confirmed",
+          });
+        }
+      } catch (cause) {
+        failures.push(`${event.eventCode}：${cause}`);
+      }
+    }
+    return failures;
+  };
+
   const confirmCandidateBatch = async (
     batchId: string,
     expectedProfileRevision: number,
@@ -268,6 +307,7 @@ export function CriminalCasePanel({
   ) => {
     setSubmittingCandidateBatchId(batchId);
     try {
+      const reviewedBatch = candidateBatches.find((batch) => batch.id === batchId);
       const result = await confirmCriminalExtractionCandidateBatch({
         batch_id: batchId,
         expected_profile_revision: expectedProfileRevision,
@@ -277,6 +317,21 @@ export function CriminalCasePanel({
         ? `；${result.protected_fields.length} 个字段因人工保护未覆盖`
         : "";
       toast(`已应用 ${result.applied_fields.length} 个候选字段${protectedNote}`, "success");
+      const triggerFields = appliedCandidateTriggerFields(reviewedBatch, result.applied_fields);
+      const triggerFailures = await refreshConfirmedWorkflowEvents(
+        buildCriminalWorkflowTriggerEvents(
+          caseId,
+          triggerFields,
+          new Set(result.applied_fields),
+        ),
+        { type: "accepted_extraction_candidate", refId: batchId },
+      );
+      if (triggerFailures.length > 0) {
+        toast(
+          `候选已应用，但 ${triggerFailures.length} 个流程事件触发失败；重新保存当前画像可幂等重试。${triggerFailures.join("；")}`,
+          "error",
+        );
+      }
       await reload();
     } catch (e) {
       const message = String(e);
@@ -314,24 +369,33 @@ export function CriminalCasePanel({
   const saveProfile = async () => {
     setSavingProfile(true);
     try {
-      await upsertCriminalCaseProfile(
-        cleanProfile({
-          ...profileForm,
-          charge_history_json: resolveStructuredListJson({
-            rawJson: profileForm.charge_history_json,
-            initialText: chargeHistoryInitialText,
-            currentText: chargeHistoryText,
-            key: "charge",
-          }),
-          co_defendants_json: resolveStructuredListJson({
-            rawJson: profileForm.co_defendants_json,
-            initialText: coDefendantsInitialText,
-            currentText: coDefendantsText,
-            key: "name",
-          }),
+      const savedInput = cleanProfile({
+        ...profileForm,
+        charge_history_json: resolveStructuredListJson({
+          rawJson: profileForm.charge_history_json,
+          initialText: chargeHistoryInitialText,
+          currentText: chargeHistoryText,
+          key: "charge",
         }),
-      );
+        co_defendants_json: resolveStructuredListJson({
+          rawJson: profileForm.co_defendants_json,
+          initialText: coDefendantsInitialText,
+          currentText: coDefendantsText,
+          key: "name",
+        }),
+      });
+      await upsertCriminalCaseProfile(savedInput);
       toast("刑事画像已保存", "success");
+      const triggerFailures = await refreshConfirmedWorkflowEvents(
+        buildCriminalWorkflowTriggerEvents(caseId, savedInput),
+        { type: "manual_confirmed" },
+      );
+      if (triggerFailures.length > 0) {
+        toast(
+          `画像已保存，但 ${triggerFailures.length} 个流程事件触发失败；再次保存可幂等重试。${triggerFailures.join("；")}`,
+          "error",
+        );
+      }
       await reload();
     } catch (e) {
       toast(`刑事画像保存失败:${e}`, "error");
@@ -890,6 +954,13 @@ export function CriminalCasePanel({
           </Button>
         </div>
       </Panel>
+
+      <CriminalWorkflowPanel
+        caseId={caseId}
+        deadlines={deadlines}
+        workItems={workItems}
+        onChanged={reload}
+      />
 
       <Panel
         title="办案时间轴"

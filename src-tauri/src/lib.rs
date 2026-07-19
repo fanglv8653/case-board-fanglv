@@ -939,6 +939,103 @@ async fn delete_case_agency_contact(
     db::criminal_cases::delete_case_agency_contact(pool.inner(), &id).await
 }
 
+#[tauri::command]
+async fn refresh_criminal_workflow(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_workflows::RefreshCriminalWorkflowInput,
+) -> Result<db::criminal_workflows::RefreshCriminalWorkflowResult, String> {
+    db::criminal_workflows::refresh(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn get_criminal_workflow(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Option<db::criminal_workflows::CriminalWorkflow>, String> {
+    db::criminal_workflows::get_workflow(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn list_criminal_workflow_tasks(
+    pool: tauri::State<'_, SqlitePool>,
+    filter: db::criminal_workflows::CriminalTaskFilter,
+) -> Result<Vec<db::criminal_workflows::CriminalWorkflowTask>, String> {
+    db::criminal_workflows::list_tasks(pool.inner(), filter).await
+}
+
+#[tauri::command]
+async fn list_criminal_task_events(
+    pool: tauri::State<'_, SqlitePool>,
+    task_id: String,
+) -> Result<Vec<db::criminal_workflows::CriminalTaskEvent>, String> {
+    db::criminal_workflows::list_task_events(pool.inner(), &task_id).await
+}
+
+#[tauri::command]
+async fn create_criminal_task_occurrence(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_workflows::CreateCriminalTaskOccurrenceInput,
+) -> Result<db::criminal_workflows::CriminalWorkflowTask, String> {
+    db::criminal_workflows::create_occurrence(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn apply_criminal_task_action(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_workflows::CriminalTaskActionInput,
+) -> Result<db::criminal_workflows::CriminalWorkflowTask, String> {
+    db::criminal_workflows::apply_action(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn list_criminal_task_summary(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<Vec<db::criminal_workflows::CriminalTaskSummaryRow>, String> {
+    db::criminal_workflows::list_summary(pool.inner()).await
+}
+
+#[tauri::command]
+async fn list_criminal_task_calendar(
+    pool: tauri::State<'_, SqlitePool>,
+    from: String,
+    to: String,
+) -> Result<Vec<db::criminal_workflows::CriminalTaskSummaryRow>, String> {
+    db::criminal_workflows::list_calendar(pool.inner(), &from, &to).await
+}
+
+#[tauri::command]
+async fn list_criminal_deadline_calendar(
+    pool: tauri::State<'_, SqlitePool>,
+    from: String,
+    to: String,
+) -> Result<Vec<db::criminal_workflows::CriminalDeadlineCalendarRow>, String> {
+    db::criminal_workflows::list_deadline_calendar(pool.inner(), &from, &to).await
+}
+
+#[tauri::command]
+async fn scan_criminal_reminder_candidates(
+    pool: tauri::State<'_, SqlitePool>,
+    now: String,
+) -> Result<i64, String> {
+    db::criminal_workflows::scan_reminder_candidates(pool.inner(), &now).await
+}
+
+#[tauri::command]
+async fn claim_criminal_reminders(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_workflows::ClaimCriminalRemindersInput,
+) -> Result<Vec<db::criminal_workflows::CriminalReminderDelivery>, String> {
+    db::criminal_workflows::claim_reminders(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn mark_criminal_reminder(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::criminal_workflows::MarkCriminalReminderInput,
+) -> Result<db::criminal_workflows::CriminalReminderDelivery, String> {
+    db::criminal_workflows::mark_reminder(pool.inner(), input).await
+}
+
 /* ============================================================
  * 2026-06-13 · 案件待办清单 (case_todos) commands(胡彬律师反馈)
  * ============================================================ */
@@ -5504,6 +5601,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -5645,6 +5743,18 @@ pub fn run() {
             list_case_agency_contacts,
             upsert_case_agency_contact,
             delete_case_agency_contact,
+            refresh_criminal_workflow,
+            get_criminal_workflow,
+            list_criminal_workflow_tasks,
+            list_criminal_task_events,
+            create_criminal_task_occurrence,
+            apply_criminal_task_action,
+            list_criminal_task_summary,
+            list_criminal_task_calendar,
+            list_criminal_deadline_calendar,
+            scan_criminal_reminder_candidates,
+            claim_criminal_reminders,
+            mark_criminal_reminder,
             add_todo,
             list_todos,
             list_open_todos,

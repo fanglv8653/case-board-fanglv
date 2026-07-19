@@ -75,6 +75,19 @@ import type {
   CriminalDeadlineItem,
   CriminalDeadlineRefreshReport,
   CriminalDeadlineItemUpsertInput,
+  CriminalWorkflow,
+  CriminalWorkflowTask,
+  CriminalTaskEvent,
+  RefreshCriminalWorkflowInput,
+  RefreshCriminalWorkflowResult,
+  CriminalTaskActionInput,
+  CreateCriminalTaskOccurrenceInput,
+  CriminalTaskFilter,
+  CriminalTaskSummaryRow,
+  CriminalDeadlineCalendarRow,
+  CriminalReminderDelivery,
+  ClaimCriminalRemindersInput,
+  MarkCriminalReminderInput,
   IncomeRecord,
   IncomeRecordFilter,
   IncomeRecordUpsertInput,
@@ -857,6 +870,72 @@ export function upsertCriminalDeadlineItem(
 
 export function deleteCriminalDeadlineItem(id: string): Promise<number> {
   return invoke<number>("delete_criminal_deadline_item", { id });
+}
+
+export function refreshCriminalWorkflow(
+  input: RefreshCriminalWorkflowInput,
+): Promise<RefreshCriminalWorkflowResult> {
+  return invoke<RefreshCriminalWorkflowResult>("refresh_criminal_workflow", { input });
+}
+
+export function getCriminalWorkflow(caseId: string): Promise<CriminalWorkflow | null> {
+  return invoke<CriminalWorkflow | null>("get_criminal_workflow", { caseId });
+}
+
+export function listCriminalWorkflowTasks(
+  filter: CriminalTaskFilter,
+): Promise<CriminalWorkflowTask[]> {
+  return invoke<CriminalWorkflowTask[]>("list_criminal_workflow_tasks", { filter });
+}
+
+export function listCriminalTaskEvents(taskId: string): Promise<CriminalTaskEvent[]> {
+  return invoke<CriminalTaskEvent[]>("list_criminal_task_events", { taskId });
+}
+
+export function createCriminalTaskOccurrence(
+  input: CreateCriminalTaskOccurrenceInput,
+): Promise<CriminalWorkflowTask> {
+  return invoke<CriminalWorkflowTask>("create_criminal_task_occurrence", { input });
+}
+
+export function applyCriminalTaskAction(
+  input: CriminalTaskActionInput,
+): Promise<CriminalWorkflowTask> {
+  return invoke<CriminalWorkflowTask>("apply_criminal_task_action", { input });
+}
+
+export function listCriminalTaskSummary(): Promise<CriminalTaskSummaryRow[]> {
+  return invoke<CriminalTaskSummaryRow[]>("list_criminal_task_summary");
+}
+
+export function listCriminalTaskCalendar(
+  from: string,
+  to: string,
+): Promise<CriminalTaskSummaryRow[]> {
+  return invoke<CriminalTaskSummaryRow[]>("list_criminal_task_calendar", { from, to });
+}
+
+export function listCriminalDeadlineCalendar(
+  from: string,
+  to: string,
+): Promise<CriminalDeadlineCalendarRow[]> {
+  return invoke<CriminalDeadlineCalendarRow[]>("list_criminal_deadline_calendar", { from, to });
+}
+
+export function scanCriminalReminderCandidates(now: string): Promise<number> {
+  return invoke<number>("scan_criminal_reminder_candidates", { now });
+}
+
+export function claimCriminalReminders(
+  input: ClaimCriminalRemindersInput,
+): Promise<CriminalReminderDelivery[]> {
+  return invoke<CriminalReminderDelivery[]>("claim_criminal_reminders", { input });
+}
+
+export function markCriminalReminder(
+  input: MarkCriminalReminderInput,
+): Promise<CriminalReminderDelivery> {
+  return invoke<CriminalReminderDelivery>("mark_criminal_reminder", { input });
 }
 
 export function listCaseAgencyContacts(caseId: string): Promise<CaseAgencyContact[]> {

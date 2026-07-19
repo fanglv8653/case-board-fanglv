@@ -68,9 +68,10 @@ function Get-CaseBoardAssetPlan {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][object[]]$LocalAssets,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$RemoteAssets
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$RemoteAssets
     )
 
+    if ($null -eq $RemoteAssets) { $RemoteAssets = @() }
     $localNames = @{}
     foreach ($local in $LocalAssets) {
         $localName = [string]$local.name

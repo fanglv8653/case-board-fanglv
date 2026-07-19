@@ -45,10 +45,10 @@ import {
   type CalendarEvent,
   deleteCalendarEvent,
   getCaseWithDocs,
-  getCriminalCaseProfile,
   getSettings,
   listCalendarEvents,
-  listCriminalDeadlineItems,
+  listCriminalDeadlineCalendar,
+  listCriminalTaskSummary,
   listOpenTodos,
   type OpenTodoRow,
   updateHomeCaseOrder,
@@ -63,12 +63,21 @@ import {
   ttDeleteItem,
   type TickTickItem,
 } from "@/lib/ticktickApi";
-import type { Case, CriminalCaseProfile, CriminalDeadlineItem, Document } from "@/lib/types";
+import type { Case, CriminalDeadlineCalendarRow, CriminalTaskSummaryRow, Document } from "@/lib/types";
 import { parseJsonArray } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useFeatureFlag } from "@/lib/featureFlags";
 import { isCriminalCase } from "@/lib/caseDomain";
 import { CalendarBoard } from "./CalendarBoard";
+import {
+  AGENDA_SOURCE_META,
+  agendaDotClass,
+  criminalDeadlineRowsToAgenda,
+  criminalSummaryRowsToAgenda,
+  dedupeAgendaEvents,
+  summarizeCriminalTaskRows,
+  type HomeAgendaKind,
+} from "./homeAgendaViewModel";
 import {
   compareCasesByStatusThenTime,
   resolveCaseStatus,
@@ -107,7 +116,7 @@ export type HomeViewMode = "workspace" | "civil" | "criminal";
 type ViewMode = "grid" | "list";
 type SortKey = "status" | "amount" | "filed_at" | "hearing";
 type SortDir = "asc" | "desc";
-type EventKind = "hearing" | "deadline" | "todo" | "manual";
+export type EventKind = Exclude<HomeAgendaKind, "feishu">;
 
 type CaseListPreferences = {
   viewMode: ViewMode;
@@ -253,16 +262,8 @@ export function HomeView({
       return next;
     });
   };
-  const criminalOverviewCases = useMemo(
-    () => overviewCases.filter((c) => isCriminalCase(c)),
-    [overviewCases],
-  );
-  const [criminalProfilesByCase, setCriminalProfilesByCase] = useState<
-    Record<string, CriminalCaseProfile | null>
-  >({});
-  const [criminalDeadlinesByCase, setCriminalDeadlinesByCase] = useState<
-    Record<string, CriminalDeadlineItem[]>
-  >({});
+  const [criminalTaskSummaryRows, setCriminalTaskSummaryRows] = useState<CriminalTaskSummaryRow[]>([]);
+  const [criminalDeadlineCalendarRows, setCriminalDeadlineCalendarRows] = useState<CriminalDeadlineCalendarRow[]>([]);
   const [criminalOverviewError, setCriminalOverviewError] = useState<string | null>(
     null,
   );
@@ -312,40 +313,27 @@ export function HomeView({
 
   useEffect(() => {
     let cancelled = false;
-    if (criminalOverviewCases.length === 0) {
-      setCriminalProfilesByCase({});
-      setCriminalDeadlinesByCase({});
-      setCriminalOverviewError(null);
-      return () => {
-        cancelled = true;
-      };
-    }
-    Promise.all(
-      criminalOverviewCases.map(async (c) => {
-        const [profile, deadlines] = await Promise.all([
-          getCriminalCaseProfile(c.id),
-          listCriminalDeadlineItems(c.id),
-        ]);
-        return [c.id, profile, deadlines] as const;
-      }),
-    )
-      .then((rows) => {
+    Promise.all([
+      listCriminalTaskSummary(),
+      listCriminalDeadlineCalendar("1970-01-01T00:00:00+08:00", "9999-12-31T23:59:59+08:00"),
+    ])
+      .then(([taskRows, deadlineRows]) => {
         if (cancelled) return;
-        setCriminalProfilesByCase(
-          Object.fromEntries(rows.map(([id, profile]) => [id, profile])),
-        );
-        setCriminalDeadlinesByCase(
-          Object.fromEntries(rows.map(([id, , deadlines]) => [id, deadlines])),
-        );
+        setCriminalTaskSummaryRows(taskRows);
+        setCriminalDeadlineCalendarRows(deadlineRows);
         setCriminalOverviewError(null);
       })
       .catch((e) => {
-        if (!cancelled) setCriminalOverviewError(String(e));
+        if (!cancelled) {
+          setCriminalTaskSummaryRows([]);
+          setCriminalDeadlineCalendarRows([]);
+          setCriminalOverviewError(String(e));
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [criminalOverviewCases]);
+  }, [cases]);
 
   useEffect(() => {
     let cancelled = false;
@@ -491,11 +479,13 @@ export function HomeView({
     .map(({ caseData }) => caseData);
   const upcomingEvents = buildUpcomingEvents(activeCases);
   const activeCaseCount = activeCases.length;
-  const calendarEvents = [
+  const calendarEvents = dedupeAgendaEvents([
     ...buildAllCalendarEvents(activeCases),
+    ...criminalDeadlineRowsToAgenda(criminalDeadlineCalendarRows),
+    ...criminalSummaryRowsToAgenda(criminalTaskSummaryRows),
     ...buildTodoEvents(openTodos),
     ...buildManualEvents(manualEvents),
-  ];
+  ]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -668,8 +658,7 @@ export function HomeView({
             criminalRows={criminalOverviewRows}
             civilRows={civilOverviewRows}
             executionRows={executionOverviewRows}
-            criminalProfilesByCase={criminalProfilesByCase}
-            criminalDeadlinesByCase={criminalDeadlinesByCase}
+            criminalTaskSummaryRows={criminalTaskSummaryRows}
             criminalOverviewError={criminalOverviewError}
             onOpenCriminalModule={onOpenCriminalModule}
             onOpenCivilModule={onOpenCivilModule}
@@ -680,7 +669,7 @@ export function HomeView({
           {cases.length > 0 && feishuEnabled && (
             <div className="mb-8">
               <CalendarBoard
-                localEvents={upcomingEvents}
+                localEvents={calendarEvents}
                 onPickCase={onPickCase}
                 onImportFolder={onImportFolder}
               />
@@ -1034,8 +1023,7 @@ function WorkbenchOverviewStrip({
   criminalRows,
   civilRows,
   executionRows,
-  criminalProfilesByCase,
-  criminalDeadlinesByCase,
+  criminalTaskSummaryRows,
   criminalOverviewError,
   onOpenCriminalModule,
   onOpenCivilModule,
@@ -1045,8 +1033,7 @@ function WorkbenchOverviewStrip({
   criminalRows: CaseRow[];
   civilRows: CaseRow[];
   executionRows: CaseRow[];
-  criminalProfilesByCase: Record<string, CriminalCaseProfile | null>;
-  criminalDeadlinesByCase: Record<string, CriminalDeadlineItem[]>;
+  criminalTaskSummaryRows: CriminalTaskSummaryRow[];
   criminalOverviewError: string | null;
   onOpenCriminalModule?: () => void;
   onOpenCivilModule?: () => void;
@@ -1054,8 +1041,7 @@ function WorkbenchOverviewStrip({
 }) {
   const criminalActive = activeRows(criminalRows);
   const civilActive = activeRows(civilRows);
-  const deadlineStats = countCriminalDeadlineStats(criminalDeadlinesByCase);
-  const stageSummary = summarizeCriminalStages(criminalRows, criminalProfilesByCase);
+  const taskStats = summarizeCriminalTaskRows(criminalTaskSummaryRows);
   const civilEvents = buildUpcomingEvents(civilActive.map((row) => row.caseData));
   const executionRemaining = executionRows.reduce(
     (sum, row) => sum + Number(row.caseData.execution_remaining ?? 0),
@@ -1076,12 +1062,7 @@ function WorkbenchOverviewStrip({
           countLabel="在办刑事"
           onClick={onOpenCriminalModule}
         >
-          <p className="text-sm text-muted-foreground">
-            {stageSummary || "阶段待补录；进入刑事详情可维护画像与节点。"}
-          </p>
-          <p className="mt-2 text-xs text-muted-foreground">
-            期限：今日 {deadlineStats.today}，7 日内 {deadlineStats.in7Days}，逾期 {deadlineStats.overdue}
-          </p>
+          <CriminalTaskStats stats={taskStats} />
           {criminalOverviewError && (
             <p className="mt-2 text-caption text-amber-700 dark:text-amber-300">
               刑事状态读取失败，已保留案件列表。
@@ -1101,12 +1082,7 @@ function WorkbenchOverviewStrip({
         countLabel="在办刑事"
         onClick={onOpenCriminalModule}
       >
-        <p className="text-sm text-muted-foreground">
-          {stageSummary || "阶段待补录；进入刑事详情可维护画像与节点。"}
-        </p>
-        <p className="mt-2 text-xs text-muted-foreground">
-          期限：今日 {deadlineStats.today}，7日内 {deadlineStats.in7Days}，逾期 {deadlineStats.overdue}
-        </p>
+        <CriminalTaskStats stats={taskStats} />
         {criminalOverviewError && (
           <p className="mt-2 text-caption text-amber-700 dark:text-amber-300">
             刑事状态读取失败，已保留案件列表。
@@ -1142,6 +1118,27 @@ function WorkbenchOverviewStrip({
         </p>
       </OverviewCard>
     </section>
+  );
+}
+
+function CriminalTaskStats({ stats }: { stats: ReturnType<typeof summarizeCriminalTaskRows> }) {
+  const items = [
+    ["逾期", stats.overdue, "text-red-600 dark:text-red-300"],
+    ["今日", stats.today, "text-orange-600 dark:text-orange-300"],
+    ["7 日内", stats.next_seven_days, "text-amber-600 dark:text-amber-300"],
+    ["待确认", stats.pending_confirmation, "text-violet-600 dark:text-violet-300"],
+    ["待排期", stats.unscheduled, "text-slate-600 dark:text-slate-300"],
+    ["待反馈", stats.pending_feedback, "text-cyan-600 dark:text-cyan-300"],
+  ] as const;
+  return (
+    <div className="grid grid-cols-3 gap-2">
+      {items.map(([label, count, color]) => (
+        <div key={label} className="rounded-md border border-border bg-background/60 px-2 py-1.5">
+          <div className={cn("text-lg font-semibold", color)}>{count}</div>
+          <div className="text-caption text-muted-foreground">{label}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1201,43 +1198,6 @@ function activeRows(rows: CaseRow[]) {
   return rows.filter(
     (row) => row.status.id !== "closed" && row.status.id !== "mediated",
   );
-}
-
-function summarizeCriminalStages(
-  rows: CaseRow[],
-  profiles: Record<string, CriminalCaseProfile | null>,
-) {
-  const counts = new Map<string, number>();
-  for (const row of activeRows(rows)) {
-    const stage = profiles[row.caseData.id]?.current_stage?.trim() || "阶段待补录";
-    counts.set(stage, (counts.get(stage) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([stage, count]) => `${stage} ${count}`)
-    .join(" · ");
-}
-
-function countCriminalDeadlineStats(
-  byCase: Record<string, CriminalDeadlineItem[]>,
-) {
-  const today = todayDate();
-  const weekEnd = new Date(today);
-  weekEnd.setDate(today.getDate() + 7);
-  let overdue = 0;
-  let todayCount = 0;
-  let in7Days = 0;
-  for (const item of Object.values(byCase).flat()) {
-    if (["done", "completed", "waived"].includes(item.status)) continue;
-    if (!item.effective_due_at) continue;
-    const due = parseDate(item.effective_due_at);
-    if (!due) continue;
-    if (due < today) overdue += 1;
-    if (toDateKey(due) === toDateKey(today)) todayCount += 1;
-    if (due >= today && due <= weekEnd) in7Days += 1;
-  }
-  return { overdue, today: todayCount, in7Days };
 }
 
 function IconToggle({
@@ -2166,6 +2126,16 @@ function CalendarPanel({
           </Button>
         </div>
       </div>
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-muted-foreground">
+        {(Object.entries(AGENDA_SOURCE_META) as [HomeAgendaKind, (typeof AGENDA_SOURCE_META)[HomeAgendaKind]][])
+          .filter(([kind]) => kind !== "feishu")
+          .map(([kind, meta]) => (
+            <div key={kind} className="flex items-center gap-1">
+              <span className={cn("size-2 rounded-full", meta.dotClass)} />
+              <span>{meta.label}</span>
+            </div>
+          ))}
+      </div>
       {collapsed ? (
         // 折叠态:固定高度摘要卡,日程多了内部上下滚动
         <div className="max-h-52 space-y-1.5 overflow-y-auto rounded-lg border border-border bg-background/60 p-3">
@@ -2656,12 +2626,7 @@ function eventUrgency(e: UpcomingEvent): "overdue" | "urgent" | "normal" {
 }
 
 function calendarDotClass(e: UpcomingEvent): string {
-  if (e.daysFromNow < 0 || e.daysFromNow <= 7) return "bg-red-500";
-  if (e.daysFromNow <= 30) return "bg-amber-500";
-  if (e.kind === "hearing") return "bg-blue-500";
-  if (e.kind === "todo") return "bg-violet-500";
-  if (e.kind === "manual") return "bg-emerald-500";
-  return "bg-slate-400";
+  return agendaDotClass(e.kind);
 }
 
 function buildCalendarDays(cursor: Date): Array<{ date: Date }> {
