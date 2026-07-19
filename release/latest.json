@@ -1,11 +1,11 @@
 {
-  "version": "0.6.4",
-  "notes": "方律案件看板 0.6.4：新增刑事辩护 SOP 流程、提醒与工作记录；更新包已通过 updater minisign 校验，该签名不等于 Windows Authenticode。",
-  "pub_date": "2026-07-19T07:38:07.363Z",
+  "version": "0.6.5",
+  "notes": "修复刑事案件名称、材料重新识别领域误判和顶部导航；更新包已通过 updater minisign 校验，该签名不等同于 Windows Authenticode。",
+  "pub_date": "2026-07-19T11:50:24.716Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UllmbjFkV1ZiRHRGMld5YUVhVVU2cFZHME5BRjNMc0lqanZ2R1M4WUtjWC9Uc1JDR2J0TTVlOTIvR3h0Qk1nV3JJY09jck4veHBkU2J5V2FqYmM3RlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NDQ2MTUwCWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNi40X3g2NC1zZXR1cC5leGUKQWRGbGV3ZTRtRnl5dE9kUVJQL1U2cWZ6OENXMHlTamZYTE9yRHpzWmlnb1daN0ljblhoUEorVjFCaGVxMnFsTkFXOGt4MS9wbDJwTVZQYUxRYkRvQUE9PQo=",
-      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.6.4-fanglv/FanglvCaseBoard_0.6.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UllCaXVpMlk0b3ZCQkRoVHF1dlRveGxsb3dSc0IyUTBORm5yeGpuVzlOMU5tV05LL3QzVGVQUUZta3hjRHdNTHJkN0M5d2hvNzFnQ1hSUG82c05vR1FvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NDYxNzI2CWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNi41X3g2NC1zZXR1cC5leGUKaHdoR0Y1UjJSdFBPMkg3SEIxWGNxT0ZzQzRrbmJId0N2Zk5MVUI0TEJqU0oyQmNIWFBweUNZNUxKL0FhdWVwWTgwOWxEQWl3Wi9qdjJQbjB1d2syREE9PQo=",
+      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.6.5-fanglv/FanglvCaseBoard_0.6.5_x64-setup.exe"
     }
   }
 }
