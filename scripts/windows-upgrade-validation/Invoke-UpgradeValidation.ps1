@@ -164,7 +164,8 @@ try {
   if ($Install) {
     $backupPath = Join-Path $runRoot 'formal-backup\caseboard.db'
     Invoke-Audit @('backup', '--source', $source, '--destination', $backupPath, '--output', (Join-Path $evidenceDir '10-formal-backup.json'))
-    if (Get-Process caseboard -ErrorAction SilentlyContinue) { throw 'caseboard process is running; refusing formal installation' }
+    $runningCaseboard = @(Get-Process caseboard -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited })
+    if ($runningCaseboard.Count -ne 0) { throw 'caseboard process is running; refusing formal installation' }
     $installProcess = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
     if ($installProcess.ExitCode -ne 0) { throw "Installer failed: $($installProcess.ExitCode)" }
     $installed = Resolve-Absolute $InstalledExecutable $true
