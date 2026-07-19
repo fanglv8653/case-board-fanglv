@@ -85,7 +85,7 @@ export function CaseView({
   error: string | null;
   onSwitchCase: (id: string) => void;
   onGoHome: () => void;
-  onOpenDoc: (doc: Document) => void;
+  onOpenDoc: (doc: Document, page?: number | null) => void;
   onRevealDoc: (doc: Document) => void;
   onRevealCase: () => void;
   /** 编辑模式开关 — 右上角铅笔按钮控制,P3 接 inline 编辑 / 拖卡片 / 删行 */
@@ -515,7 +515,12 @@ export function CaseView({
                 selectedCase &&
                 domain === "criminal" && (
                   <div className="mt-5">
-                    <CriminalCasePanel caseId={selectedCase.id} onOpenSentencing={onOpenSentencing} />
+                    <CriminalCasePanel
+                      caseId={selectedCase.id}
+                      documents={documents}
+                      onOpenDocument={onOpenDoc}
+                      onOpenSentencing={onOpenSentencing}
+                    />
                   </div>
                 )}
               {!loading && !error && documents.length > 0 && selectedCase && (
@@ -529,7 +534,12 @@ export function CaseView({
                   />
 
                   {domain === "criminal" && (
-                    <CriminalCasePanel caseId={selectedCase.id} onOpenSentencing={onOpenSentencing} />
+                    <CriminalCasePanel
+                      caseId={selectedCase.id}
+                      documents={documents}
+                      onOpenDocument={onOpenDoc}
+                      onOpenSentencing={onOpenSentencing}
+                    />
                   )}
 
                   {/* 原文件(默认折叠) */}

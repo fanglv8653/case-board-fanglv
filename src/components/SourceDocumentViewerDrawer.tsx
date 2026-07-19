@@ -63,12 +63,15 @@ const isInBoardOffice = (name: string) =>
 export function SourceDocumentViewerDrawer({
   doc,
   caseFolder,
+  initialPage,
   onClose,
   onRename,
 }: {
   doc: Document;
   /** 案件源文件夹(用于 asset scope 授权) */
   caseFolder: string;
+  /** 从来源引用进入时直接打开原件并定位页码。 */
+  initialPage?: number | null;
   onClose: () => void;
   /** 重命名板内显示名(name=null/空 → 清回原文件名);不传则不显示改名按钮 */
   onRename?: (docId: string, name: string | null) => void;
@@ -80,7 +83,7 @@ export function SourceDocumentViewerDrawer({
   const canShowMd = nativeText || hasMd;
 
   // 默认 tab:能看处理后文本→md;否则直接原件
-  const [tab, setTab] = useState<Tab>(canShowMd ? "md" : "original");
+  const [tab, setTab] = useState<Tab>(initialPage ? "original" : canShowMd ? "md" : "original");
 
   // 头部内联重命名(板内显示名,不动磁盘原件)
   const [renaming, setRenaming] = useState(false);
@@ -294,6 +297,7 @@ export function SourceDocumentViewerDrawer({
               sourcePath={doc.source_path}
               assetUrl={assetUrl}
               assetError={assetError}
+              initialPage={initialPage}
               onOpenExternal={() => openInDefaultApp(doc.source_path)}
             />
           )}
@@ -309,6 +313,7 @@ function OriginalView({
   sourcePath,
   assetUrl,
   assetError,
+  initialPage,
   onOpenExternal,
 }: {
   docId: string;
@@ -316,6 +321,7 @@ function OriginalView({
   sourcePath: string;
   assetUrl: string | null;
   assetError: string | null;
+  initialPage?: number | null;
   onOpenExternal: () => void;
 }) {
   // PDF / 图片:走 asset 流式协议
@@ -335,6 +341,7 @@ function OriginalView({
           assetUrl={assetUrl}
           filename={filename}
           sourcePath={sourcePath}
+          initialPage={initialPage}
         />
       );
   }
@@ -384,13 +391,15 @@ function PdfView({
   assetUrl,
   filename,
   sourcePath,
+  initialPage,
 }: {
   docId: string;
   assetUrl: string;
   filename: string;
   sourcePath: string;
+  initialPage?: number | null;
 }) {
-  const [page, setPage] = useState<number | null>(null);
+  const [page, setPage] = useState<number | null>(initialPage ?? null);
   const [jumpNonce, setJumpNonce] = useState(0); // 同页重点也能重跳(原生重挂 / 精读重滚)
   // 渲染模式:native=原生 iframe(默认,大扫描件轻快)/ reader=pdf.js 精读(可缩放/双指/选字)
   const [mode, setMode] = useState<"native" | "reader">("native");

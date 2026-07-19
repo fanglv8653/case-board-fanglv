@@ -146,6 +146,7 @@ function App() {
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
   /** 源文件看板 Phase 1:当前在板内查看器抽屉打开的源文件(MD/原件双视图) */
   const [viewerDoc, setViewerDoc] = useState<Document | null>(null);
+  const [viewerTargetPage, setViewerTargetPage] = useState<number | null>(null);
   /**
    * V0.3 D1+D2 · 写作模式:当前在 Milkdown 编辑器里打开的文书(null = 看板模式)。
    * 仅 chat_artifact 文书(is_ai_artifact + category∈文书类型)可进编辑器。切案件重置。
@@ -657,11 +658,12 @@ function App() {
    * 文档点击行为:文本类弹 markdown 预览,非文本类用系统默认应用打开。
    * 错误时不在主页面打断,console.warn 即可(下次可以加 toast)。
    */
-  const handleOpenDoc = useCallback((doc: Document) => {
+  const handleOpenDoc = useCallback((doc: Document, targetPage?: number | null) => {
     // 源文件看板 Phase 1(2026-06-19):真实导入的源文件(非 AI 产物)→ 板内查看器抽屉
     // (「处理后 MD / 原件」双 tab,板内看 PDF/图片、MD 失真时切原件核对)。
     // AI 产物 / 报告 / chat 文书仍走 MarkdownModal —— 它们 MD-native,「原件」tab 无意义。
     if (!doc.is_ai_artifact) {
+      setViewerTargetPage(targetPage ?? null);
       setViewerDoc(doc);
       return;
     }
@@ -1248,7 +1250,11 @@ function App() {
         <SourceDocumentViewerDrawer
           doc={viewerDoc}
           caseFolder={selectedCase.source_folder}
-          onClose={() => setViewerDoc(null)}
+          initialPage={viewerTargetPage}
+          onClose={() => {
+            setViewerDoc(null);
+            setViewerTargetPage(null);
+          }}
           onRename={async (docId, name) => {
             try {
               await setDocumentDisplayName(docId, name);

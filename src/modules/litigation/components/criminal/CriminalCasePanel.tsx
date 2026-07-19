@@ -56,6 +56,7 @@ import type {
   CriminalExtractionCandidateDetail,
   CriminalDeadlineItem,
   CriminalDeadlineItemUpsertInput,
+  Document,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -81,6 +82,7 @@ import {
   type CriminalExtractionCandidateBatchView,
 } from "./criminalExtractionReviewModels";
 import { CriminalWorkflowPanel } from "./CriminalWorkflowPanel";
+import { CriminalDefenseWorkspace } from "./CriminalDefenseWorkspace";
 import {
   appliedCandidateTriggerFields,
   buildCriminalWorkflowTriggerEvents,
@@ -163,9 +165,13 @@ const PRIORITY_OPTIONS = [
 
 export function CriminalCasePanel({
   caseId,
+  documents = [],
+  onOpenDocument,
   onOpenSentencing,
 }: {
   caseId: string;
+  documents?: Document[];
+  onOpenDocument?: (document: Document, page?: number | null) => void;
   onOpenSentencing?: (prefill: SentencingPrefill) => void;
 }) {
   const [profileForm, setProfileForm] = useState<ProfileForm>({
@@ -654,7 +660,7 @@ export function CriminalCasePanel({
           <p className="font-mono text-caption uppercase tracking-wider text-muted-foreground">
             CRIMINAL WORKSPACE
           </p>
-          <h2 className="mt-1 text-lg font-semibold tracking-tight">刑事案件工作区</h2>
+          <h2 className="mt-1 text-lg font-semibold tracking-tight">刑事基础信息与办案管理</h2>
           <p className="mt-1 text-xs text-muted-foreground">
             维护刑事画像、办案时间轴和机关联系人。期限属于办案提醒，条件规则需人工确认。
           </p>
@@ -687,6 +693,22 @@ export function CriminalCasePanel({
           刑事信息加载失败：{error}
         </div>
       )}
+
+      <CriminalDefenseWorkspace
+        caseId={caseId}
+        documents={documents}
+        onOpenDocument={onOpenDocument}
+        onRecognizeMaterials={recognizeMaterials}
+        recognizingMaterials={recognizingMaterials}
+        taskPanel={(
+          <CriminalWorkflowPanel
+            caseId={caseId}
+            deadlines={deadlines}
+            workItems={workItems}
+            onChanged={reload}
+          />
+        )}
+      />
 
       <CriminalExtractionReviewPanel
         batches={candidateBatches}
@@ -958,13 +980,6 @@ export function CriminalCasePanel({
           </Button>
         </div>
       </Panel>
-
-      <CriminalWorkflowPanel
-        caseId={caseId}
-        deadlines={deadlines}
-        workItems={workItems}
-        onChanged={reload}
-      />
 
       <Panel
         title="办案时间轴"
