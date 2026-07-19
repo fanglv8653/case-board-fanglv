@@ -1219,19 +1219,58 @@ pub struct CreateDraftInput {
     pub title: String,
     pub created_by: String,
 }
+
+pub const CRIMINAL_DRAFT_DOCUMENT_TYPES: [&str; 13] = [
+    "defense_statement",
+    "evidence_objection",
+    "hearing_questions",
+    "first_meeting_record",
+    "followup_meeting_record",
+    "bail_application",
+    "non_arrest_opinion",
+    "custody_necessity_application",
+    "prosecution_legal_opinion",
+    "sentencing_opinion",
+    "criminal_appeal",
+    "evidence_list",
+    "other",
+];
+
+fn validate_draft_document_type(document_type: &str) -> Result<&str, String> {
+    let normalized = document_type.trim();
+    if CRIMINAL_DRAFT_DOCUMENT_TYPES.contains(&normalized) {
+        Ok(normalized)
+    } else {
+        Err(coded(
+            "INVALID_STATE_TRANSITION",
+            format!("不支持的刑事文书类型: {normalized}"),
+        ))
+    }
+}
+
+async fn create_draft_record(
+    pool: &SqlitePool,
+    input: CreateDraftInput,
+) -> Result<DraftDocument, String> {
+    require_criminal(pool, &input.case_id).await?;
+    let document_type = validate_draft_document_type(&input.document_type)?;
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO criminal_draft_documents(id,case_id,document_type,title,created_by) VALUES(?,?,?,?,?)")
+        .bind(&id).bind(&input.case_id).bind(document_type).bind(&input.title).bind(&input.created_by)
+        .execute(pool).await.map_err(|e|coded("DATABASE_WRITE_FAILED",e.to_string()))?;
+    sqlx::query_as("SELECT * FROM criminal_draft_documents WHERE id=?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| coded("DATABASE_WRITE_FAILED", e.to_string()))
+}
+
 #[tauri::command]
 pub async fn create_criminal_draft(
     pool: tauri::State<'_, SqlitePool>,
     input: CreateDraftInput,
 ) -> Result<DraftDocument, String> {
-    require_criminal(pool.inner(), &input.case_id).await?;
-    let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO criminal_draft_documents(id,case_id,document_type,title,created_by) VALUES(?,?,?,?,?)").bind(&id).bind(&input.case_id).bind(&input.document_type).bind(&input.title).bind(&input.created_by).execute(pool.inner()).await.map_err(|e|coded("DATABASE_WRITE_FAILED",e.to_string()))?;
-    sqlx::query_as("SELECT * FROM criminal_draft_documents WHERE id=?")
-        .bind(id)
-        .fetch_one(pool.inner())
-        .await
-        .map_err(|e| coded("DATABASE_WRITE_FAILED", e.to_string()))
+    create_draft_record(pool.inner(), input).await
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateDraftVersionInput {
@@ -1833,5 +1872,39 @@ mod tests {
         assert_eq!(second, fingerprint(copied.to_str().unwrap()).unwrap());
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(copied);
+    }
+    #[test]
+    fn frozen_draft_document_type_enum_accepts_all_thirteen_types() {
+        assert_eq!(CRIMINAL_DRAFT_DOCUMENT_TYPES.len(), 13);
+        for document_type in CRIMINAL_DRAFT_DOCUMENT_TYPES {
+            assert_eq!(
+                validate_draft_document_type(document_type).unwrap(),
+                document_type
+            );
+        }
+    }
+    #[tokio::test]
+    async fn unsupported_draft_document_type_returns_stable_error_and_zero_writes() {
+        let p = seeded("criminal").await;
+        let error = create_draft_record(
+            &p,
+            CreateDraftInput {
+                case_id: "c".into(),
+                document_type: "defense_opinion".into(),
+                title: "契约外文书".into(),
+                created_by: "律师".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "INVALID_STATE_TRANSITION: 不支持的刑事文书类型: defense_opinion"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM criminal_draft_documents")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
