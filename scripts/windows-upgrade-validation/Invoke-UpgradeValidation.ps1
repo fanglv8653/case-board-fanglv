@@ -53,16 +53,25 @@ function Invoke-Audit([string[]]$Arguments) {
   if ($LASTEXITCODE -ne 0) { throw "db_audit.py failed with exit code $LASTEXITCODE" }
 }
 
+function Test-ProcessStillRunning([uint32]$ProcessId) {
+  $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+  return $null -ne $process -and -not $process.HasExited
+}
+
 function Stop-IsolatedProcesses([string]$WebViewPath) {
   $matches = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -and $_.CommandLine.IndexOf($WebViewPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    $_.CommandLine -and
+      $_.CommandLine.IndexOf($WebViewPath, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+      (Test-ProcessStillRunning $_.ProcessId)
   })
   foreach ($item in $matches) { Stop-Process -Id $item.ProcessId -Force -ErrorAction SilentlyContinue }
   $remaining = @()
   for ($attempt = 0; $attempt -lt 20; $attempt++) {
     Start-Sleep -Milliseconds 250
     $remaining = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-      $_.CommandLine -and $_.CommandLine.IndexOf($WebViewPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+      $_.CommandLine -and
+        $_.CommandLine.IndexOf($WebViewPath, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        (Test-ProcessStillRunning $_.ProcessId)
     })
     if ($remaining.Count -eq 0) { break }
     foreach ($item in $remaining) { Stop-Process -Id $item.ProcessId -Force -ErrorAction SilentlyContinue }
