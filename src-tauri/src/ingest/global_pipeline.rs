@@ -52,22 +52,26 @@ pub async fn run_global_extract(
 ) -> GlobalExtractReport {
     let start = std::time::Instant::now();
 
-    let case_type: Option<String> = match sqlx::query_scalar("SELECT case_type FROM cases WHERE id = ?")
-        .bind(case_id)
-        .fetch_optional(pool)
-        .await
-    {
-        Ok(case_type) => case_type,
-        Err(error) => return GlobalExtractReport {
-            case_id: case_id.into(), docs_included: 0, table_ok: false, report_ok: false,
-            report_path: None, elapsed_ms: start.elapsed().as_millis(),
-            error: Some(format!("读取案件领域失败，已停止全案聚合: {error}")),
-        },
-    };
-    if matches!(
-        crate::ingest::reliability::classify_domain(case_type.as_deref(), ""),
-        crate::ingest::reliability::Domain::Criminal
-    ) {
+    let legal_domain: Option<String> =
+        match sqlx::query_scalar("SELECT legal_domain FROM cases WHERE id = ?")
+            .bind(case_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(legal_domain) => legal_domain,
+            Err(error) => {
+                return GlobalExtractReport {
+                    case_id: case_id.into(),
+                    docs_included: 0,
+                    table_ok: false,
+                    report_ok: false,
+                    report_path: None,
+                    elapsed_ms: start.elapsed().as_millis(),
+                    error: Some(format!("读取案件领域失败，已停止全案聚合: {error}")),
+                }
+            }
+        };
+    if legal_domain.as_deref() == Some("criminal") {
         return GlobalExtractReport {
             case_id: case_id.into(),
             docs_included: 0,
@@ -545,13 +549,22 @@ mod criminal_gate_tests {
     #[tokio::test]
     async fn criminal_case_never_enters_civil_global_extract() {
         let pool = crate::db::init_pool(":memory:").await.unwrap();
-        let case = crate::db::cases::create_case(&pool, crate::db::cases::NewCase {
-            name: "刑事分流测试".into(), case_type: "criminal".into(),
-            source_folder: format!("D:/tmp/{}", uuid::Uuid::new_v4()),
-        }).await.unwrap();
+        let case = crate::db::cases::create_case(
+            &pool,
+            crate::db::cases::NewCase {
+                name: "刑事分流测试".into(),
+                case_type: "criminal".into(),
+                source_folder: format!("D:/tmp/{}", uuid::Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
         let config = crate::llm::LlmConfig {
-            endpoint: "http://127.0.0.1:1/v1/chat/completions".into(), model: "unused".into(),
-            api_key: None, timeout_secs: 1, temperature: 0.0,
+            endpoint: "http://127.0.0.1:1/v1/chat/completions".into(),
+            model: "unused".into(),
+            api_key: None,
+            timeout_secs: 1,
+            temperature: 0.0,
         };
         let report = run_global_extract(&pool, &case.id, &config).await;
         assert!(report.table_ok);

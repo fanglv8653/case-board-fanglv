@@ -16,6 +16,7 @@ import {
   type CourtSmsPreview,
 } from "@/lib/api";
 import type { Case } from "@/lib/types";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 import { toast } from "@/components/ui/toast";
 
 export function CourtSmsTool() {
@@ -79,21 +80,9 @@ export function CourtSmsTool() {
     }
   };
 
-  // 2026-06-11:当事人名字前置 —— 律师记得住名字记不住案号,下拉先看人名
+  // 使用全应用统一案件名；案号仍保留用于同名案件区分。
   const caseLabel = (c: Case) => {
-    const first = (json: string | null): string | null => {
-      if (!json) return null;
-      try {
-        const arr = JSON.parse(json) as string[];
-        return Array.isArray(arr) && arr.length > 0 ? arr[0] : null;
-      } catch {
-        return null;
-      }
-    };
-    const p = first(c.agg_plaintiffs);
-    const d = first(c.agg_defendants);
-    const parties = p || d ? `${p ?? "—"} vs ${d ?? "—"} · ` : "";
-    return `${parties}${c.agg_cause || c.name}${c.agg_case_no ? ` · ${c.agg_case_no}` : ""}`;
+    return `${getCaseDisplayName(c)}${c.agg_case_no ? ` · ${c.agg_case_no}` : ""}`;
   };
 
   return (

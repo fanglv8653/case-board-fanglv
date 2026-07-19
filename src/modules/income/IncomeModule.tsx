@@ -30,6 +30,7 @@ import type {
   IncomeSummary,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 import { toast } from "@/components/ui/toast";
 
 type FilterState = {
@@ -587,7 +588,7 @@ function IncomeFormDrawer({
                 <option value="">不关联案件,手工记录</option>
                 {cases.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name}
+                    {getCaseDisplayName(c)}
                   </option>
                 ))}
               </select>

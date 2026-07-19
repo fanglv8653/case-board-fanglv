@@ -54,6 +54,7 @@ export function refreshLprData(): Promise<LprRefreshResult> {
 
 import type {
   Case,
+  LegalDomain,
   CaseInstance,
   CaseAgencyContact,
   CaseAgencyContactUpsertInput,
@@ -156,6 +157,23 @@ export function getCaseWithDocs(id: string): Promise<CaseWithDocs> {
 /** 删除一个案件(级联删除关联文档)。不动原始文件夹。 */
 export function deleteCase(id: string): Promise<void> {
   return invoke<void>("delete_case", { id });
+}
+
+/**
+ * 人工更正案件领域（人工值永久优先于自动推断）。
+ * 第三参数省略 = 保留显示名；null/空白 = 清空；非空文本 = 覆盖。
+ */
+export function updateCaseLegalIdentity(
+  caseId: string,
+  legalDomain: LegalDomain,
+  displayNameOverride?: string | null,
+): Promise<Case> {
+  return invoke<Case>("update_case_legal_identity", {
+    caseId,
+    legalDomain,
+    displayNameOverride: displayNameOverride ?? null,
+    updateDisplayNameOverride: arguments.length >= 3,
+  });
 }
 
 /* ------------------------------------------------------------------ */

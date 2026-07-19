@@ -22,7 +22,6 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { BetaBadge } from "@/components/BetaBadge";
 // 私人专属功能接缝(双轨发布模型):开源仓 getPrivateTopTabs() 返回 [] → 无「独立」标签。
 import { getPrivateTopTabs } from "@/private";
 
@@ -46,22 +45,16 @@ const MODULES: {
   label: string;
   compactLabel?: string;
   icon: TabIcon;
-  beta?: boolean;
   group: ModuleGroup;
   title?: string;
 }[] = [
-  { id: "litigation", label: "民事", icon: Briefcase, group: "case" },
-  // 2026-06-17 · 加「刑事」tab(诉讼之后):复刻诉讼看板框架,只显示刑事案件,
-  // AI 助手只保留「刑事深度分析」单 chip(三阶层鉴定式,借鉴游初 gutachten-criminal-case)。
-  // 2026-06-18 · 标 Beta(尚在打磨,结果需自行核对)。
   {
     id: "criminal",
     label: "刑事",
     icon: Scale,
-    beta: true,
     group: "case",
-    title: "刑事案件 Beta: 自动识别归类,分析结果需人工核对",
   },
+  { id: "litigation", label: "民事", icon: Briefcase, group: "case" },
   { id: "execution", label: "执行", icon: Gavel, group: "case" },
   { id: "income", label: "收入", icon: CircleDollarSign, group: "work" },
   { id: "transaction", label: "非诉", icon: FileQuestion, group: "work" },
@@ -159,7 +152,6 @@ export function ModuleTabs({
                 >
                   <Icon className="size-4 shrink-0" />
                   <span className="font-medium">{m.compactLabel ?? m.label}</span>
-                  {m.beta && <BetaBadge className="ml-0.5" />}
                 </button>
               );
             })}

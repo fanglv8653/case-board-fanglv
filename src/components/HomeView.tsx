@@ -68,6 +68,7 @@ import { parseJsonArray } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useFeatureFlag } from "@/lib/featureFlags";
 import { isCriminalCase } from "@/lib/caseDomain";
+import { caseMatchesSearch, getCaseDisplayName } from "@/lib/caseIdentity";
 import { CalendarBoard } from "./CalendarBoard";
 import {
   AGENDA_SOURCE_META,
@@ -125,6 +126,7 @@ type CaseListPreferences = {
 };
 
 interface CaseDisplayFields {
+  name: string;
   caseNo: string | null;
   court: string | null;
   cause: string | null;
@@ -460,16 +462,9 @@ export function HomeView({
     if (!filterBarOn) return true; // 工具栏关闭 → 不过滤,显示全部案件
     if (statusFilters.size > 0 && !statusFilters.has(row.status.id)) return false;
     if (courtFilter && row.display.court !== courtFilter) return false;
-    // 模糊搜索:原告/被告名(公司或人名)+ 当事人摘要,子串匹配(不分大小写)
+    // 模糊搜索统一覆盖显示名、自定义名、案由、原文件夹名和当事人。
     if (searchQuery) {
-      const hay = [
-        ...row.display.plaintiffs,
-        ...row.display.defendants,
-        row.display.partySummary,
-      ]
-        .join(" ")
-        .toLowerCase();
-      if (!hay.includes(searchQuery)) return false;
+      if (!caseMatchesSearch(row.caseData, searchQuery)) return false;
     }
     return true;
   });
@@ -585,7 +580,7 @@ export function HomeView({
     const y = Math.min(e.clientY, window.innerHeight - 96);
     setCtxMenu({
       id: row.caseData.id,
-      name: row.display.cause || row.caseData.name,
+      name: row.display.name,
       x,
       y,
     });
@@ -1309,8 +1304,8 @@ function CaseCard({
       tabIndex={0}
       aria-label={
         selectMode
-          ? `${selected ? "取消选择" : "选择"}案件 ${display.cause || caseData.name}`
-          : `打开案件 ${display.cause || caseData.name}`
+          ? `${selected ? "取消选择" : "选择"}案件 ${display.name}`
+          : `打开案件 ${display.name}`
       }
     >
       {selectMode ? (
@@ -1356,7 +1351,7 @@ function CaseCard({
             示例
           </span>
         )}
-        {display.cause || caseData.name}
+        {display.name}
       </h3>
       <p className="mt-1 text-sm text-muted-foreground">{display.partySummary}</p>
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
@@ -1419,8 +1414,8 @@ function CaseListRow({
       tabIndex={0}
       aria-label={
         selectMode
-          ? `${selected ? "取消选择" : "选择"}案件 ${display.cause || caseData.name}`
-          : `打开案件 ${display.cause || caseData.name}`
+          ? `${selected ? "取消选择" : "选择"}案件 ${display.name}`
+          : `打开案件 ${display.name}`
       }
     >
       <div className="flex min-w-0 items-center gap-2">
@@ -1432,7 +1427,7 @@ function CaseListRow({
           ))}
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-foreground">
-            {display.cause || caseData.name}
+            {display.name}
           </div>
           <div className="truncate text-xs text-muted-foreground">{display.partySummary}</div>
         </div>
@@ -2402,6 +2397,7 @@ function buildCaseDisplay(caseData: Case): CaseDisplayFields {
   const leftMore = plaintiffs.length > 1 ? `等${plaintiffs.length}人` : "";
   const rightMore = defendants.length > 1 ? `等${defendants.length}人` : "";
   return {
+    name: getCaseDisplayName(caseData),
     caseNo: ovStr("agg_case_no", caseData.agg_case_no),
     court: ovStr("agg_court", caseData.agg_court),
     cause: ovStr("agg_cause", caseData.agg_cause),
@@ -2460,7 +2456,7 @@ function buildUpcomingEvents(cases: Case[]): UpcomingEvent[] {
   const events: UpcomingEvent[] = [];
   const now = todayDate();
   for (const c of cases) {
-    const caseName = c.agg_cause || c.name;
+    const caseName = getCaseDisplayName(c);
     let nearestHearing: UpcomingEvent | null = null;
     for (const kd of readKeyDates(c)) {
       if (kd.event?.includes("开庭") && kd.date) {
@@ -2523,7 +2519,7 @@ function buildAllCalendarEvents(cases: Case[]): UpcomingEvent[] {
   const events: UpcomingEvent[] = [];
   const now = todayDate();
   for (const c of cases) {
-    const caseName = c.agg_cause || c.name;
+    const caseName = getCaseDisplayName(c);
     for (const kd of readKeyDates(c)) {
       if (kd.event?.includes("开庭") && kd.date) {
         const d = parseDate(kd.date);

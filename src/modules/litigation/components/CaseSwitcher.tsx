@@ -4,6 +4,7 @@ import { ChevronDown } from "lucide-react";
 import { type Case } from "@/lib/types";
 import { shortenPath } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 
 export function CaseSwitcher({
   cases,
@@ -23,7 +24,7 @@ export function CaseSwitcher({
         onClick={() => setOpen((v) => !v)}
         className="inline-flex items-baseline gap-1.5 text-xl font-semibold tracking-tight text-foreground transition-opacity hover:opacity-70"
       >
-        <span>{selected?.name ?? "—"}</span>
+        <span>{selected ? getCaseDisplayName(selected) : "—"}</span>
         <ChevronDown className="size-4 self-center text-muted-foreground" />
       </button>
       {open && (
@@ -48,7 +49,9 @@ export function CaseSwitcher({
                     c.id === selectedId && "bg-accent/50",
                   )}
                 >
-                  <div className="font-medium text-foreground">{c.name}</div>
+                  <div className="font-medium text-foreground">
+                    {getCaseDisplayName(c)}
+                  </div>
                   <div className="mt-0.5 truncate font-mono text-caption text-muted-foreground">
                     {shortenPath(c.source_folder, 2)}
                   </div>

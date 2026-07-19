@@ -4277,6 +4277,21 @@ async fn update_case_overrides(
         .map_err(db_err)
 }
 
+/// 人工更正案件法律领域，并可选同步修改案件显示名。
+/// `update_display_name_override=false` 时保留原显示名；为 true 时，
+/// null/空白清空，非空文本覆盖。
+#[tauri::command]
+async fn update_case_legal_identity(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    legal_domain: String,
+    display_name_override: Option<String>,
+    update_display_name_override: bool,
+) -> Result<cases_db::Case, String> {
+    let name_patch = update_display_name_override.then_some(display_name_override.as_deref());
+    cases_db::update_legal_identity(pool.inner(), &case_id, &legal_domain, name_patch).await
+}
+
 /// 2026-05-24 (T3) 重抽该案件的所有 LLM 抽取。
 ///
 /// 用途:升级 prompt(扩字段 / 反诉视角 / is_our_side 等)后,存量
@@ -5806,6 +5821,7 @@ pub fn run() {
             delete_express_track,
             update_workflow_status,
             update_case_overrides,
+            update_case_legal_identity,
             get_deepseek_balance,
             collect_feedback_diagnostic,
             save_feedback_md,

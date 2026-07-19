@@ -15,6 +15,12 @@ pub struct Case {
     pub id: String,
     pub name: String,
     pub case_type: String,
+    /// 案件法律领域的单一事实源，不再从历史 case_type 临时猜测。
+    pub legal_domain: String,
+    /// manual 优先于 inferred / legacy，后台自动识别不得覆盖 manual。
+    pub domain_source: String,
+    /// 用户手工指定的案件显示名；空时由前端按案情字段组合。
+    pub display_name_override: Option<String>,
     pub cause: Option<String>,
     pub case_no: Option<String>,
     pub court: Option<String>,
@@ -154,19 +160,62 @@ pub struct NewCase {
     pub source_folder: String,
 }
 
+fn explicit_legacy_domain(case_type: &str) -> &'static str {
+    let normalized = case_type.trim().to_ascii_lowercase();
+    if normalized == "criminal" || case_type.contains("刑事") {
+        "criminal"
+    } else if matches!(normalized.as_str(), "civil" | "arbitration")
+        || case_type.contains("民事")
+        || case_type.contains("仲裁")
+    {
+        "civil"
+    } else if normalized == "execution" || case_type.contains("执行") {
+        "other"
+    } else {
+        // “诉讼”只是历史业务类型，不能猜成民事或刑事。
+        "unknown"
+    }
+}
+
+fn initial_legal_domain(case_type: &str, name: &str) -> (&'static str, &'static str) {
+    let explicit = explicit_legacy_domain(case_type);
+    if explicit != "unknown" {
+        return (explicit, "legacy");
+    }
+    if name.contains("刑事")
+        || name.contains("犯罪嫌疑人")
+        || name.contains("被告人")
+        || name.contains('罪')
+    {
+        ("criminal", "inferred")
+    } else if name.contains("民事") || name.contains("仲裁") || name.contains("纠纷") {
+        ("civil", "inferred")
+    } else if name.contains("执行") {
+        ("other", "inferred")
+    } else {
+        ("unknown", "legacy")
+    }
+}
+
 /// 插入新案件,返回新建的 Case。
 ///
 /// 不做 upsert——如果 `source_folder` 已存在,会因为 UNIQUE 索引报错。
 /// 想要 upsert 行为请用 [`upsert_case_for_folder`]。
 pub async fn create_case(pool: &SqlitePool, new: NewCase) -> Result<Case, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO cases (id, name, case_type, source_folder) VALUES (?, ?, ?, ?)")
-        .bind(&id)
-        .bind(&new.name)
-        .bind(&new.case_type)
-        .bind(&new.source_folder)
-        .execute(pool)
-        .await?;
+    let (legal_domain, domain_source) = initial_legal_domain(&new.case_type, &new.name);
+    sqlx::query(
+        "INSERT INTO cases (id, name, case_type, legal_domain, domain_source, source_folder) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&new.name)
+    .bind(&new.case_type)
+    .bind(legal_domain)
+    .bind(domain_source)
+    .bind(&new.source_folder)
+    .execute(pool)
+    .await?;
 
     get_case(pool, &id)
         .await?
@@ -338,6 +387,133 @@ pub async fn update_user_overrides(
     Ok(())
 }
 
+pub const LEGAL_DOMAINS: [&str; 4] = ["criminal", "civil", "other", "unknown"];
+
+/// 人工更正案件领域，可选同步更新显示名。
+///
+/// `display_name_override = None` 表示保留原值；`Some(None)` 清空；
+/// `Some(Some(value))` 写入非空文本（空白会归一化为清空）。
+pub async fn update_legal_identity(
+    pool: &SqlitePool,
+    id: &str,
+    legal_domain: &str,
+    display_name_override: Option<Option<&str>>,
+) -> Result<Case, String> {
+    let legal_domain = legal_domain.trim().to_ascii_lowercase();
+    if !LEGAL_DOMAINS.contains(&legal_domain.as_str()) {
+        return Err(format!(
+            "INVALID_LEGAL_DOMAIN: 不支持的案件领域 {legal_domain}"
+        ));
+    }
+
+    let result = match display_name_override {
+        None => {
+            sqlx::query(
+                "UPDATE cases SET legal_domain = ?, domain_source = 'manual', \
+                 updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(&legal_domain)
+            .bind(id)
+            .execute(pool)
+            .await
+        }
+        Some(value) => {
+            let normalized = value.and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then_some(value)
+            });
+            sqlx::query(
+                "UPDATE cases SET legal_domain = ?, domain_source = 'manual', \
+                 display_name_override = ?, updated_at = datetime('now') WHERE id = ?",
+            )
+            .bind(&legal_domain)
+            .bind(normalized)
+            .bind(id)
+            .execute(pool)
+            .await
+        }
+    }
+    .map_err(|error| format!("DATABASE_WRITE_FAILED: {error}"))?;
+
+    if result.rows_affected() == 0 {
+        return Err("CASE_NOT_FOUND: 案件不存在".into());
+    }
+    get_case(pool, id)
+        .await
+        .map_err(|error| format!("DATABASE_READ_FAILED: {error}"))?
+        .ok_or_else(|| "CASE_NOT_FOUND: 案件不存在".into())
+}
+
 // ============================================================================
 // 测试
 // ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_litigation_type_never_guesses_a_legal_domain() {
+        assert_eq!(explicit_legacy_domain("诉讼"), "unknown");
+        assert_eq!(explicit_legacy_domain("criminal"), "criminal");
+        assert_eq!(explicit_legacy_domain("民事诉讼"), "civil");
+        assert_eq!(
+            initial_legal_domain("诉讼", "1委托材料"),
+            ("unknown", "legacy")
+        );
+        assert_eq!(
+            initial_legal_domain("诉讼", "1刑事委托材料"),
+            ("criminal", "inferred")
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_legal_identity_is_validated_and_supports_partial_name_updates() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        let case = create_case(
+            &pool,
+            NewCase {
+                name: "1刑事委托材料".into(),
+                case_type: "诉讼".into(),
+                source_folder: format!("D:/tmp/{}", Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(case.legal_domain, "criminal");
+        assert_eq!(case.domain_source, "inferred");
+        let case = update_legal_identity(
+            &pool,
+            &case.id,
+            "criminal",
+            Some(Some("杨赛清贪污罪、受贿罪")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(case.domain_source, "manual");
+        assert_eq!(
+            case.display_name_override.as_deref(),
+            Some("杨赛清贪污罪、受贿罪")
+        );
+
+        let case = update_legal_identity(&pool, &case.id, "civil", None)
+            .await
+            .unwrap();
+        assert_eq!(case.legal_domain, "civil");
+        assert_eq!(
+            case.display_name_override.as_deref(),
+            Some("杨赛清贪污罪、受贿罪")
+        );
+
+        let case = update_legal_identity(&pool, &case.id, "criminal", Some(Some("   ")))
+            .await
+            .unwrap();
+        assert_eq!(case.display_name_override, None);
+
+        let error = update_legal_identity(&pool, &case.id, "lawsuit", None)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("INVALID_LEGAL_DOMAIN:"));
+    }
+}

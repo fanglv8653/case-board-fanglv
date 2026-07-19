@@ -15,6 +15,7 @@ import { getPrivateTopTabs } from "@/private";
 import { HomeView, type HomeStatusWarning, type HomeViewMode } from "@/components/HomeView";
 import { HomeDropZone } from "@/components/HomeDropZone";
 import { isCriminalCase, splitCasesByDomain } from "@/lib/caseDomain";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 import { RunningTaskOverlay } from "@/components/RunningTaskOverlay";
 import { RunningTaskProvider } from "@/contexts/RunningTaskContext";
 import { UpdateAvailableDialog } from "@/components/UpdateAvailableDialog";
@@ -709,7 +710,7 @@ function App() {
   const handleDeleteCase = useCallback(async () => {
     if (!selectedCase) return;
     const confirmed = await confirmDialog(
-      `确定要从看板删除「${selectedCase.name}」吗?\n\n` +
+      `确定要从看板删除「${getCaseDisplayName(selectedCase)}」吗?\n\n` +
         `只删 CaseBoard 数据库里的记录,你的原始文件夹「${selectedCase.source_folder}」不会动,以后还可以重新导入。`,
       { danger: true, okLabel: "删除案件" },
     );
@@ -735,7 +736,7 @@ function App() {
       const target = cases.find((c) => c.id === id);
       if (!target) return;
       const confirmed = await confirmDialog(
-        `确定要从看板删除「${target.name}」吗?\n\n` +
+        `确定要从看板删除「${getCaseDisplayName(target)}」吗?\n\n` +
           `只删 CaseBoard 数据库里的记录,你的原始文件夹「${target.source_folder}」不会动,以后还可以重新导入。`,
         { danger: true, okLabel: "删除案件" },
       );
@@ -763,7 +764,10 @@ function App() {
     async (ids: string[]) => {
       if (ids.length === 0) return;
       const names = ids
-        .map((id) => cases.find((c) => c.id === id)?.name)
+        .map((id) => {
+          const caseData = cases.find((c) => c.id === id);
+          return caseData ? getCaseDisplayName(caseData) : null;
+        })
         .filter((n): n is string => !!n);
       const preview =
         names.slice(0, 5).join("、") +
@@ -899,6 +903,9 @@ function App() {
       const r = await getCaseWithDocs(selectedId);
       setSelectedCase(r.case);
       setDocuments(r.documents);
+      setCases((current) =>
+        current.map((caseData) => (caseData.id === r.case.id ? r.case : caseData)),
+      );
     } catch {
       /* 不阻塞 */
     }

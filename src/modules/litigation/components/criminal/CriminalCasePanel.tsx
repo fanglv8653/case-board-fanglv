@@ -58,6 +58,10 @@ import type {
   CriminalDeadlineItemUpsertInput,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import {
+  formatRecognitionFailure,
+  formatRecognitionFailureList,
+} from "@/lib/caseIdentity";
 import { buildSentencingPrefill, type SentencingPrefill } from "@/modules/tools/sentencing/prefill";
 import {
   resolveStructuredListJson,
@@ -254,7 +258,7 @@ export function CriminalCasePanel({
     try {
       const report = await reextractCriminalCaseMaterials(caseId);
       const warning = report.failed_count > 0
-        ? `，失败 ${report.failed_count} 项${report.errors.length ? `：${report.errors.join("；")}` : ""}`
+        ? `，失败 ${report.failed_count} 项${report.errors.length ? `：${formatRecognitionFailureList(report.errors)}` : ""}`
         : "";
       toast(
         `材料识别已启动：复用正文 ${report.cached_count} 份，安排 OCR ${report.scheduled_ocr_count} 份${warning}`,
@@ -262,7 +266,7 @@ export function CriminalCasePanel({
       );
       await reload();
     } catch (e) {
-      toast(`重新识别案件材料失败：${e}`, "error");
+      toast(`重新识别案件材料失败：${formatRecognitionFailure(e)}`, "error");
     } finally {
       setRecognizingMaterials(false);
     }

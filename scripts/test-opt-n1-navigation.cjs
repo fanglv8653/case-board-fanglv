@@ -22,6 +22,11 @@ for (const mode of ["workspace", "civil", "criminal"]) {
 }
 
 assert.match(moduleTabs, /id: "litigation", label: "民事"/);
+assert.ok(
+  moduleTabs.indexOf('id: "criminal"') < moduleTabs.indexOf('id: "litigation"'),
+  "刑事 tab 应位于民事 tab 之前",
+);
+assert.doesNotMatch(moduleTabs, /BetaBadge|beta:\s*true|刑事案件 Beta/);
 assert.match(moduleTabs, /setUnderline\(\{ left: 0, width: 0 \}\)/);
 
 assert.match(app, /useState<string>\("workspace"\)/);

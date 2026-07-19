@@ -38,6 +38,8 @@ import { groupByStage } from "../lib/groupByStage";
 import { CaseChatPanel } from "./chat/CaseChatPanel";
 import { CaseSnapshotView } from "./snapshot/CaseSnapshotView";
 import { CaseSwitcher } from "./CaseSwitcher";
+import { CaseIdentityEditor } from "./CaseIdentityEditor";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 import { CourtFilingSection } from "./CourtFilingSection";
 import { CriminalCasePanel } from "./criminal/CriminalCasePanel";
 import {
@@ -341,7 +343,7 @@ export function CaseView({
                 />
               ) : (
                 <h1 className="text-xl font-semibold tracking-tight text-foreground">
-                  {selectedCase?.name ?? "—"}
+                  {selectedCase ? getCaseDisplayName(selectedCase) : "—"}
                 </h1>
               )}
               <span className="text-xs text-muted-foreground">
@@ -387,6 +389,9 @@ export function CaseView({
                   </>
                 )}
               </p>
+            )}
+            {isEditMode && selectedCase && (
+              <CaseIdentityEditor caseData={selectedCase} onSaved={onReloadCase} />
             )}
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
@@ -471,8 +476,8 @@ export function CaseView({
               )}
               title={
                 isEditMode
-                  ? "退出编辑模式(改动已自动保存)"
-                  : "编辑模式 — 改字段 / 删词条 / 拖卡片"
+                  ? "退出编辑模式（案件名称与领域请先点保存）"
+                  : "编辑模式 — 改案件名称/领域/画像字段"
               }
               aria-label={isEditMode ? "退出编辑" : "进入编辑模式"}
               aria-pressed={isEditMode}

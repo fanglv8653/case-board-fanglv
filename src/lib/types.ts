@@ -38,11 +38,17 @@ export const STAGE_ORDER = [
 /* 数据库类型(对应 src-tauri/src/db/)                                 */
 /* ------------------------------------------------------------------ */
 
+export type LegalDomain = "criminal" | "civil" | "other" | "unknown";
+export type LegalDomainSource = "manual" | "inferred" | "legacy";
+
 /** 对应 Rust `db::cases::Case` */
 export interface Case {
   id: string;
   name: string;
   case_type: string; // 诉讼 / 非诉
+  legal_domain: LegalDomain;
+  domain_source: LegalDomainSource;
+  display_name_override: string | null;
   cause: string | null;
   case_no: string | null;
   court: string | null;

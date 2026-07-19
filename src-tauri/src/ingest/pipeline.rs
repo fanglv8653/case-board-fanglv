@@ -376,6 +376,16 @@ pub struct CriminalCaseReextractReport {
     pub errors: Vec<String>,
 }
 
+fn require_criminal_material_domain(legal_domain: &str) -> Result<(), String> {
+    if legal_domain == "criminal" {
+        Ok(())
+    } else {
+        Err(format!(
+            "DOMAIN_MISMATCH: 只有刑事案件可以使用刑事材料重新识别（当前领域: {legal_domain}）"
+        ))
+    }
+}
+
 /// 案件级刑事材料重新识别：逐份优先复用持久化正文；缺失缓存的材料合并回退到
 /// 既有 OCR/LLM 队列。不会调用民事全案聚合，也不会直接写刑事画像。
 pub async fn reextract_criminal_case_materials(
@@ -385,17 +395,12 @@ pub async fn reextract_criminal_case_materials(
 ) -> Result<CriminalCaseReextractReport, String> {
     let case = crate::db::cases::get_case(pool, case_id)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "案件不存在".to_string())?;
-    if !matches!(
-        crate::ingest::reliability::classify_domain(Some(&case.case_type), ""),
-        crate::ingest::reliability::Domain::Criminal
-    ) {
-        return Err("只有刑事案件可以使用刑事材料重新识别".into());
-    }
+        .map_err(|e| format!("DATABASE_READ_FAILED: 读取案件失败: {e}"))?
+        .ok_or_else(|| "CASE_NOT_FOUND: 案件不存在".to_string())?;
+    require_criminal_material_domain(&case.legal_domain)?;
     let docs = crate::db::documents::list_documents_by_case(pool, case_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("MATERIAL_UNREADABLE: 读取案件材料清单失败: {e}"))?;
     let mut cached_count = 0;
     let mut missing = Vec::new();
     let mut errors = Vec::new();
@@ -410,22 +415,28 @@ pub async fn reextract_criminal_case_materials(
         {
             match trigger_reextract_cached(app.clone(), pool, &doc.id).await {
                 Ok(_) => cached_count += 1,
-                Err(e) => errors.push(format!("{}: {}", doc.filename, e)),
+                Err(e) => errors.push(format!(
+                    "RECOGNITION_ENGINE_FAILED: {}: {}",
+                    doc.filename, e
+                )),
             }
         } else {
             crate::db::documents::reset_for_reextract(pool, &doc.id)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("RECOGNITION_ENGINE_FAILED: 重置材料状态失败: {e}"))?;
             crate::db::documents::set_ocr_backend_override(pool, &doc.id, None)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("RECOGNITION_ENGINE_FAILED: 重置 OCR 路由失败: {e}"))?;
             let mut refreshed = crate::db::documents::get_document_by_id(pool, &doc.id)
                 .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("文档已不存在: {}", doc.filename))?;
+                .map_err(|e| format!("MATERIAL_UNREADABLE: 重读材料失败: {e}"))?
+                .ok_or_else(|| format!("MATERIAL_UNREADABLE: 文档已不存在: {}", doc.filename))?;
             refreshed.extraction_status = "pending".into();
             missing.push(refreshed);
         }
+    }
+    if cached_count == 0 && missing.is_empty() && errors.is_empty() {
+        return Err("MATERIAL_UNREADABLE: 案件中没有可识别的材料".into());
     }
     let scheduled_ocr_count = missing.len();
     if !missing.is_empty() {
@@ -1146,4 +1157,23 @@ fn extracts_dir_for_case(case_id: &str) -> Result<PathBuf, String> {
     // 跟 caseboard.db / settings.json 同一个 app data dir(~/Library/Application Support/CaseBoard/)
     let base = crate::db::app_data_dir().map_err(|e| format!("无法定位 app data dir: {}", e))?;
     Ok(base.join("extracts").join(case_id))
+}
+
+#[cfg(test)]
+mod criminal_reextract_guard_tests {
+    use super::require_criminal_material_domain;
+
+    #[test]
+    fn manual_criminal_domain_passes_the_backend_gate() {
+        assert!(require_criminal_material_domain("criminal").is_ok());
+    }
+
+    #[test]
+    fn non_criminal_domains_return_stable_error_prefix() {
+        for domain in ["civil", "other", "unknown"] {
+            let error = require_criminal_material_domain(domain).unwrap_err();
+            assert!(error.starts_with("DOMAIN_MISMATCH:"));
+            assert!(error.contains(domain));
+        }
+    }
 }

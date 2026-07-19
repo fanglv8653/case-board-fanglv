@@ -23,6 +23,7 @@ import {
   type CaseMergeReport,
 } from "@/lib/api";
 import type { Case } from "@/lib/types";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 
 function formatError(e: unknown): string {
   if (typeof e === "string") return e;
@@ -40,7 +41,8 @@ const NEW_CASE = "__new__";
 
 function caseLabel(c: Case): string {
   const no = c.agg_case_no || c.case_no;
-  return no ? `${c.name}(${no})` : c.name;
+  const name = getCaseDisplayName(c);
+  return no ? `${name}(${no})` : name;
 }
 
 export function CaseBundleTool() {

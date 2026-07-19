@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { formatYuan } from "@/lib/format";
 import { extractExecutionCaseNoFromCase } from "@/lib/caseNumbers";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 import type { Case, CourtContact, Document } from "@/lib/types";
 import { parseJsonArray } from "@/lib/types";
 import { getCaseWithDocs, listCases } from "@/lib/api";
@@ -189,7 +190,7 @@ function ExecutionCard({
       className="group flex flex-col rounded-lg border border-border bg-card p-5 text-left transition-all hover:shadow-md"
     >
       <h3 className="line-clamp-1 text-sm font-semibold text-foreground">
-        {caseData.name}
+        {getCaseDisplayName(caseData)}
       </h3>
       {caseData.case_summary && (
         <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">

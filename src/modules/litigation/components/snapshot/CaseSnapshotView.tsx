@@ -18,6 +18,7 @@ import { type Case, type CaseInstance, type Document } from "@/lib/types";
 import { listCaseInstances } from "@/lib/api";
 import { formatYuan } from "@/lib/format";
 import { computeCaseSnapshot } from "@/lib/caseSnapshot";
+import { getCaseDisplayName } from "@/lib/caseIdentity";
 import { extractExecutionCaseNoFromCase, getTrialCaseNo } from "@/lib/caseNumbers";
 import {
   applyFieldOverrides,
@@ -253,7 +254,7 @@ export function CaseSnapshotView({
               <FactRow label="审判案号" value={trialCaseNo} mono {...edit("agg_case_no")} />
             )}
             <FactRow label="案件类型" value={snap.case_type} />
-            <FactRow label="案件名称" value={caseData.name} />
+            <FactRow label="案件名称" value={getCaseDisplayName(caseData)} />
             <FactRow label="承办机关" value={snap.court} {...edit("agg_court")} />
             <FactRow
               label="当前阶段"
