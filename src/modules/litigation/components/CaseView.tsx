@@ -517,8 +517,6 @@ export function CaseView({
                   <div className="mt-5">
                     <CriminalCasePanel
                       caseId={selectedCase.id}
-                      documents={documents}
-                      onOpenDocument={onOpenDoc}
                       onOpenSentencing={onOpenSentencing}
                     />
                   </div>
@@ -536,8 +534,6 @@ export function CaseView({
                   {domain === "criminal" && (
                     <CriminalCasePanel
                       caseId={selectedCase.id}
-                      documents={documents}
-                      onOpenDocument={onOpenDoc}
                       onOpenSentencing={onOpenSentencing}
                     />
                   )}

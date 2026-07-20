@@ -56,7 +56,6 @@ import type {
   CriminalExtractionCandidateDetail,
   CriminalDeadlineItem,
   CriminalDeadlineItemUpsertInput,
-  Document,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -82,7 +81,7 @@ import {
   type CriminalExtractionCandidateBatchView,
 } from "./criminalExtractionReviewModels";
 import { CriminalWorkflowPanel } from "./CriminalWorkflowPanel";
-import { CriminalDefenseWorkspace } from "./CriminalDefenseWorkspace";
+import { MANAGEMENT_TABS, type ManagementTab } from "./criminalManagementViewModel";
 import {
   appliedCandidateTriggerFields,
   buildCriminalWorkflowTriggerEvents,
@@ -165,15 +164,12 @@ const PRIORITY_OPTIONS = [
 
 export function CriminalCasePanel({
   caseId,
-  documents = [],
-  onOpenDocument,
   onOpenSentencing,
 }: {
   caseId: string;
-  documents?: Document[];
-  onOpenDocument?: (document: Document, page?: number | null) => void;
   onOpenSentencing?: (prefill: SentencingPrefill) => void;
 }) {
+  const [managementTab, setManagementTab] = useState<ManagementTab>("progress");
   const [profileForm, setProfileForm] = useState<ProfileForm>({
     case_id: caseId,
     ...EMPTY_PROFILE,
@@ -658,11 +654,11 @@ export function CriminalCasePanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-caption uppercase tracking-wider text-muted-foreground">
-            CRIMINAL WORKSPACE
+            CRIMINAL CASE MANAGEMENT
           </p>
-          <h2 className="mt-1 text-lg font-semibold tracking-tight">刑事基础信息与办案管理</h2>
+          <h2 className="mt-1 text-lg font-semibold tracking-tight">刑事案件管理工作台</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            维护刑事画像、办案时间轴和机关联系人。期限属于办案提醒，条件规则需人工确认。
+            用于案件进展提醒、阶段跟踪、信息记录、案件通讯录和工作留痕；不承担案卷阅卷工作。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -694,33 +690,43 @@ export function CriminalCasePanel({
         </div>
       )}
 
-      <CriminalDefenseWorkspace
-        caseId={caseId}
-        documents={documents}
-        onOpenDocument={onOpenDocument}
-        onRecognizeMaterials={recognizeMaterials}
-        recognizingMaterials={recognizingMaterials}
-        taskPanel={(
-          <CriminalWorkflowPanel
-            caseId={caseId}
-            deadlines={deadlines}
-            workItems={workItems}
-            onChanged={reload}
-          />
-        )}
-      />
+      <nav
+        className="grid grid-cols-2 overflow-hidden rounded-lg border border-border bg-muted/20 md:grid-cols-5"
+        aria-label="刑事案件管理分区"
+      >
+        {MANAGEMENT_TABS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setManagementTab(item.id)}
+            className={cn(
+              "relative min-h-11 px-3 py-2 text-sm transition-colors hover:bg-muted/50",
+              managementTab === item.id
+                ? "bg-background font-semibold text-foreground"
+                : "text-muted-foreground",
+            )}
+            aria-current={managementTab === item.id ? "page" : undefined}
+          >
+            {item.label}
+            {managementTab === item.id && (
+              <span className="absolute inset-x-3 bottom-0 h-0.5 bg-foreground" />
+            )}
+          </button>
+        ))}
+      </nav>
 
-      <CriminalExtractionReviewPanel
-        batches={candidateBatches}
-        loading={loading}
-        recognizing={recognizingMaterials}
-        submittingBatchId={submittingCandidateBatchId}
-        onRecognize={recognizeMaterials}
-        onConfirm={confirmCandidateBatch}
-        onRejectBatch={rejectCandidateBatch}
-      />
+      {managementTab === "progress" && (
+        <CriminalWorkflowPanel
+          caseId={caseId}
+          deadlines={deadlines}
+          workItems={workItems}
+          onChanged={reload}
+        />
+      )}
 
-      <Panel title="刑事画像">
+      {managementTab === "profile" && (
+        <>
+      <Panel title="案件信息">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <Field label="当前阶段">
             <TextInput
@@ -981,6 +987,29 @@ export function CriminalCasePanel({
         </div>
       </Panel>
 
+      <details className="rounded-lg border border-border bg-background/50">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-foreground">
+          材料信息辅助录入（可选）
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            仅用于提取案件基础字段，不属于阅卷工作台
+          </span>
+        </summary>
+        <div className="border-t border-border p-4">
+          <CriminalExtractionReviewPanel
+            batches={candidateBatches}
+            loading={loading}
+            recognizing={recognizingMaterials}
+            submittingBatchId={submittingCandidateBatchId}
+            onRecognize={recognizeMaterials}
+            onConfirm={confirmCandidateBatch}
+            onRejectBatch={rejectCandidateBatch}
+          />
+        </div>
+      </details>
+        </>
+      )}
+
+      {managementTab === "timeline" && (
       <Panel
         title="办案时间轴"
         action={
@@ -1087,9 +1116,11 @@ export function CriminalCasePanel({
           </div>
         )}
       </Panel>
+      )}
 
+      {managementTab === "contacts" && (
       <Panel
-        title="机关联系人"
+        title="案件通讯录"
         action={
           <Button
             type="button"
@@ -1111,7 +1142,7 @@ export function CriminalCasePanel({
             saving={savingList}
           />
         )}
-        <ListState emptyText="还没有机关联系人。可记录公安、检察院、法院、看守所等联络信息。">
+        <ListState emptyText="还没有案件联系人。可记录公安、检察院、法院、看守所、委托人及其他联络信息。">
           {contacts.map((item) => (
             <ListRow key={item.id}>
               <div className="min-w-0">
@@ -1142,7 +1173,9 @@ export function CriminalCasePanel({
           ))}
         </ListState>
       </Panel>
+      )}
 
+      {managementTab === "work" && (
       <Panel title="工作记录">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
           <span>{formatConfirmedDuration(workItems)}</span>
@@ -1252,6 +1285,7 @@ export function CriminalCasePanel({
           ))}
         </ListState>
       </Panel>
+      )}
     </section>
   );
 }
