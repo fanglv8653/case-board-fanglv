@@ -2,7 +2,7 @@
  * 飞书日历配置(整合外部贡献 PR #9,gcheng-001;2026-06-17)。
  *
  * 在这里打开「飞书日历」并填配置;开启且连接成功后,首页会用飞书月历替代本地「日程日历」卡。
- * 复用本机 lark-cli 的登录态,CaseBoard **不保存飞书 token**。
+ * 日历功能继续复用本机 lark-cli 登录态；案件只读同步使用相邻的「只读连接」，两者互不依赖。
  *
  * 依赖(诚实标明,装不上属正常):
  *   1. 本机装好飞书官方 `lark-cli` 并 `lark-cli login`(macOS / Windows / Linux 都有);
@@ -126,6 +126,7 @@ export function FeishuCalendarTool() {
       {/* 依赖说明(淡蓝,诚实标明门槛) */}
       <div className="rounded-lg bg-sky-50 px-4 py-3 text-sm text-slate-700">
         <p className="font-medium text-slate-800">用前先准备:</p>
+        <p className="mt-1 text-[13px] leading-relaxed text-slate-600">这里仅配置首页飞书日历。案件管理数据请在「只读连接」中授权，不需要开启日历。</p>
         <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-[13px] leading-relaxed">
           <li>
             本机安装飞书官方 <code className="rounded bg-white px-1">lark-cli</code> 并登录

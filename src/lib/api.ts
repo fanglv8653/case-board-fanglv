@@ -54,6 +54,9 @@ export function refreshLprData(): Promise<LprRefreshResult> {
 
 import type {
   Case,
+  FeishuConnectionInput,
+  FeishuConnectionStatus,
+  FeishuPullResult,
   FeishuSyncPreview,
   LegalDomain,
   CaseInstance,
@@ -1070,6 +1073,26 @@ export function findFeishuCasePath(eventSummary: string): Promise<string | null>
 /** 只重读本地预演库；不联网、不写入飞书或案件数据。 */
 export function getFeishuSyncPreview(): Promise<FeishuSyncPreview> {
   return invoke<FeishuSyncPreview>("get_feishu_sync_preview");
+}
+
+/** 读取飞书案件同步的原生 OAuth 只读连接状态。 */
+export function getFeishuConnectionStatus(): Promise<FeishuConnectionStatus> {
+  return invoke<FeishuConnectionStatus>("get_feishu_connection_status");
+}
+
+/** 建立飞书只读连接；App Secret 仅随本次命令提交，不写入前端设置。 */
+export function connectFeishuReadonly(input: FeishuConnectionInput): Promise<FeishuConnectionStatus> {
+  return invoke<FeishuConnectionStatus>("connect_feishu_readonly", { input });
+}
+
+/** 删除本机保存的飞书只读连接凭据。 */
+export function disconnectFeishuReadonly(): Promise<FeishuConnectionStatus> {
+  return invoke<FeishuConnectionStatus>("disconnect_feishu_readonly");
+}
+
+/** 从飞书只读拉取“在办”案件，并仅更新本地同步预演表。 */
+export function pullFeishuSyncPreview(): Promise<FeishuPullResult> {
+  return invoke<FeishuPullResult>("pull_feishu_sync_preview");
 }
 
 /* ------------------------------------------------------------------ */

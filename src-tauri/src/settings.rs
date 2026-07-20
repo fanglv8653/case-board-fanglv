@@ -203,6 +203,8 @@ pub struct Settings {
     pub feishu_app_token: Option<String>,
     /// (可选)飞书"案件池"多维表格 Table ID(配合 app_token)。
     pub feishu_cases_table_id: Option<String>,
+    /// 飞书自建应用 App ID。不是密钥，可保存在设置文件中；App Secret 与 OAuth token 仅存系统凭据库。
+    pub feishu_oauth_app_id: Option<String>,
 
     // ===== 2026-06-17 辅助在线立案(整合外部贡献 PR #8,gcheng-001)=====
     /// 立案 CLI 包根目录。None = 用应用内置 standalone/court_filing_cli(打包进 resources)。

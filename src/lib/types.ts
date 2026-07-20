@@ -1208,6 +1208,8 @@ export interface Settings {
   feishu_app_token: string | null;
   /** (可选)飞书"案件池"多维表格 Table ID。 */
   feishu_cases_table_id: string | null;
+  /** 飞书自建应用 App ID。App Secret 与 OAuth token 不进入 Settings。 */
+  feishu_oauth_app_id: string | null;
 
   // ===== 2026-06-17 辅助在线立案(整合外部贡献 PR #8) =====
   /** 立案 CLI 包根目录。null = 用应用内置 standalone/court_filing_cli。 */
@@ -1318,6 +1320,28 @@ export interface FeishuSyncPreview {
   proposed_changes: FeishuSyncChangePreview[];
   conflicts: FeishuSyncConflictPreview[];
   recent_runs: FeishuSyncRunPreview[];
+}
+
+export interface FeishuConnectionStatus {
+  connected: boolean;
+  app_id: string;
+  scopes: string[];
+  access_expires_at: number | null;
+  refresh_expires_at: number | null;
+  reauthorization_required: boolean;
+}
+
+export interface FeishuConnectionInput {
+  app_id: string;
+  app_secret: string;
+}
+
+export interface FeishuPullResult {
+  run_id: string;
+  remote_count: number;
+  bound_count: number;
+  pending_count: number;
+  proposed_change_count: number;
 }
 
 // ===== 法院一张网在线立案(整合外部贡献 PR #8) =====

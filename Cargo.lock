@@ -592,6 +592,8 @@ dependencies = [
  "ureq",
  "uuid",
  "walkdir",
+ "windows",
+ "zeroize",
  "zip 2.4.2",
 ]
 

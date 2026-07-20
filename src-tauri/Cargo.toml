@@ -41,6 +41,7 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 directories = "5"
 thiserror = "1"
+zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 # OCR 同步调用 + 临时 PDF 转 PNG 用(2026-05-23 加,本机 vision OCR 路径)
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
@@ -74,3 +75,9 @@ regex = "1"                  # search_local_kb 全库 grep + 文档内 find_in_d
 # 2026-05-27 V0.2 D2-D3 加 · Tool trait 用 dyn Tool 派发,async fn in trait 现版本 Rust
 # 还不能直接 dyn,所以走 async-trait 宏
 async-trait = "0.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# 飞书 App Secret 与 OAuth token 仅保存到 Windows Credential Manager，不进入
+# settings.json、SQLite 或诊断日志。关闭默认跨平台后端，避免非 Windows 构建引入
+# 无关的 Secret Service / Keychain 系统依赖。
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Credentials"] }

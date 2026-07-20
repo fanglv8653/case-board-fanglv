@@ -13,8 +13,9 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
-import { getFeishuSyncPreview } from "@/lib/api";
-import type { FeishuSyncPreview as PreviewData } from "@/lib/types";
+import { toast } from "@/components/ui/toast";
+import { getFeishuConnectionStatus, getFeishuSyncPreview, pullFeishuSyncPreview } from "@/lib/api";
+import type { FeishuConnectionStatus, FeishuSyncPreview as PreviewData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Section = "bound" | "pending" | "changes" | "conflicts" | "runs";
@@ -52,23 +53,81 @@ function runLabel(status: string): string {
   return ({ succeeded: "成功", partial: "部分成功", failed: "失败", running: "进行中", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
 }
 
-export function FeishuSyncPreview() {
+function pullErrorMessage(error: unknown): string {
+  const message = String(error).toLowerCase();
+  if (message.includes("未连接") || message.includes("授权") || message.includes("token") || message.includes("auth")) {
+    return "飞书连接未建立或已失效，请重新连接后再试。";
+  }
+  if (message.includes("权限") || message.includes("scope") || message.includes("permission")) {
+    return "当前连接缺少多维表格只读权限，请补充授权后重试。";
+  }
+  if (message.includes("字段") || message.includes("schema")) {
+    return "飞书表字段结构发生变化，本次未生成新建议；请检查表结构。";
+  }
+  if (message.includes("config_invalid") || message.includes("app token") || message.includes("table id")) {
+    return "请先在“日历设置—案件池多维表格”填写 App Token 和案件总表 Table ID。";
+  }
+  if (message.includes("超时") || message.includes("timeout") || message.includes("network")) {
+    return "读取飞书超时，请检查网络后重试。";
+  }
+  if (message.includes("db_preview") || message.includes("保存预演") || message.includes("数据库")) {
+    return "已读取飞书，但本地预演结果保存失败；案件业务数据未被修改。";
+  }
+  return "本次读取未完成，请稍后重试。";
+}
+
+export function FeishuSyncPreview({
+  connectionStatus,
+  onOpenConnection,
+  onConnectionStatusChange,
+}: {
+  connectionStatus: FeishuConnectionStatus | null;
+  onOpenConnection: () => void;
+  onConnectionStatusChange: (status: FeishuConnectionStatus) => void;
+}) {
   const [data, setData] = useState<PreviewData | null>(null);
   const [active, setActive] = useState<Section>("bound");
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [pullError, setPullError] = useState<string | null>(null);
+  const [liveMessage, setLiveMessage] = useState("");
 
   const reload = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLocalError(null);
     try {
       setData(await getFeishuSyncPreview());
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setLocalError("无法读取本地预演结果，请稍后重试。");
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const pullLatest = async () => {
+    if (connectionStatus?.connected !== true || connectionStatus.reauthorization_required) {
+      onOpenConnection();
+      return;
+    }
+    setPulling(true);
+    setPullError(null);
+    setLiveMessage("正在从飞书读取最新在办案件");
+    try {
+      const result = await pullFeishuSyncPreview();
+      const next = await getFeishuSyncPreview();
+      setData(next);
+      const message = `只读预演已更新：读取 ${result.remote_count} 件，已绑定 ${result.bound_count} 件，待绑定 ${result.pending_count} 件，拟更新 ${result.proposed_change_count} 项。`;
+      setLiveMessage(message);
+      toast(message, "info");
+      void getFeishuConnectionStatus().then(onConnectionStatusChange).catch(() => {});
+    } catch (error) {
+      setPullError(`${pullErrorMessage(error)} 已保留上次预演结果。`);
+      setLiveMessage("本次飞书读取失败，已保留上次预演结果");
+    } finally {
+      setPulling(false);
+    }
+  };
 
   useEffect(() => void reload(), [reload]);
 
@@ -85,29 +144,38 @@ export function FeishuSyncPreview() {
     return <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在读取本地预演结果…</div>;
   }
 
+  const needsReauthorization = Boolean(connectionStatus?.app_id) && connectionStatus?.reauthorization_required === true;
+  const connected = connectionStatus?.connected === true && !needsReauthorization;
+  const lastSuccessfulRun = data?.recent_runs.find((run) => run.status === "succeeded" || run.status === "partial") ?? null;
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-5" aria-busy={pulling}>
+      <p className="sr-only" role="status" aria-live="polite">{liveMessage}</p>
       <div className="flex flex-col gap-3 rounded-xl border border-sky-200 bg-sky-50/80 p-4 dark:border-sky-900 dark:bg-sky-950/25 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-start gap-3">
           <ShieldCheck className="mt-0.5 size-5 shrink-0 text-sky-700 dark:text-sky-300" />
           <div>
-            <p className="text-sm font-semibold text-sky-950 dark:text-sky-100">只读预演 · 仅“在办”案件</p>
-            <p className="mt-1 text-xs leading-relaxed text-sky-800 dark:text-sky-200">本页只展示最近的隔离预演结果，不会写入飞书，也不会修改本地案件。</p>
+            <p className="text-sm font-semibold text-sky-950 dark:text-sky-100">飞书只读预演 · 仅“在办”案件</p>
+            <p className="mt-1 text-xs leading-relaxed text-sky-800 dark:text-sky-200">读取飞书后只更新本地预演记录，不会写入飞书，也不会修改本地案件业务数据。</p>
+            <button type="button" onClick={onOpenConnection} className="mt-2 text-xs font-medium text-sky-900 underline-offset-2 hover:underline dark:text-sky-100">
+              {connected ? "已连接 · 只读权限" : needsReauthorization ? "授权已失效，前往重新连接" : "未连接，前往连接飞书"}
+            </button>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={reload} disabled={loading} aria-label="重读本地同步预览">
-          {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}刷新预览
+        <Button variant="outline" size="sm" onClick={pullLatest} disabled={pulling || !connected} aria-label="从飞书获取最新只读预演">
+          {pulling ? <Loader2 className="animate-spin" /> : <RefreshCw />}{pulling ? "正在从飞书读取…" : "从飞书获取最新预演"}
         </Button>
       </div>
 
-      {error && <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"><AlertTriangle className="mt-0.5 size-4 shrink-0" /><span>{error}</span></div>}
+      {localError && <div role="alert" className="flex items-start justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"><span className="flex items-start gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0" />{localError}</span><button type="button" onClick={reload} className="shrink-0 font-medium underline-offset-2 hover:underline">重试</button></div>}
+      {pullError && <div role="alert" className="flex items-start justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100"><span className="flex items-start gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0" />{pullError}{lastSuccessfulRun && ` 上次成功：${showTime(lastSuccessfulRun.completed_at ?? lastSuccessfulRun.started_at)}。`}</span><button type="button" onClick={pullLatest} disabled={pulling || !connected} className="shrink-0 font-medium underline-offset-2 hover:underline disabled:opacity-50">重试</button></div>}
 
       <section className="rounded-xl border border-border bg-card p-4" aria-labelledby="latest-run-title">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p id="latest-run-title" className="text-xs font-medium text-muted-foreground">最近同步状态</p>
             <div className="mt-1 flex items-center gap-2">
-              {latestRun?.status === "succeeded" ? <CheckCircle2 className="size-4 text-emerald-600" /> : <Clock3 className="size-4 text-muted-foreground" />}
+              {latestRun?.status === "succeeded" ? <CheckCircle2 className="size-4 text-emerald-600" /> : latestRun?.status === "failed" || latestRun?.status === "partial" ? <AlertTriangle className="size-4 text-amber-600" /> : <Clock3 className="size-4 text-muted-foreground" />}
               <span className="text-sm font-semibold text-foreground">{latestRun ? runLabel(latestRun.status) : "尚无预演记录"}</span>
               {latestRun && <Chip size="sm" variant="muted">筛选：状态={latestRun.active_case_filter}</Chip>}
             </div>

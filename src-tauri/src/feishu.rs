@@ -21,6 +21,7 @@ use tokio::time::timeout;
 use crate::settings::Settings;
 
 const LARK_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const BITABLE_MAX_PAGES: usize = 50;
 
 /// 飞书日历事件(传给前端月历)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +34,14 @@ pub struct FeishuCalendarEvent {
     pub description: Option<String>,
     pub location: Option<String>,
     pub app_link: Option<String>,
+}
+
+/// 案件管理预演用的飞书记录。只保留字段值和远端修改时间。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuRemoteCaseRecord {
+    pub record_id: String,
+    pub fields: Value,
+    pub last_modified_time: Option<String>,
 }
 
 /// 计算 lark-cli 可执行文件:优先用设置里填的全路径,否则按平台兜底。
@@ -125,6 +134,23 @@ async fn lark_cli_api(
 }
 
 fn ensure_lark_ok(value: Value) -> Result<Value, String> {
+    let mut value = value;
+    if let Some(ok) = value.get("ok").and_then(Value::as_bool) {
+        if !ok {
+            let error = value.get("error").cloned().unwrap_or(Value::Null);
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误");
+            let code = error
+                .get("code")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(format!("飞书 CLI 返回错误 code={code}: {message}"));
+        }
+        value = value.get("data").cloned().unwrap_or(Value::Null);
+    }
+
     if let Some(code) = value.get("code").and_then(Value::as_i64) {
         if code != 0 {
             let msg = value
@@ -135,6 +161,164 @@ fn ensure_lark_ok(value: Value) -> Result<Value, String> {
         }
     }
     Ok(value)
+}
+
+fn response_data(value: &Value) -> &Value {
+    value.get("data").unwrap_or(value)
+}
+
+fn value_as_time_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_case_records(
+    value: &Value,
+) -> Result<(Vec<FeishuRemoteCaseRecord>, Option<String>), String> {
+    let data = response_data(value);
+    let items = data
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 飞书记录列表缺少 data.items".to_string())?;
+
+    let mut records = Vec::with_capacity(items.len());
+    for item in items {
+        let record_id = item
+            .get("record_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let fields = item.get("fields").cloned().unwrap_or(Value::Null);
+        if record_id.is_empty() || !fields.is_object() {
+            return Err("FEISHU_SCHEMA_CHANGED: 飞书案件记录缺少 record_id 或 fields".to_string());
+        }
+        records.push(FeishuRemoteCaseRecord {
+            record_id: record_id.to_string(),
+            fields,
+            last_modified_time: value_as_time_string(item.get("last_modified_time")),
+        });
+    }
+
+    let page_token = data
+        .get("page_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let has_more = data
+        .get("has_more")
+        .and_then(Value::as_bool)
+        .unwrap_or(page_token.is_some());
+    Ok((records, has_more.then_some(page_token).flatten()))
+}
+
+fn validate_bitable_id(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(format!("FEISHU_CONFIG_INVALID: {label} 格式无效"));
+    }
+    Ok(())
+}
+
+fn classify_bitable_code(code: i64) -> &'static str {
+    match code {
+        99991663 | 99991668 => "FEISHU_AUTH_REQUIRED",
+        99991672 => "FEISHU_PERMISSION_DENIED",
+        1254040 | 1254041 => "FEISHU_TABLE_NOT_FOUND",
+        _ => "FEISHU_PULL_FAILED",
+    }
+}
+
+/// 通过飞书开放平台原生 HTTP API 拉取“状态=在办”的案件。
+///
+/// access token 仅存在于 Rust 内存和 Windows 凭据管理器，绝不进入命令行、SQLite 或日志。
+pub async fn fetch_active_case_records(
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+) -> Result<Vec<FeishuRemoteCaseRecord>, String> {
+    validate_bitable_id(app_token, "App Token")?;
+    validate_bitable_id(table_id, "Table ID")?;
+    if access_token.trim().is_empty() {
+        return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "FEISHU_NETWORK_ERROR: 无法初始化网络客户端".to_string())?;
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    );
+    let mut page_token: Option<String> = None;
+    let mut records = Vec::new();
+
+    for _ in 0..BITABLE_MAX_PAGES {
+        let mut query = vec![
+            ("page_size", "500".to_string()),
+            ("automatic_fields", "true".to_string()),
+            ("filter", r#"AND(CurrentValue.[☑状态]="在办")"#.to_string()),
+        ];
+        if let Some(token) = page_token.as_ref() {
+            query.push(("page_token", token.clone()));
+        }
+
+        let response = client
+            .get(&endpoint)
+            .bearer_auth(access_token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 读取飞书超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err("FEISHU_PERMISSION_DENIED: 应用没有多维表格只读权限".to_string());
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "FEISHU_PULL_FAILED: 飞书服务返回 HTTP {}",
+                status.as_u16()
+            ));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "FEISHU_RESPONSE_INVALID: 飞书响应不可读取".to_string())?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            return Err("FEISHU_RESPONSE_INVALID: 飞书单页响应超过安全上限".to_string());
+        }
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "FEISHU_RESPONSE_INVALID: 飞书响应不是有效 JSON".to_string())?;
+        if let Some(code) = value.get("code").and_then(Value::as_i64) {
+            if code != 0 {
+                let stable = classify_bitable_code(code);
+                return Err(format!("{stable}: 飞书接口拒绝本次读取（code={code}）"));
+            }
+        }
+        let (mut page_records, next_page_token) = parse_case_records(&value)?;
+        records.append(&mut page_records);
+        page_token = next_page_token;
+        if page_token.is_none() {
+            return Ok(records);
+        }
+    }
+
+    Err("FEISHU_RESPONSE_INVALID: 飞书记录分页超过安全上限".to_string())
 }
 
 fn clean_required(value: Option<&str>) -> Option<&str> {
@@ -303,8 +487,8 @@ pub async fn find_case_local_path(
     );
     let value = lark_cli_api(&bin, "GET", &path, None).await?;
 
-    let items = value
-        .pointer("/data/items")
+    let items = response_data(&value)
+        .get("items")
         .and_then(Value::as_array)
         .ok_or_else(|| "飞书记录列表响应缺少 data.items".to_string())?;
 
@@ -340,4 +524,38 @@ pub async fn find_case_local_path(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_raw_and_cli_wrapped_record_responses() {
+        let raw = serde_json::json!({
+            "code": 0,
+            "data": {"items": [{"record_id": "rec1", "fields": {"案件名称": "测试案"}, "last_modified_time": 1784518994000_i64}]}
+        });
+        let wrapped = serde_json::json!({"ok": true, "data": raw});
+
+        for value in [
+            ensure_lark_ok(raw).unwrap(),
+            ensure_lark_ok(wrapped).unwrap(),
+        ] {
+            let (records, next) = parse_case_records(&value).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].record_id, "rec1");
+            assert_eq!(
+                records[0].last_modified_time.as_deref(),
+                Some("1784518994000")
+            );
+            assert!(next.is_none());
+        }
+    }
+
+    #[test]
+    fn query_filter_is_utf8_percent_encoded_and_readonly() {
+        assert!(validate_bitable_id("bascn123_ABC-9", "App Token").is_ok());
+        assert!(validate_bitable_id("../bad", "App Token").is_err());
+    }
 }
