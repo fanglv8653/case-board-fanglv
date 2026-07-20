@@ -54,6 +54,7 @@ export function refreshLprData(): Promise<LprRefreshResult> {
 
 import type {
   Case,
+  FeishuSyncPreview,
   LegalDomain,
   CaseInstance,
   CaseAgencyContact,
@@ -1064,6 +1065,11 @@ export function fetchFeishuCalendar(
 /** 按飞书日历事件标题反查本地案件目录(需配案件池表);未配/未命中返回 null。 */
 export function findFeishuCasePath(eventSummary: string): Promise<string | null> {
   return invoke<string | null>("find_feishu_case_path", { eventSummary });
+}
+
+/** 只重读本地预演库；不联网、不写入飞书或案件数据。 */
+export function getFeishuSyncPreview(): Promise<FeishuSyncPreview> {
+  return invoke<FeishuSyncPreview>("get_feishu_sync_preview");
 }
 
 /* ------------------------------------------------------------------ */

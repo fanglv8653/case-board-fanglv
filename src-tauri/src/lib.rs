@@ -1339,6 +1339,14 @@ async fn find_feishu_case_path(event_summary: String) -> Result<Option<String>, 
     feishu::find_case_local_path(&settings, &event_summary).await
 }
 
+/// 读取最近一次飞书案件同步预演。只查询本地预演表，不联网也不写数据。
+#[tauri::command]
+async fn get_feishu_sync_preview(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<db::feishu_sync::FeishuSyncPreview, String> {
+    db::feishu_sync::get_preview(pool.inner()).await
+}
+
 // ============================================================================
 // 法院一张网在线立案 — 2026-06-15
 // ============================================================================
@@ -5830,6 +5838,7 @@ pub fn run() {
             delete_calendar_event,
             fetch_feishu_calendar,
             find_feishu_case_path,
+            get_feishu_sync_preview,
             start_court_filing,
             submit_captcha_answer,
             list_court_filing_jobs,

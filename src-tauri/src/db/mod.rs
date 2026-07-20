@@ -38,6 +38,7 @@ pub mod criminal_workspace;
 pub mod document_tags;
 pub mod documents;
 pub mod income_records;
+pub mod feishu_sync;
 pub mod lawyer_profiles;
 pub mod metrics;
 pub mod payments;

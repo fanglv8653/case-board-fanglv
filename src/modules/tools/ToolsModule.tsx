@@ -49,7 +49,7 @@ import { KbShareTool } from "./KbShareTool";
 import { CaseBundleTool } from "./CaseBundleTool";
 import { CourtSmsTool } from "./CourtSmsTool";
 import { CourierTool } from "./CourierTool";
-import { FeishuCalendarTool } from "./FeishuCalendarTool";
+import { FeishuTool } from "./FeishuTool";
 import { CourtFilingTool } from "./CourtFilingTool";
 import { TickTickPanel } from "@/components/TickTickPanel";
 import { LegalToolCard } from "./components/LegalToolCard";
@@ -278,7 +278,7 @@ export function ToolsModule({
     );
   }
 
-  // ──────────── 飞书日历(独立于计算器,自带视图) ────────────
+  // ──────────── 飞书连接：案件只读预演 + 日历设置 ────────────
   if (activeTool === "feishu") {
     return (
       <main className="flex h-full w-full flex-col bg-background">
@@ -292,11 +292,11 @@ export function ToolsModule({
             返回工具列表
           </button>
           <span className="text-muted-foreground/40">·</span>
-          <h2 className="text-sm font-medium text-foreground">飞书日历</h2>
+          <h2 className="text-sm font-medium text-foreground">飞书连接</h2>
         </header>
         <div className="min-h-0 flex-1 overflow-auto">
-          <div className="mx-auto max-w-3xl px-6 py-6">
-            <FeishuCalendarTool />
+          <div className="mx-auto max-w-6xl px-6 py-6">
+            <FeishuTool />
           </div>
         </div>
       </main>
@@ -442,8 +442,8 @@ export function ToolsModule({
               />
               <LegalToolCard
                 icon={CalendarClock}
-                title="飞书日历"
-                desc="复用本机 lark-cli 登录态拉飞书日历,开启后首页显示飞书月历;需先装并登录 lark-cli"
+                title="飞书连接"
+                desc="只读查看在办案件同步预演，并管理飞书日历设置"
                 onClick={() => setActiveTool("feishu")}
               />
             </div>

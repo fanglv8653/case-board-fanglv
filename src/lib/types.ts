@@ -1259,6 +1259,67 @@ export interface FeishuCalendarEvent {
   app_link: string | null;
 }
 
+export interface FeishuSyncLinkPreview {
+  id: string;
+  local_case_id: string;
+  local_case_name: string;
+  record_id: string;
+  link_source: string;
+  status: string;
+  last_synced_at: string | null;
+}
+
+export interface FeishuSyncInboxPreview {
+  id: string;
+  record_id: string;
+  display_name: string;
+  legal_type: string | null;
+  case_no: string | null;
+  remote_modified_at: string | null;
+  status: string;
+}
+
+export interface FeishuSyncChangePreview {
+  id: string;
+  case_name: string;
+  field_key: string;
+  field_label: string;
+  local_value_json: string | null;
+  feishu_value_json: string | null;
+  classification: string;
+  proposed_action: "pull_to_local" | "review" | "none" | string;
+}
+
+export interface FeishuSyncConflictPreview {
+  id: string;
+  case_name: string;
+  field_key: string;
+  local_value_json: string | null;
+  feishu_value_json: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface FeishuSyncRunPreview {
+  id: string;
+  mode: string;
+  status: string;
+  active_case_filter: string;
+  started_at: string;
+  completed_at: string | null;
+  counts_json: string;
+  error_code: string | null;
+  error_message: string | null;
+}
+
+export interface FeishuSyncPreview {
+  bound_cases: FeishuSyncLinkPreview[];
+  pending_cases: FeishuSyncInboxPreview[];
+  proposed_changes: FeishuSyncChangePreview[];
+  conflicts: FeishuSyncConflictPreview[];
+  recent_runs: FeishuSyncRunPreview[];
+}
+
 // ===== 法院一张网在线立案(整合外部贡献 PR #8) =====
 
 export interface CourtFilingJob {
