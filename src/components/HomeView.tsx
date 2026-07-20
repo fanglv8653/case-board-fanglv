@@ -801,7 +801,7 @@ export function HomeView({
                     type="text"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
-                    placeholder="搜原告/被告名…"
+          placeholder="搜原告、被告、犯罪嫌疑人或被告人…"
                     className="h-7 w-44 rounded-md border border-border bg-background pl-7 pr-6 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
                   />
                   {search && (

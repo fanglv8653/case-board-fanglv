@@ -59,7 +59,7 @@ export const CRIMINAL_FIELD_LABELS: Record<string, string> = {
   current_stage: "当前阶段",
   procedure_type: "程序类型",
   suspected_charge: "涉嫌罪名",
-  suspect_or_defendant_name: "犯罪嫌疑人/被告人",
+  suspect_or_defendant_name: "刑事当事人姓名（称谓随程序阶段）",
   victim_name: "被害人",
   detention_center: "羁押场所",
   coercive_measure_type: "强制措施",

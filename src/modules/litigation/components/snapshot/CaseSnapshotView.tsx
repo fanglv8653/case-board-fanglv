@@ -358,7 +358,7 @@ export function CaseSnapshotView({
             deletedRows={deletedSummary("agg_party_contacts")}
             onUndeleteRow={(k) => ov.undeleteRow("agg_party_contacts", k)}
             editableCells={[
-              { colIndex: 0, inner: "role", placeholder: "角色,如 原告 / 被告" },
+    { colIndex: 0, inner: "role", placeholder: "角色，如原告、被告、犯罪嫌疑人或被告人" },
               { colIndex: 1, inner: "name", placeholder: "联系人姓名" },
               // col 2 "其他身份"是 aliases 拼接(数组型),不解锁
               { colIndex: 3, inner: "phone", placeholder: "电话" },

@@ -82,6 +82,7 @@ import {
 } from "./criminalExtractionReviewModels";
 import { CriminalWorkflowPanel } from "./CriminalWorkflowPanel";
 import { MANAGEMENT_TABS, type ManagementTab } from "./criminalManagementViewModel";
+import { criminalPartyNameLabel } from "./partyTerminology";
 import {
   appliedCandidateTriggerFields,
   buildCriminalWorkflowTriggerEvents,
@@ -756,7 +757,7 @@ export function CriminalCasePanel({
               placeholder="如：诈骗罪"
             />
           </Field>
-          <Field label="嫌疑人/被告人">
+          <Field label={criminalPartyNameLabel(profileForm.current_stage)}>
             <TextInput
               value={profileForm.suspect_or_defendant_name}
               onChange={(v) =>
