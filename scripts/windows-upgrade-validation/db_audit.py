@@ -10,7 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-RUNTIME_ONLY_TABLES = {"deepseek_balance_snapshots", "usage_events"}
+RUNTIME_ONLY_TABLES = {
+    "deepseek_balance_snapshots",
+    "usage_events",
+    # The read-only Feishu preview refresh may append runtime cache/audit rows
+    # when the application starts. These tables are not local case business
+    # records and must remain separate from case/work/stage/contact/link data.
+    "feishu_sync_runs",
+    "feishu_sync_inbox",
+    "feishu_sync_snapshots",
+    "feishu_sync_conflicts",
+    "feishu_sync_field_previews",
+}
 
 
 def sha256(path: Path) -> str:
