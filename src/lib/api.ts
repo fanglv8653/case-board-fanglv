@@ -1075,6 +1075,26 @@ export function getFeishuSyncPreview(): Promise<FeishuSyncPreview> {
   return invoke<FeishuSyncPreview>("get_feishu_sync_preview");
 }
 
+/** 人工确认本地案件与飞书记录的关联；只写本地关联和审计表。 */
+export function bindFeishuSyncCase(inboxId: string, caseId: string): Promise<void> {
+  return invoke<void>("bind_feishu_sync_case", { input: { inbox_id: inboxId, case_id: caseId } });
+}
+
+/** 解除本地关联，并抑制后续只读拉取自动重新绑定。 */
+export function unbindFeishuSyncCase(linkId: string): Promise<void> {
+  return invoke<void>("unbind_feishu_sync_case", { linkId });
+}
+
+/** 暂时忽略一条待绑定飞书记录。 */
+export function ignoreFeishuSyncCase(inboxId: string): Promise<void> {
+  return invoke<void>("ignore_feishu_sync_case", { inboxId });
+}
+
+/** 将已忽略记录恢复为待绑定。 */
+export function restoreFeishuSyncCase(inboxId: string): Promise<void> {
+  return invoke<void>("restore_feishu_sync_case", { inboxId });
+}
+
 /** 读取飞书案件同步的原生 OAuth 只读连接状态。 */
 export function getFeishuConnectionStatus(): Promise<FeishuConnectionStatus> {
   return invoke<FeishuConnectionStatus>("get_feishu_connection_status");
@@ -2010,6 +2030,10 @@ export interface ReviewRisk {
   anchor_text: string;
   consequence: string;
   basis: string;
+  fact_basis: string;
+  fact_status: string;
+  legal_source_status: string;
+  lawyer_review_status: string;
   suggestion: string;
   recommended_text: string;
   action: string; // revise / comment
@@ -2026,6 +2050,11 @@ export interface ReviewConclusion {
 export interface ContractReviewResult {
   contract_type: string;
   conclusion: ReviewConclusion;
+  material_review: {
+    scope_summary: string;
+    missing_materials: string[];
+    consistency_issues: string[];
+  };
   risks: ReviewRisk[];
 }
 
@@ -2089,12 +2118,20 @@ export function reviewContractDocx(
   stance: string,
   strictness: string,
   contractTypeHint: string,
+  transactionGoal: string,
+  transactionStage: string,
+  negotiability: string,
+  attachmentNote: string,
 ): Promise<ContractReviewResponse> {
   return invoke<ContractReviewResponse>("review_contract_docx", {
     docxPath,
     stance,
     strictness,
     contractTypeHint,
+    transactionGoal,
+    transactionStage,
+    negotiability,
+    attachmentNote,
   });
 }
 
@@ -2119,6 +2156,10 @@ export function exportContractOpinionDocx(
   contractName: string,
   stance: string,
   strictness: string,
+  documentStatus: "draft" | "final",
+  factsConfirmed: boolean,
+  sourcesVerified: boolean,
+  lawyerConfirmed: boolean,
   savePath: string,
 ): Promise<string> {
   return invoke<string>("export_contract_opinion_docx", {
@@ -2126,6 +2167,10 @@ export function exportContractOpinionDocx(
     contractName,
     stance,
     strictness,
+    documentStatus,
+    factsConfirmed,
+    sourcesVerified,
+    lawyerConfirmed,
     savePath,
   });
 }
@@ -2143,12 +2188,65 @@ export function exportContractRedlineDocx(
   srcDocxPath: string,
   result: ContractReviewResult,
   author: string,
+  documentStatus: "draft" | "final",
+  factsConfirmed: boolean,
+  sourcesVerified: boolean,
+  lawyerConfirmed: boolean,
   savePath: string,
 ): Promise<RedlineSummary> {
   return invoke<RedlineSummary>("export_contract_redline_docx", {
     srcDocxPath,
     result,
     author,
+    documentStatus,
+    factsConfirmed,
+    sourcesVerified,
+    lawyerConfirmed,
+    savePath,
+  });
+}
+
+export interface DemandLetterInput {
+  letter_type: string;
+  sender: string;
+  recipient: string;
+  relationship: string;
+  facts: string;
+  demands: string;
+  deadline: string;
+  tone: string;
+  evidence_note: string;
+  legal_basis_note: string;
+}
+
+export interface DemandLetterDraft {
+  title: string;
+  draft_md: string;
+  missing_items: string[];
+  risk_notes: string[];
+  review_status: "draft";
+}
+
+export function generateDemandLetter(input: DemandLetterInput): Promise<DemandLetterDraft> {
+  return invoke<DemandLetterDraft>("generate_demand_letter", { input });
+}
+
+export function exportDemandLetterDocx(
+  title: string,
+  draftMd: string,
+  documentStatus: "draft" | "final",
+  factsConfirmed: boolean,
+  sourcesVerified: boolean,
+  lawyerConfirmed: boolean,
+  savePath: string,
+): Promise<string> {
+  return invoke<string>("export_demand_letter_docx", {
+    title,
+    draftMd,
+    documentStatus,
+    factsConfirmed,
+    sourcesVerified,
+    lawyerConfirmed,
     savePath,
   });
 }

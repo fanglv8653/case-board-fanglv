@@ -34,6 +34,10 @@ pub struct Settings {
     /// 留空时显示"律师"作为兜底。2026-05-23 晚九加。
     pub user_display_name: Option<String>,
 
+    /// 合同审查修订批注版的默认作者。为空时回退到 `user_display_name`，
+    /// 仍为空则由导出命令使用产品兜底名称。
+    pub contract_review_comment_author: Option<String>,
+
     // ===== 2026-05-23 加(作者隐私分流决策,详见 docs/产品决策与理念.md 第 2 节) =====
     /// 用户是否完成过 onboarding。
     ///

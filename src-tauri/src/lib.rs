@@ -5,6 +5,7 @@ pub mod court_filing_env;
 pub mod court_sms;
 pub mod db;
 pub mod deepseek;
+pub mod demand_letter;
 pub mod diagnostic_log;
 pub mod doc_search;
 pub mod docx_extract;
@@ -1346,6 +1347,44 @@ async fn get_feishu_sync_preview(
     pool: tauri::State<'_, SqlitePool>,
 ) -> Result<db::feishu_sync::FeishuSyncPreview, String> {
     db::feishu_sync::get_preview(pool.inner()).await
+}
+
+#[derive(Deserialize)]
+struct FeishuBindCaseInput {
+    inbox_id: String,
+    case_id: String,
+}
+
+#[tauri::command]
+async fn bind_feishu_sync_case(
+    pool: tauri::State<'_, SqlitePool>,
+    input: FeishuBindCaseInput,
+) -> Result<(), String> {
+    db::feishu_sync::bind_case(pool.inner(), input.inbox_id.trim(), input.case_id.trim()).await
+}
+
+#[tauri::command]
+async fn unbind_feishu_sync_case(
+    pool: tauri::State<'_, SqlitePool>,
+    link_id: String,
+) -> Result<(), String> {
+    db::feishu_sync::unbind_case(pool.inner(), link_id.trim()).await
+}
+
+#[tauri::command]
+async fn ignore_feishu_sync_case(
+    pool: tauri::State<'_, SqlitePool>,
+    inbox_id: String,
+) -> Result<(), String> {
+    db::feishu_sync::ignore_case(pool.inner(), inbox_id.trim()).await
+}
+
+#[tauri::command]
+async fn restore_feishu_sync_case(
+    pool: tauri::State<'_, SqlitePool>,
+    inbox_id: String,
+) -> Result<(), String> {
+    db::feishu_sync::restore_case(pool.inner(), inbox_id.trim()).await
 }
 
 #[derive(Deserialize)]
@@ -5952,6 +5991,10 @@ pub fn run() {
             fetch_feishu_calendar,
             find_feishu_case_path,
             get_feishu_sync_preview,
+            bind_feishu_sync_case,
+            unbind_feishu_sync_case,
+            ignore_feishu_sync_case,
+            restore_feishu_sync_case,
             get_feishu_connection_status,
             connect_feishu_readonly,
             disconnect_feishu_readonly,
@@ -6010,6 +6053,8 @@ pub fn run() {
             contract_review::convert_doc_to_docx,
             contract_review::export_contract_opinion_docx,
             contract_review::export_contract_redline_docx,
+            demand_letter::generate_demand_letter,
+            demand_letter::export_demand_letter_docx,
             transaction_research::transaction_legal_research,
             contract_draft::plan_contract_draft,
             contract_draft::generate_contract_draft,

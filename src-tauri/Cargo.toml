@@ -1,6 +1,6 @@
 [package]
 name = "caseboard"
-version = "0.7.4"
+version = "0.7.5"
 description = "方律案件看板 · Fanglv CaseBoard"
 authors = ["Fanglv", "CaseBoard Contributors"]
 edition = "2021"

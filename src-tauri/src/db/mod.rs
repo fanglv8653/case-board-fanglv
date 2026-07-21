@@ -56,6 +56,10 @@ const LEGACY_APP_NAME: &str = "CaseBoard";
 /// 该值必须是绝对目录；设置后不会读取或迁移默认/旧版数据目录。
 pub const CASEBOARD_DATA_DIR_ENV: &str = "CASEBOARD_DATA_DIR";
 
+// 由 build.rs 根据全部 SQL 迁移内容生成。显式引用可确保迁移集合变化时本模块
+// 被重新编译，避免 sqlx::migrate! 在本机增量 Release 中沿用旧宏展开。
+const _MIGRATION_BUILD_FINGERPRINT: &str = env!("CASEBOARD_MIGRATION_BUILD_FINGERPRINT");
+
 /// 拿到当前操作系统下方律案件看板的数据目录路径。
 ///
 /// macOS: `~/Library/Application Support/FanglvCaseBoard/`

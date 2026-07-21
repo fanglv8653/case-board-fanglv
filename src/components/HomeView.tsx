@@ -70,6 +70,7 @@ import { useFeatureFlag } from "@/lib/featureFlags";
 import { isCriminalCase } from "@/lib/caseDomain";
 import { caseMatchesSearch, getCaseDisplayName } from "@/lib/caseIdentity";
 import { CalendarBoard } from "./CalendarBoard";
+import { shouldMountFullCalendar } from "./homeCalendarVisibility";
 import {
   AGENDA_SOURCE_META,
   agendaDotClass,
@@ -226,6 +227,7 @@ export function HomeView({
   onOpenCivilModule,
   onOpenExecutionModule,
 }: HomeViewProps) {
+  const showFullCalendar = shouldMountFullCalendar(mode);
   const overviewCases = cases;
   const greeting = getGreeting(userDisplayName);
   const monthLabel = new Date()
@@ -661,7 +663,7 @@ export function HomeView({
           />
 
           {/* 飞书日历开启 → 月历视图(替代本地日程日历卡);否则按本地开关显示原日程卡 */}
-          {cases.length > 0 && feishuEnabled && (
+          {showFullCalendar && cases.length > 0 && feishuEnabled && (
             <div className="mb-8">
               <CalendarBoard
                 localEvents={calendarEvents}
@@ -671,7 +673,7 @@ export function HomeView({
             </div>
           )}
 
-          {cases.length > 0 && !feishuEnabled && calendarEnabled && (
+          {showFullCalendar && cases.length > 0 && !feishuEnabled && calendarEnabled && (
             <div className="mb-8">
               <CalendarPanel
                 events={calendarEvents}

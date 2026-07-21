@@ -1116,6 +1116,8 @@ export interface Citation {
 export interface Settings {
   /** 用户的显示称呼(例:"刘律师"),首页问候用。 */
   user_display_name: string | null;
+  /** 合同审查修订批注版的默认作者；为空时回退到 user_display_name。 */
+  contract_review_comment_author: string | null;
   /** 2026-05-23 加:用户是否完成 onboarding。默认 false,首次启动会强制弹 wizard。 */
   setup_completed: boolean;
 
@@ -1279,6 +1281,17 @@ export interface FeishuSyncInboxPreview {
   case_no: string | null;
   remote_modified_at: string | null;
   status: string;
+  recommended_case_id: string | null;
+  recommendation_reason: string | null;
+}
+
+export interface FeishuLocalCaseOption {
+  id: string;
+  display_name: string;
+  legal_domain: string;
+  case_no: string | null;
+  cause: string | null;
+  party: string | null;
 }
 
 export interface FeishuSyncChangePreview {
@@ -1317,6 +1330,8 @@ export interface FeishuSyncRunPreview {
 export interface FeishuSyncPreview {
   bound_cases: FeishuSyncLinkPreview[];
   pending_cases: FeishuSyncInboxPreview[];
+  ignored_cases: FeishuSyncInboxPreview[];
+  available_local_cases: FeishuLocalCaseOption[];
   proposed_changes: FeishuSyncChangePreview[];
   conflicts: FeishuSyncConflictPreview[];
   recent_runs: FeishuSyncRunPreview[];

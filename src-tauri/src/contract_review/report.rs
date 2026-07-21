@@ -24,6 +24,7 @@ pub fn build_opinion_md(
     stance_label: &str,
     strictness_label: &str,
     skipped: &[String],
+    document_status: &str,
 ) -> String {
     let mut md = String::new();
 
@@ -33,9 +34,29 @@ pub fn build_opinion_md(
     }
     md.push_str(&format!("**审查立场:**{}\n\n", stance_label));
     md.push_str(&format!("**审查口径:**{}\n\n", strictness_label));
+    md.push_str(&format!("**文档状态:**{}\n\n", document_status));
     let generated = chrono::Local::now().format("%Y-%m-%d").to_string();
     md.push_str(&format!("**出具日期:**{}\n\n", generated));
     md.push_str("---\n\n");
+
+    if !result.material_review.scope_summary.trim().is_empty()
+        || !result.material_review.missing_materials.is_empty()
+        || !result.material_review.consistency_issues.is_empty()
+    {
+        md.push_str("## 材料范围与完整性\n\n");
+        push_kv(&mut md, "审查范围", &result.material_review.scope_summary);
+        push_list(
+            &mut md,
+            "待补材料",
+            &result.material_review.missing_materials,
+        );
+        push_list(
+            &mut md,
+            "材料一致性问题",
+            &result.material_review.consistency_issues,
+        );
+        md.push('\n');
+    }
 
     // 一、综合审查意见
     md.push_str("## 一、综合审查意见\n\n");
@@ -99,6 +120,10 @@ pub fn build_opinion_md(
         push_kv(&mut md, "整改建议", &r.suggestion);
         push_kv(&mut md, "推荐措辞", &r.recommended_text);
         push_kv(&mut md, "法律依据", &r.basis);
+        push_kv(&mut md, "事实基础", &r.fact_basis);
+        push_kv(&mut md, "事实状态", &r.fact_status);
+        push_kv(&mut md, "法源状态", &r.legal_source_status);
+        push_kv(&mut md, "律师复核", &r.lawyer_review_status);
         push_kv(
             &mut md,
             "处理方式",
@@ -138,6 +163,17 @@ fn push_kv(md: &mut String, k: &str, v: &str) {
     md.push_str(&format!("- **{}:**{}\n", k, v));
 }
 
+fn push_list(md: &mut String, k: &str, values: &[String]) {
+    let values: Vec<&str> = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if !values.is_empty() {
+        md.push_str(&format!("- **{}:**{}\n", k, values.join("；")));
+    }
+}
+
 /// 审查意见书 → Word(原生 OOXML)。复用 base 档报告引擎。
 pub fn build_opinion_docx(
     result: &ContractReviewResult,
@@ -145,8 +181,15 @@ pub fn build_opinion_docx(
     stance_label: &str,
     strictness_label: &str,
     skipped: &[String],
+    document_status: &str,
 ) -> Result<Vec<u8>, String> {
     let title = opinion_title(contract_name);
-    let md = build_opinion_md(result, stance_label, strictness_label, skipped);
+    let md = build_opinion_md(
+        result,
+        stance_label,
+        strictness_label,
+        skipped,
+        document_status,
+    );
     crate::docx_filing::build_report_docx_bytes(&title, &md)
 }

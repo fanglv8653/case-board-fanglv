@@ -9,14 +9,15 @@
  */
 
 import { useState } from "react";
-import { ArrowLeft, FileSignature, ShieldCheck } from "lucide-react";
+import { ArrowLeft, FileSignature, MailWarning, ShieldCheck } from "lucide-react";
 
 import { BetaBadge } from "@/components/BetaBadge";
 import { LegalToolCard } from "@/modules/tools/components/LegalToolCard";
 import { ContractReviewTool } from "./ContractReviewTool";
 import { ContractDraftTool } from "./ContractDraftTool";
+import { DemandLetterTool } from "./DemandLetterTool";
 
-type TransactionToolId = "contract_review" | "contract_draft";
+type TransactionToolId = "contract_review" | "contract_draft" | "demand_letter";
 
 export function TransactionModule() {
   const [activeTool, setActiveTool] = useState<TransactionToolId | null>(null);
@@ -81,6 +82,32 @@ export function TransactionModule() {
     );
   }
 
+  if (activeTool === "demand_letter") {
+    return (
+      <main className="flex h-full w-full flex-col bg-background">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border bg-card/50 px-6 py-2.5">
+          <button
+            type="button"
+            onClick={() => setActiveTool(null)}
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            返回非诉
+          </button>
+          <h2 className="flex items-center gap-2 text-sm font-medium text-foreground">
+            <MailWarning className="size-4 text-sky-600 dark:text-sky-400" />
+            律师函
+          </h2>
+        </header>
+        <div className="flex-1 overflow-auto">
+          <div className="mx-auto max-w-4xl px-8 py-6">
+            <DemandLetterTool />
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   // 卡片网格(默认)
   return (
     <main className="flex h-full w-full flex-col bg-background">
@@ -108,6 +135,12 @@ export function TransactionModule() {
               desc="描述交易需求 → AI 按三观四步法识别类型、引导补全要素、生成合同草案,可导出 Word。"
               badge="Beta"
               onClick={() => setActiveTool("contract_draft")}
+            />
+            <LegalToolCard
+              icon={MailWarning}
+              title="律师函"
+              desc="填写核心事实与要求 → 生成待律师复核的工作稿 → 审核后导出 Word，可选创建本地案件提醒。"
+              onClick={() => setActiveTool("demand_letter")}
             />
           </div>
         </div>

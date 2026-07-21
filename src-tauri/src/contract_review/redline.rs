@@ -103,10 +103,27 @@ pub fn build_redlined_docx(
     src_path: &str,
     result: &ContractReviewResult,
     author: &str,
+    draft_notice: bool,
+) -> Result<RedlineOutcome, String> {
+    let date = current_ooxml_timestamp();
+    build_redlined_docx_at(src_path, result, author, &date, draft_notice)
+}
+
+fn current_ooxml_timestamp() -> String {
+    chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+}
+
+/// 使用一次性时间快照生成修订版。`date` 在导出入口读取一次，确保 comments、w:ins、w:del
+/// 使用完全相同且带本机时区偏移的 RFC3339 时间。
+fn build_redlined_docx_at(
+    src_path: &str,
+    result: &ContractReviewResult,
+    author: &str,
+    date: &str,
+    draft_notice: bool,
 ) -> Result<RedlineOutcome, String> {
     // 1. 读出原 docx 全部 part(保序),拿 document.xml。
     let (mut parts, doc_xml) = read_docx_parts(src_path)?;
-    let date = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let author_esc = xml_escape(author);
 
     // 2. 段落切分(唯一权威)。
@@ -122,6 +139,35 @@ pub fn build_redlined_docx(
                                 // 每段已被行内修订占用的 run 字节区间(避免同段多条修订重叠)。
     let mut occupied: std::collections::HashMap<usize, Vec<(usize, usize)>> =
         std::collections::HashMap::new();
+
+    if draft_notice {
+        if let Some(&(ps, pe)) = para_spans.first() {
+            let para_xml = &doc_xml[ps..pe];
+            if para_xml.ends_with("</w:p>") {
+                let (a, b) = whole_paragraph_comment_points(para_xml);
+                edits.push(Edit {
+                    start: ps + a,
+                    end: ps + a,
+                    replacement: format!("<w:commentRangeStart w:id=\"{}\"/>", comment_id),
+                });
+                edits.push(Edit {
+                    start: ps + b,
+                    end: ps + b,
+                    replacement: format!(
+                        "<w:commentRangeEnd w:id=\"{}\"/>{}",
+                        comment_id,
+                        comment_reference_run(comment_id)
+                    ),
+                });
+                comments.push(CommentEntry {
+                    id: comment_id,
+                    text: "工作稿：AI 辅助生成，材料事实、法源和修改意见尚待执业律师复核，不得直接对外发送或签署。".into(),
+                });
+                comment_id += 1;
+                applied_comment += 1;
+            }
+        }
+    }
 
     // 按段落 + 段内位置稳定排序(让落痕顺序自然)。
     let mut risks: Vec<&ReviewRisk> = result.risks.iter().collect();
@@ -154,7 +200,7 @@ pub fn build_redlined_docx(
         let mut did_inline = false;
         if risk.wants_revise() {
             if let Some((rstart, rend, replacement)) =
-                try_build_inline(para_xml, risk, &author_esc, &date, &mut rev_id, comment_id)
+                try_build_inline(para_xml, risk, &author_esc, date, &mut rev_id, comment_id)
             {
                 let used = occupied.entry(pidx).or_default();
                 let overlap = used.iter().any(|&(a, b)| rstart < b && a < rend);
@@ -218,7 +264,7 @@ pub fn build_redlined_docx(
     }
 
     // 5. 生成 comments.xml + 注册 content_types / rels。
-    let comments_xml = build_comments_xml(&comments, &author_esc, &date);
+    let comments_xml = build_comments_xml(&comments, &author_esc, date);
     parts_set(&mut parts, "word/document.xml", new_doc_xml.into_bytes());
     parts_set(&mut parts, "word/comments.xml", comments_xml.into_bytes());
     register_comments_part(&mut parts)?;
@@ -497,4 +543,101 @@ fn write_docx_parts(parts: DocxParts) -> Result<Vec<u8>, String> {
         zip.finish().map_err(|e| format!("收尾 zip 失败: {}", e))?;
     }
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract_review::analyze::{ContractReviewResult, ReviewConclusion, ReviewRisk};
+    use std::io::{Read, Write};
+
+    fn write_minimal_docx(path: &std::path::Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("[Content_Types].xml", opts).unwrap();
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#).unwrap();
+        zip.start_file("word/_rels/document.xml.rels", opts)
+            .unwrap();
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#).unwrap();
+        zip.start_file("word/document.xml", opts).unwrap();
+        zip.write_all(r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>原条款</w:t></w:r></w:p></w:body></w:document>"#.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+
+    fn unzip_text(bytes: &[u8], name: &str) -> String {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut text = String::new();
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    }
+
+    #[test]
+    fn ooxml_uses_one_author_and_offset_timestamp_for_comments_and_revisions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_path = temp_dir.path().join("source.docx");
+        write_minimal_docx(&temp_path);
+        let result = ContractReviewResult {
+            contract_type: "测试合同".into(),
+            conclusion: ReviewConclusion {
+                verdict: "有条件可签".into(),
+                preconditions: vec![],
+                summary: String::new(),
+            },
+            material_review: Default::default(),
+            risks: vec![ReviewRisk {
+                level: "P1".into(),
+                title: "测试风险".into(),
+                clause_ref: String::new(),
+                paragraph_index: Some(0),
+                anchor_text: "原条款".into(),
+                consequence: "测试".into(),
+                basis: String::new(),
+                fact_basis: "原条款".into(),
+                fact_status: "待律师复核".into(),
+                legal_source_status: "待核验".into(),
+                lawyer_review_status: "待律师复核".into(),
+                suggestion: "修改".into(),
+                recommended_text: "新条款".into(),
+                action: "revise".into(),
+            }],
+        };
+        let timestamp = "2026-07-21T18:05:06+08:00";
+        let outcome = build_redlined_docx_at(
+            temp_path.to_str().unwrap(),
+            &result,
+            "方律师",
+            timestamp,
+            false,
+        )
+        .unwrap();
+        let document = unzip_text(&outcome.docx, "word/document.xml");
+        let comments = unzip_text(&outcome.docx, "word/comments.xml");
+        assert_eq!(
+            document
+                .matches(&format!("w:date=\"{}\"", timestamp))
+                .count(),
+            2
+        );
+        assert_eq!(document.matches("w:author=\"方律师\"").count(), 2);
+        assert!(comments.contains(&format!("w:date=\"{}\"", timestamp)));
+        assert!(comments.contains("w:author=\"方律师\""));
+        assert!(!document.contains("Z\""));
+    }
+
+    #[test]
+    fn export_timestamp_uses_current_machine_offset() {
+        let text = current_ooxml_timestamp();
+        let parsed = chrono::DateTime::parse_from_rfc3339(&text).unwrap();
+        assert_eq!(
+            parsed.offset().local_minus_utc(),
+            chrono::Local::now().offset().local_minus_utc()
+        );
+        assert!(text.contains('T'));
+        assert!(text.ends_with("+08:00") || !text.ends_with('Z'));
+    }
 }

@@ -176,9 +176,82 @@ fn json_value(value: Option<&str>) -> Option<String> {
 fn normalize(value: &str) -> String {
     value
         .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '，' | ',' | '、' | '。'))
+        .filter(|c| {
+            !c.is_whitespace()
+                && !matches!(
+                    c,
+                    '，' | ','
+                        | '、'
+                        | '。'
+                        | '.'
+                        | '-'
+                        | '_'
+                        | '—'
+                        | '－'
+                        | '/'
+                        | '\\'
+                        | '（'
+                        | '）'
+                        | '('
+                        | ')'
+                        | '：'
+                        | ':'
+                )
+        })
         .collect::<String>()
         .to_lowercase()
+}
+
+fn valid_date_parts(year: &str, month: &str, day: &str) -> bool {
+    let Ok(year) = year.parse::<u16>() else {
+        return false;
+    };
+    let Ok(month) = month.parse::<u8>() else {
+        return false;
+    };
+    let Ok(day) = day.parse::<u8>() else {
+        return false;
+    };
+    (2000..=2099).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+/// 仅用于候选匹配，绝不回写本地文件夹名或飞书案件名。
+fn strip_common_date_prefix(value: &str) -> &str {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let mut end = None;
+    if bytes.len() >= 8
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && valid_date_parts(&value[..4], &value[4..6], &value[6..8])
+    {
+        end = Some(8);
+    } else if bytes.len() >= 10
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && matches!(bytes[4], b'-' | b'.' | b'/' | b'_')
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && matches!(bytes[7], b'-' | b'.' | b'/' | b'_')
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && valid_date_parts(&value[..4], &value[5..7], &value[8..10])
+    {
+        end = Some(10);
+    }
+    let Some(mut end) = end else {
+        return value;
+    };
+    while let Some(character) = value[end..].chars().next() {
+        if character.is_whitespace()
+            || matches!(character, '-' | '_' | '—' | '－' | '.' | '/' | '：' | ':')
+        {
+            end += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    value[end..].trim()
+}
+
+fn normalize_case_name(value: &str) -> String {
+    normalize(strip_common_date_prefix(value))
 }
 
 fn classify(local: Option<&str>, remote: Option<&str>) -> (&'static str, &'static str) {
@@ -219,7 +292,7 @@ pub async fn complete_pull_preview(
 
     for remote in &mapped {
         let existing_link: Option<(String, String)> = sqlx::query_as(
-            "SELECT id,local_entity_id FROM feishu_sync_links WHERE app_token=?1 AND table_id=?2 AND record_id=?3 AND entity_type='case' AND slot_key='' LIMIT 1",
+            "SELECT id,local_entity_id FROM feishu_sync_links WHERE app_token=?1 AND table_id=?2 AND record_id=?3 AND entity_type='case' AND slot_key='' AND status='active' LIMIT 1",
         )
         .bind(app_token)
         .bind(table_id)
@@ -228,43 +301,49 @@ pub async fn complete_pull_preview(
         .await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 读取既有绑定失败".to_string())?;
 
-        let (link_id, case_id, link_source) = if let Some((link_id, case_id)) = existing_link {
-            (Some(link_id), Some(case_id), None)
+        let inbox_state: Option<(String, String, i64)> = sqlx::query_as(
+            "SELECT id,status,auto_bind_suppressed FROM feishu_sync_inbox WHERE app_token=?1 AND table_id=?2 AND record_id=?3 LIMIT 1",
+        )
+        .bind(app_token)
+        .bind(table_id)
+        .bind(&remote.record_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 读取待绑定状态失败".to_string())?;
+        let allow_auto_bind = inbox_state
+            .as_ref()
+            .is_none_or(|(_, status, suppressed)| status != "ignored" && *suppressed == 0);
+
+        let (link_id, case_id, auto_bound) = if let Some((link_id, case_id)) = existing_link {
+            (Some(link_id), Some(case_id), false)
         } else {
-            let mut matches: Vec<String> = Vec::new();
-            let mut source = None;
-            if let Some(case_no) = remote.case_no.as_deref() {
-                matches = sqlx::query_scalar(
+            // 名称（包括剥离本地日期前缀后的名称）只生成推荐，不在拉取时直接绑定。
+            // 唯一、精确案号是唯一允许的自动绑定条件。
+            let matches: Vec<String> = if allow_auto_bind {
+                if let Some(case_no) = remote.case_no.as_deref() {
+                    sqlx::query_scalar(
                     "SELECT id FROM cases WHERE trim(COALESCE(NULLIF(agg_case_no,''),case_no,''))=trim(?1)",
                 )
                 .bind(case_no)
                 .fetch_all(&mut *tx)
                 .await
-                .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 案号匹配失败".to_string())?;
-                if matches.len() == 1 {
-                    source = Some("exact_case_no");
+                .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 案号匹配失败".to_string())?
+                } else {
+                    Vec::new()
                 }
-            }
-            if matches.len() != 1 && !remote.display_name.trim().is_empty() {
-                matches = sqlx::query_scalar(
-                    "SELECT id FROM cases WHERE trim(COALESCE(NULLIF(display_name_override,''),name))=trim(?1)",
-                )
-                .bind(&remote.display_name)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 案件名称匹配失败".to_string())?;
-                source = (matches.len() == 1).then_some("exact_display_name");
-            }
+            } else {
+                Vec::new()
+            };
             if matches.len() == 1 {
                 let link_id = Uuid::new_v4().to_string();
                 sqlx::query("INSERT INTO feishu_sync_links (id,entity_type,local_entity_id,app_token,table_id,record_id,link_source,status,confirmed_at) VALUES (?1,'case',?2,?3,?4,?5,?6,'active',datetime('now'))")
                     .bind(&link_id).bind(&matches[0]).bind(app_token).bind(table_id)
-                    .bind(&remote.record_id).bind(source.unwrap_or("exact_display_name"))
+                    .bind(&remote.record_id).bind("exact_case_no")
                     .execute(&mut *tx).await
                     .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 创建案件绑定失败".to_string())?;
-                (Some(link_id), Some(matches[0].clone()), source)
+                (Some(link_id), Some(matches[0].clone()), true)
             } else {
-                (None, None, None)
+                (None, None, false)
             }
         };
 
@@ -290,6 +369,25 @@ pub async fn complete_pull_preview(
         .bind(&case_id)
         .execute(&mut *tx).await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 更新待绑定预演失败".to_string())?;
+
+        let inbox_id: String = sqlx::query_scalar(
+            "SELECT id FROM feishu_sync_inbox WHERE app_token=?1 AND table_id=?2 AND record_id=?3",
+        )
+        .bind(app_token)
+        .bind(table_id)
+        .bind(&remote.record_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 读取待绑定记录失败".to_string())?;
+        if auto_bound {
+            sqlx::query("INSERT INTO feishu_sync_binding_audits (id,inbox_id,action,previous_status,next_status,next_case_id) VALUES (?1,?2,'auto_bind',?3,'bound',?4)")
+                .bind(Uuid::new_v4().to_string())
+                .bind(&inbox_id)
+                .bind(inbox_state.as_ref().map(|(_, status, _)| status.as_str()))
+                .bind(case_id.as_deref())
+                .execute(&mut *tx).await
+                .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 保存自动绑定审计失败".to_string())?;
+        }
 
         if let (Some(link_id), Some(case_id)) = (link_id.as_deref(), case_id.as_deref()) {
             bound_count += 1;
@@ -376,7 +474,6 @@ pub async fn complete_pull_preview(
                     .execute(&mut *tx).await
                     .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 保存字段差异预演失败".to_string())?;
             }
-            let _ = link_source;
         } else {
             pending_count += 1;
         }
@@ -429,6 +526,104 @@ pub struct FeishuSyncInboxPreview {
     pub case_no: Option<String>,
     pub remote_modified_at: Option<String>,
     pub status: String,
+    pub recommended_case_id: Option<String>,
+    pub recommendation_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FeishuLocalCaseOption {
+    pub id: String,
+    pub display_name: String,
+    pub legal_domain: String,
+    pub case_no: Option<String>,
+    pub cause: Option<String>,
+    pub party: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct FeishuInboxRow {
+    id: String,
+    record_id: String,
+    display_name: String,
+    legal_type: Option<String>,
+    case_no: Option<String>,
+    remote_modified_at: Option<String>,
+    status: String,
+    mapped_payload_json: String,
+}
+
+fn values_overlap(left: &str, right: &str) -> bool {
+    let left = normalize(left);
+    let right = normalize(right);
+    !left.is_empty() && !right.is_empty() && (left.contains(&right) || right.contains(&left))
+}
+
+fn recommendation_for(
+    inbox: &FeishuInboxRow,
+    local_cases: &[FeishuLocalCaseOption],
+) -> (Option<String>, Option<String>) {
+    let payload: Value = serde_json::from_str(&inbox.mapped_payload_json).unwrap_or(Value::Null);
+    let remote_domain = payload
+        .get("legal_domain")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_party = payload
+        .get("party")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_cause = payload
+        .get("cause")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let remote_name = normalize_case_name(&inbox.display_name);
+    let mut matches = Vec::new();
+    for local in local_cases {
+        if remote_domain.is_empty()
+            || remote_domain == "unknown"
+            || local.legal_domain == "unknown"
+            || local.legal_domain != remote_domain
+            || normalize_case_name(&local.display_name) != remote_name
+        {
+            continue;
+        }
+        let party_matches = local.party.as_deref().is_some_and(|party| {
+            (!remote_party.is_empty() && values_overlap(party, remote_party))
+                || values_overlap(party, &inbox.display_name)
+        });
+        let cause_matches = local.cause.as_deref().is_some_and(|cause| {
+            (!remote_cause.is_empty() && values_overlap(cause, remote_cause))
+                || values_overlap(cause, &inbox.display_name)
+        });
+        if party_matches && cause_matches {
+            matches.push(local.id.clone());
+        }
+    }
+    match matches.as_slice() {
+        [case_id] => (
+            Some(case_id.clone()),
+            Some("日期前缀归一化后名称一致，且案件领域、当事人和案由/罪名均通过校验".to_string()),
+        ),
+        [] => (None, None),
+        _ => (None, Some("存在多个同名候选，请人工选择并确认".to_string())),
+    }
+}
+
+fn inbox_preview(
+    row: FeishuInboxRow,
+    local_cases: &[FeishuLocalCaseOption],
+) -> FeishuSyncInboxPreview {
+    let (recommended_case_id, recommendation_reason) = recommendation_for(&row, local_cases);
+    FeishuSyncInboxPreview {
+        id: row.id,
+        record_id: row.record_id,
+        display_name: row.display_name,
+        legal_type: row.legal_type,
+        case_no: row.case_no,
+        remote_modified_at: row.remote_modified_at,
+        status: row.status,
+        recommended_case_id,
+        recommendation_reason,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -471,12 +666,35 @@ pub struct FeishuSyncRunPreview {
 pub struct FeishuSyncPreview {
     pub bound_cases: Vec<FeishuSyncLinkPreview>,
     pub pending_cases: Vec<FeishuSyncInboxPreview>,
+    pub ignored_cases: Vec<FeishuSyncInboxPreview>,
+    pub available_local_cases: Vec<FeishuLocalCaseOption>,
     pub proposed_changes: Vec<FeishuSyncChangePreview>,
     pub conflicts: Vec<FeishuSyncConflictPreview>,
     pub recent_runs: Vec<FeishuSyncRunPreview>,
 }
 
 pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String> {
+    let available_local_cases = sqlx::query_as::<_, FeishuLocalCaseOption>(
+        r#"SELECT c.id,
+                  COALESCE(NULLIF(trim(c.display_name_override), ''), c.name, c.id) AS display_name,
+                  COALESCE(NULLIF(c.legal_domain, ''), 'unknown') AS legal_domain,
+                  COALESCE(NULLIF(c.agg_case_no, ''), NULLIF(c.case_no, '')) AS case_no,
+                  COALESCE(NULLIF(c.agg_cause, ''), NULLIF(c.cause, '')) AS cause,
+                  CASE WHEN c.legal_domain='criminal'
+                    THEN COALESCE(json_extract(c.agg_defendants,'$[0]'), p.suspect_or_defendant_name)
+                    ELSE json_extract(c.agg_plaintiffs,'$[0]') END AS party
+           FROM cases c
+           LEFT JOIN criminal_case_profiles p ON p.case_id=c.id
+           WHERE NOT EXISTS (
+             SELECT 1 FROM feishu_sync_links l
+             WHERE l.entity_type='case' AND l.local_entity_id=c.id AND l.status='active'
+           )
+           ORDER BY display_name COLLATE NOCASE"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读取可绑定本地案件失败: {e}"))?;
+
     let bound_cases = sqlx::query_as::<_, FeishuSyncLinkPreview>(
         r#"SELECT l.id,
                   l.local_entity_id AS local_case_id,
@@ -514,9 +732,9 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
     .await
     .map_err(|e| format!("读取已绑定案件失败: {e}"))?;
 
-    let pending_cases = sqlx::query_as::<_, FeishuSyncInboxPreview>(
+    let pending_rows = sqlx::query_as::<_, FeishuInboxRow>(
         r#"SELECT id, record_id, display_name, legal_type, case_no,
-                  remote_modified_at, status
+                  remote_modified_at, status, mapped_payload_json
            FROM feishu_sync_inbox
            WHERE status = 'pending_binding'
            ORDER BY updated_at DESC, display_name COLLATE NOCASE"#,
@@ -524,6 +742,25 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
     .fetch_all(pool)
     .await
     .map_err(|e| format!("读取待绑定案件失败: {e}"))?;
+    let pending_cases = pending_rows
+        .into_iter()
+        .map(|row| inbox_preview(row, &available_local_cases))
+        .collect();
+
+    let ignored_rows = sqlx::query_as::<_, FeishuInboxRow>(
+        r#"SELECT id, record_id, display_name, legal_type, case_no,
+                  remote_modified_at, status, mapped_payload_json
+           FROM feishu_sync_inbox
+           WHERE status = 'ignored'
+           ORDER BY updated_at DESC, display_name COLLATE NOCASE"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读取已忽略案件失败: {e}"))?;
+    let ignored_cases = ignored_rows
+        .into_iter()
+        .map(|row| inbox_preview(row, &available_local_cases))
+        .collect();
 
     let proposed_changes = sqlx::query_as::<_, FeishuSyncChangePreview>(
         r#"SELECT ch.id,
@@ -612,15 +849,195 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
     Ok(FeishuSyncPreview {
         bound_cases,
         pending_cases,
+        ignored_cases,
+        available_local_cases,
         proposed_changes,
         conflicts,
         recent_runs,
     })
 }
 
+pub async fn bind_case(pool: &SqlitePool, inbox_id: &str, case_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法开始绑定事务".to_string())?;
+    let inbox: (String, String, String, String, Option<String>) = sqlx::query_as(
+        "SELECT status,app_token,table_id,record_id,bound_case_id FROM feishu_sync_inbox WHERE id=?1",
+    )
+    .bind(inbox_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取待绑定案件".to_string())?
+    .ok_or_else(|| "FEISHU_BINDING_NOT_FOUND: 待绑定案件不存在".to_string())?;
+    if inbox.0 != "pending_binding" {
+        return Err("FEISHU_BINDING_STATE_INVALID: 只有待绑定案件可以确认绑定".to_string());
+    }
+    let case_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cases WHERE id=?1)")
+        .bind(case_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法校验本地案件".to_string())?;
+    if !case_exists {
+        return Err("FEISHU_BINDING_CASE_NOT_FOUND: 本地案件不存在".to_string());
+    }
+    let local_conflict: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM feishu_sync_links WHERE entity_type='case' AND local_entity_id=?1 AND table_id=?2 AND slot_key='' AND status='active')",
+    )
+    .bind(case_id)
+    .bind(&inbox.2)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法校验本地案件绑定".to_string())?;
+    if local_conflict {
+        return Err("FEISHU_BINDING_CONFLICT: 该本地案件已经绑定其他飞书记录".to_string());
+    }
+    let remote_link: Option<(String, String)> = sqlx::query_as(
+        "SELECT id,status FROM feishu_sync_links WHERE entity_type='case' AND app_token=?1 AND table_id=?2 AND record_id=?3 AND slot_key='' LIMIT 1",
+    )
+    .bind(&inbox.1)
+    .bind(&inbox.2)
+    .bind(&inbox.3)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法校验飞书记录绑定".to_string())?;
+    if remote_link
+        .as_ref()
+        .is_some_and(|(_, status)| status == "active")
+    {
+        return Err("FEISHU_BINDING_CONFLICT: 该飞书案件已经绑定本地案件".to_string());
+    }
+    if let Some((link_id, _)) = remote_link {
+        sqlx::query("UPDATE feishu_sync_links SET local_entity_id=?2,link_source='manual',status='active',confirmed_at=datetime('now'),updated_at=datetime('now') WHERE id=?1")
+            .bind(link_id).bind(case_id).execute(&mut *tx).await
+            .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法恢复本地绑定".to_string())?;
+    } else {
+        sqlx::query("INSERT INTO feishu_sync_links (id,entity_type,local_entity_id,app_token,table_id,record_id,link_source,status,confirmed_at) VALUES (?1,'case',?2,?3,?4,?5,'manual','active',datetime('now'))")
+            .bind(Uuid::new_v4().to_string()).bind(case_id).bind(&inbox.1).bind(&inbox.2).bind(&inbox.3)
+            .execute(&mut *tx).await
+            .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法创建本地绑定".to_string())?;
+    }
+    sqlx::query("UPDATE feishu_sync_inbox SET status='bound',bound_case_id=?2,resolved_at=datetime('now'),auto_bind_suppressed=0,updated_at=datetime('now') WHERE id=?1")
+        .bind(inbox_id).bind(case_id).execute(&mut *tx).await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法更新待绑定状态".to_string())?;
+    sqlx::query("INSERT INTO feishu_sync_binding_audits (id,inbox_id,action,previous_status,next_status,previous_case_id,next_case_id) VALUES (?1,?2,'manual_bind',?3,'bound',?4,?5)")
+        .bind(Uuid::new_v4().to_string()).bind(inbox_id).bind(&inbox.0).bind(&inbox.4).bind(case_id)
+        .execute(&mut *tx).await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法保存绑定审计".to_string())?;
+    tx.commit()
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法提交绑定事务".to_string())?;
+    Ok(())
+}
+
+pub async fn unbind_case(pool: &SqlitePool, link_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法开始解除事务".to_string())?;
+    let link: (String, String, String, String, String) = sqlx::query_as(
+        "SELECT local_entity_id,app_token,table_id,record_id,status FROM feishu_sync_links WHERE id=?1 AND entity_type='case'",
+    )
+    .bind(link_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取绑定".to_string())?
+    .ok_or_else(|| "FEISHU_BINDING_NOT_FOUND: 绑定不存在".to_string())?;
+    if link.4 != "active" {
+        return Err("FEISHU_BINDING_STATE_INVALID: 该绑定已经解除".to_string());
+    }
+    let inbox: (String, String) = sqlx::query_as(
+        "SELECT id,status FROM feishu_sync_inbox WHERE app_token=?1 AND table_id=?2 AND record_id=?3",
+    )
+    .bind(&link.1).bind(&link.2).bind(&link.3)
+    .fetch_optional(&mut *tx).await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取关联收件箱".to_string())?
+    .ok_or_else(|| "FEISHU_BINDING_NOT_FOUND: 关联收件箱不存在".to_string())?;
+    sqlx::query(
+        "UPDATE feishu_sync_links SET status='archived',updated_at=datetime('now') WHERE id=?1",
+    )
+    .bind(link_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法解除绑定".to_string())?;
+    sqlx::query("UPDATE feishu_sync_inbox SET status='pending_binding',bound_case_id=NULL,resolved_at=NULL,auto_bind_suppressed=1,updated_at=datetime('now') WHERE id=?1")
+        .bind(&inbox.0).execute(&mut *tx).await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法恢复待绑定状态".to_string())?;
+    sqlx::query("INSERT INTO feishu_sync_binding_audits (id,inbox_id,action,previous_status,next_status,previous_case_id) VALUES (?1,?2,'unbind',?3,'pending_binding',?4)")
+        .bind(Uuid::new_v4().to_string()).bind(&inbox.0).bind(&inbox.1).bind(&link.0)
+        .execute(&mut *tx).await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法保存解除审计".to_string())?;
+    tx.commit()
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法提交解除事务".to_string())?;
+    Ok(())
+}
+
+async fn change_inbox_status(
+    pool: &SqlitePool,
+    inbox_id: &str,
+    expected: &str,
+    next: &str,
+    action: &str,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法开始状态事务".to_string())?;
+    let current: (String, Option<String>) =
+        sqlx::query_as("SELECT status,bound_case_id FROM feishu_sync_inbox WHERE id=?1")
+            .bind(inbox_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取案件状态".to_string())?
+            .ok_or_else(|| "FEISHU_BINDING_NOT_FOUND: 待绑定案件不存在".to_string())?;
+    if current.0 != expected {
+        return Err("FEISHU_BINDING_STATE_INVALID: 案件状态已变化，请刷新后重试".to_string());
+    }
+    sqlx::query("UPDATE feishu_sync_inbox SET status=?2,bound_case_id=NULL,resolved_at=CASE WHEN ?2='ignored' THEN datetime('now') ELSE NULL END,updated_at=datetime('now') WHERE id=?1")
+        .bind(inbox_id).bind(next).execute(&mut *tx).await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法更新案件状态".to_string())?;
+    sqlx::query("INSERT INTO feishu_sync_binding_audits (id,inbox_id,action,previous_status,next_status,previous_case_id) VALUES (?1,?2,?3,?4,?5,?6)")
+        .bind(Uuid::new_v4().to_string()).bind(inbox_id).bind(action).bind(expected).bind(next).bind(&current.1)
+        .execute(&mut *tx).await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法保存状态审计".to_string())?;
+    tx.commit()
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法提交状态事务".to_string())?;
+    Ok(())
+}
+
+pub async fn ignore_case(pool: &SqlitePool, inbox_id: &str) -> Result<(), String> {
+    change_inbox_status(pool, inbox_id, "pending_binding", "ignored", "ignore").await
+}
+
+pub async fn restore_case(pool: &SqlitePool, inbox_id: &str) -> Result<(), String> {
+    change_inbox_status(pool, inbox_id, "ignored", "pending_binding", "restore").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_prefix_is_removed_only_for_matching() {
+        assert_eq!(
+            strip_common_date_prefix("20260721杨某买卖合同纠纷"),
+            "杨某买卖合同纠纷"
+        );
+        assert_eq!(
+            strip_common_date_prefix("2026-07-21_杨某买卖合同纠纷"),
+            "杨某买卖合同纠纷"
+        );
+        assert_eq!(
+            strip_common_date_prefix("杨某买卖合同纠纷"),
+            "杨某买卖合同纠纷"
+        );
+        assert_eq!(
+            normalize_case_name("2026.07.21 杨某、买卖合同纠纷"),
+            normalize_case_name("杨某买卖合同纠纷")
+        );
+    }
 
     #[tokio::test]
     async fn preview_reads_all_sections_without_mutating_cases() {
@@ -747,5 +1164,107 @@ mod tests {
                 "active".into()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn normalized_name_is_recommended_but_requires_manual_confirmation() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        sqlx::query(
+            r#"INSERT INTO cases
+               (id,name,case_type,source_folder,legal_domain,management_status,agg_plaintiffs,agg_cause)
+               VALUES ('case-name','20260721杨某买卖合同纠纷','诉讼','C:/preview','civil','active','["杨某"]','买卖合同纠纷')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let run_id = start_pull_run(&pool).await.unwrap();
+        let result = complete_pull_preview(
+            &pool,
+            &run_id,
+            "app",
+            "table",
+            vec![FeishuRemoteCaseRecord {
+                record_id: "record-name".into(),
+                fields: json!({
+                    "案件名称": "杨某买卖合同纠纷",
+                    "类型": "民事诉讼",
+                    "☑状态": "在办",
+                    "当事人": "杨某",
+                    "案由": "买卖合同纠纷"
+                }),
+                last_modified_time: None,
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.bound_count, 0);
+        assert_eq!(result.pending_count, 1);
+        let preview = get_preview(&pool).await.unwrap();
+        assert_eq!(
+            preview.pending_cases[0].recommended_case_id.as_deref(),
+            Some("case-name")
+        );
+        let link_count: i64 = sqlx::query_scalar("SELECT count(*) FROM feishu_sync_links")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(link_count, 0);
+    }
+
+    #[tokio::test]
+    async fn manual_binding_actions_are_reversible_audited_and_do_not_touch_case_fields() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        sqlx::query(
+            "INSERT INTO cases (id,name,case_type,source_folder,case_no,legal_domain,management_status) VALUES ('case-actions','20260721测试案件','诉讼','C:/preview','（2026）测2号','civil','active')",
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO feishu_sync_inbox (id,app_token,table_id,record_id,display_name,case_no,mapped_payload_json) VALUES ('inbox-actions','app','table','record-actions','测试案件','（2026）测2号','{}')",
+        )
+        .execute(&pool).await.unwrap();
+        let before: (String, String, String) =
+            sqlx::query_as("SELECT name,case_no,legal_domain FROM cases WHERE id='case-actions'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        bind_case(&pool, "inbox-actions", "case-actions")
+            .await
+            .unwrap();
+        let link_id: String = sqlx::query_scalar(
+            "SELECT id FROM feishu_sync_links WHERE record_id='record-actions' AND status='active'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        unbind_case(&pool, &link_id).await.unwrap();
+        let state_after_unbind: (String, Option<String>, i64) = sqlx::query_as(
+            "SELECT status,bound_case_id,auto_bind_suppressed FROM feishu_sync_inbox WHERE id='inbox-actions'",
+        )
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(state_after_unbind, ("pending_binding".into(), None, 1));
+
+        ignore_case(&pool, "inbox-actions").await.unwrap();
+        restore_case(&pool, "inbox-actions").await.unwrap();
+        let final_status: String =
+            sqlx::query_scalar("SELECT status FROM feishu_sync_inbox WHERE id='inbox-actions'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM feishu_sync_binding_audits WHERE inbox_id='inbox-actions' ORDER BY created_at,id",
+        )
+        .fetch_all(&pool).await.unwrap();
+        let after: (String, String, String) =
+            sqlx::query_as("SELECT name,case_no,legal_domain FROM cases WHERE id='case-actions'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(final_status, "pending_binding");
+        assert!(actions.contains(&"manual_bind".to_string()));
+        assert!(actions.contains(&"unbind".to_string()));
+        assert!(actions.contains(&"ignore".to_string()));
+        assert!(actions.contains(&"restore".to_string()));
+        assert_eq!(before, after);
     }
 }

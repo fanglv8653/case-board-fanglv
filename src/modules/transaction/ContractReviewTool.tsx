@@ -11,6 +11,7 @@ import {
   Loader2,
   ScrollText,
   Search,
+  Save,
   ShieldAlert,
   Upload,
 } from "lucide-react";
@@ -20,7 +21,9 @@ import {
   convertDocToDocx,
   exportContractOpinionDocx,
   exportContractRedlineDocx,
+  getSettings,
   reviewContractDocx,
+  saveSettings,
   type ContractReviewResponse,
   type RedlineSummary,
   type ReviewRisk,
@@ -33,6 +36,7 @@ const SUPPORTED_EXTS = [DIRECT_EXT, ...CONVERT_EXTS];
 
 type Stance = "party_a" | "party_b" | "neutral";
 type Strictness = "lenient" | "normal" | "aggressive";
+type ExportMode = "draft" | "final";
 
 const STANCE_OPTIONS: { id: Stance; label: string; hint: string }[] = [
   { id: "party_a", label: "我方代表甲方", hint: "优先保护甲方利益" },
@@ -209,6 +213,23 @@ function RiskCard({
             {risk.basis}
           </p>
         )}
+        {risk.fact_basis && (
+          <p className="text-muted-foreground">
+            <span>事实基础：</span>
+            {risk.fact_basis}
+          </p>
+        )}
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          <span className="rounded bg-amber-50 px-1.5 py-0.5 text-caption text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+            事实：{risk.fact_status || "待律师复核"}
+          </span>
+          <span className="rounded bg-sky-50 px-1.5 py-0.5 text-caption text-sky-700 dark:bg-sky-950/30 dark:text-sky-300">
+            法源：{risk.legal_source_status || "待核验"}
+          </span>
+          <span className="rounded bg-violet-50 px-1.5 py-0.5 text-caption text-violet-700 dark:bg-violet-950/30 dark:text-violet-300">
+            {risk.lawyer_review_status || "待律师复核"}
+          </span>
+        </div>
       </div>
 
       {onResearch && (
@@ -228,6 +249,17 @@ export function ContractReviewTool() {
   const [stance, setStance] = useState<Stance>("neutral");
   const [strictness, setStrictness] = useState<Strictness>("normal");
   const [hint, setHint] = useState("");
+  const [transactionGoal, setTransactionGoal] = useState("");
+  const [transactionStage, setTransactionStage] = useState("签署前");
+  const [negotiability, setNegotiability] = useState("可协商");
+  const [attachmentNote, setAttachmentNote] = useState("");
+  const [defaultAuthor, setDefaultAuthor] = useState("");
+  const [authorOverride, setAuthorOverride] = useState("");
+  const [savingAuthor, setSavingAuthor] = useState(false);
+  const [exportMode, setExportMode] = useState<ExportMode>("draft");
+  const [factsConfirmed, setFactsConfirmed] = useState(false);
+  const [sourcesVerified, setSourcesVerified] = useState(false);
+  const [lawyerConfirmed, setLawyerConfirmed] = useState(false);
 
   const [reviewing, setReviewing] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -251,6 +283,17 @@ export function ContractReviewTool() {
     return rank(a.level) - rank(b.level);
   });
   const counts = countByLevel(sortedRisks);
+  const formalReady = factsConfirmed && sourcesVerified && lawyerConfirmed;
+
+  useEffect(() => {
+    getSettings()
+      .then((settings) => {
+        setDefaultAuthor(
+          settings.contract_review_comment_author?.trim() || settings.user_display_name?.trim() || "",
+        );
+      })
+      .catch((e) => console.warn("load contract review author failed", e));
+  }, []);
 
   const segCls = (active: boolean) =>
     `flex-1 rounded-md px-3 py-1.5 text-xs transition-colors ${
@@ -340,9 +383,22 @@ export function ContractReviewTool() {
     setResearchOpen(false);
     setResearchSeed(null);
     setReviewing(true);
+    setFactsConfirmed(false);
+    setSourcesVerified(false);
+    setLawyerConfirmed(false);
+    setExportMode("draft");
     setBusyMsg("正在通读合同并执行三层审查，通常需要 30-90 秒。");
     try {
-      const result = await reviewContractDocx(docxPath, stance, strictness, hint.trim());
+      const result = await reviewContractDocx(
+        docxPath,
+        stance,
+        strictness,
+        hint.trim(),
+        transactionGoal.trim(),
+        transactionStage,
+        negotiability,
+        attachmentNote.trim(),
+      );
       setResp(result);
     } catch (e) {
       setError(formatError(e));
@@ -357,15 +413,26 @@ export function ContractReviewTool() {
     setError(null);
     try {
       const safeName = (resp.contract_name || "合同").replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
+      const suffix = exportMode === "final" ? "正式稿" : "工作稿";
       const picked = await dialogSave({
-        defaultPath: `${safeName}_审查意见书.docx`,
+        defaultPath: `${safeName}_审查意见书_${suffix}.docx`,
         filters: [{ name: "Word 文档", extensions: ["docx"] }],
       });
       if (typeof picked !== "string" || !picked.trim()) return;
 
       setExporting(true);
       setBusyMsg("正在导出审查意见书…");
-      await exportContractOpinionDocx(resp.result, resp.contract_name, stance, strictness, picked);
+      await exportContractOpinionDocx(
+        resp.result,
+        resp.contract_name,
+        stance,
+        strictness,
+        exportMode,
+        factsConfirmed,
+        sourcesVerified,
+        lawyerConfirmed,
+        picked,
+      );
       setBusyMsg("审查意见书已导出。");
     } catch (e) {
       setError(formatError(e));
@@ -380,15 +447,25 @@ export function ContractReviewTool() {
     setError(null);
     try {
       const safeName = (resp.contract_name || "合同").replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
+      const suffix = exportMode === "final" ? "正式稿" : "工作稿";
       const picked = await dialogSave({
-        defaultPath: `${safeName}_修订批注版.docx`,
+        defaultPath: `${safeName}_修订批注版_${suffix}.docx`,
         filters: [{ name: "Word 文档", extensions: ["docx"] }],
       });
       if (typeof picked !== "string" || !picked.trim()) return;
 
       setExporting(true);
       setBusyMsg("正在生成修订痕迹与批注版…");
-      const summary = await exportContractRedlineDocx(docxPath, resp.result, "", picked);
+      const summary = await exportContractRedlineDocx(
+        docxPath,
+        resp.result,
+        authorOverride.trim(),
+        exportMode,
+        factsConfirmed,
+        sourcesVerified,
+        lawyerConfirmed,
+        picked,
+      );
       setRedlineInfo(summary);
       setBusyMsg(
         `修订批注版已导出：行内修订 ${summary.applied_inline} 处，整段批注 ${summary.applied_comment} 处。`,
@@ -398,6 +475,24 @@ export function ContractReviewTool() {
     } finally {
       setExporting(false);
       window.setTimeout(() => setBusyMsg(""), 6000);
+    }
+  }
+
+  async function handleSaveDefaultAuthor() {
+    setError(null);
+    setSavingAuthor(true);
+    try {
+      const settings = await getSettings();
+      await saveSettings({
+        ...settings,
+        contract_review_comment_author: defaultAuthor.trim() || null,
+      });
+      setBusyMsg("批注作者默认值已保存到本机。");
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setSavingAuthor(false);
+      window.setTimeout(() => setBusyMsg(""), 3000);
     }
   }
 
@@ -512,6 +607,96 @@ export function ContractReviewTool() {
             className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-sky-400"
           />
         </div>
+
+        <details className="rounded-md border border-border bg-muted/15 px-3 py-2">
+          <summary className="cursor-pointer text-xs font-medium text-foreground">
+            补充交易背景与材料范围（建议）
+          </summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>交易目的</span>
+              <input
+                value={transactionGoal}
+                onChange={(event) => setTransactionGoal(event.target.value)}
+                disabled={busy}
+                placeholder="例如：采购核心设备并控制延期风险"
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:border-sky-400"
+              />
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>当前阶段</span>
+              <select
+                value={transactionStage}
+                onChange={(event) => setTransactionStage(event.target.value)}
+                disabled={busy}
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none"
+              >
+                <option>签署前</option>
+                <option>谈判中</option>
+                <option>履行中</option>
+                <option>争议前</option>
+              </select>
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>可协商程度</span>
+              <select
+                value={negotiability}
+                onChange={(event) => setNegotiability(event.target.value)}
+                disabled={busy}
+                className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none"
+              >
+                <option>可协商</option>
+                <option>仅关键条款可谈</option>
+                <option>文本基本不可修改</option>
+              </select>
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground sm:col-span-2">
+              <span>已提供附件与待核对材料</span>
+              <textarea
+                value={attachmentNote}
+                onChange={(event) => setAttachmentNote(event.target.value)}
+                disabled={busy}
+                rows={2}
+                placeholder="例如：已提供主合同和技术附件，订单模板、报价单尚未提供"
+                className="w-full resize-y rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:border-sky-400"
+              />
+            </label>
+          </div>
+        </details>
+
+        <details className="rounded-md border border-border bg-muted/15 px-3 py-2">
+          <summary className="cursor-pointer text-xs font-medium text-foreground">
+            Word 批注作者
+          </summary>
+          <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto]">
+            <input
+              value={defaultAuthor}
+              onChange={(event) => setDefaultAuthor(event.target.value)}
+              disabled={busy || savingAuthor}
+              placeholder="默认使用设置中的律师姓名"
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:border-sky-400"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleSaveDefaultAuthor}
+              disabled={busy || savingAuthor}
+            >
+              {savingAuthor ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+              保存默认作者
+            </Button>
+            <input
+              value={authorOverride}
+              onChange={(event) => setAuthorOverride(event.target.value)}
+              disabled={busy}
+              placeholder="本次临时作者（可选，优先于默认作者）"
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:border-sky-400 sm:col-span-2"
+            />
+            <p className="text-caption text-muted-foreground sm:col-span-2">
+              批注与修订时间由后端在导出开始时读取本机时间；北京时间环境写入 +08:00，整份文档使用同一时间快照。
+            </p>
+          </div>
+        </details>
       </section>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -544,6 +729,26 @@ export function ContractReviewTool() {
 
       {resp && (
         <div className="space-y-4">
+          {(resp.result.material_review.scope_summary ||
+            resp.result.material_review.missing_materials.length > 0 ||
+            resp.result.material_review.consistency_issues.length > 0) && (
+            <section className="rounded-lg border border-border bg-card p-4 text-xs">
+              <h3 className="font-medium text-foreground">材料范围与完整性</h3>
+              {resp.result.material_review.scope_summary && (
+                <p className="mt-2 text-foreground/80">{resp.result.material_review.scope_summary}</p>
+              )}
+              {resp.result.material_review.missing_materials.length > 0 && (
+                <p className="mt-1 text-amber-700 dark:text-amber-300">
+                  待补材料：{resp.result.material_review.missing_materials.join("；")}
+                </p>
+              )}
+              {resp.result.material_review.consistency_issues.length > 0 && (
+                <p className="mt-1 text-red-700 dark:text-red-300">
+                  一致性问题：{resp.result.material_review.consistency_issues.join("；")}
+                </p>
+              )}
+            </section>
+          )}
           <section className={`space-y-2 rounded-lg border p-4 ${verdictStyle(resp.result.conclusion.verdict)}`}>
             <div className="flex flex-wrap items-center gap-2">
               <CheckCircle2 className="size-4 shrink-0" />
@@ -569,6 +774,43 @@ export function ContractReviewTool() {
                 </ol>
               </div>
             )}
+          </section>
+
+          <section className="space-y-3 rounded-lg border border-border bg-card p-4">
+            <div>
+              <h3 className="text-sm font-medium text-foreground">导出前律师复核</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                AI 与检索结果默认均为待复核。未完成以下确认时只能导出带标识的工作稿。
+              </p>
+            </div>
+            <div className="grid gap-2 text-xs sm:grid-cols-3">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={factsConfirmed} onChange={(e) => setFactsConfirmed(e.target.checked)} />
+                材料事实已核对
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={sourcesVerified} onChange={(e) => setSourcesVerified(e.target.checked)} />
+                法源有效性已核验
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={lawyerConfirmed} onChange={(e) => setLawyerConfirmed(e.target.checked)} />
+                执业律师已审核
+              </label>
+            </div>
+            <div className="flex gap-1.5 rounded-lg border border-border bg-muted/30 p-1">
+              <button type="button" onClick={() => setExportMode("draft")} className={segCls(exportMode === "draft")}>
+                工作稿
+              </button>
+              <button
+                type="button"
+                onClick={() => formalReady && setExportMode("final")}
+                disabled={!formalReady}
+                title={formalReady ? "导出正式稿" : "完成三项复核后才能选择正式稿"}
+                className={`${segCls(exportMode === "final")} disabled:cursor-not-allowed disabled:opacity-50`}
+              >
+                正式稿
+              </button>
+            </div>
           </section>
 
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -597,11 +839,11 @@ export function ContractReviewTool() {
             <div className="flex items-center gap-2">
               <Button size="sm" variant="outline" onClick={handleExportOpinion} disabled={busy}>
                 {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <ScrollText className="size-3.5" />}
-                审查意见书
+                审查意见书（{exportMode === "final" ? "正式稿" : "工作稿"}）
               </Button>
               <Button size="sm" onClick={handleExportRedline} disabled={busy}>
                 {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <FileText className="size-3.5" />}
-                修订批注版
+                修订批注版（{exportMode === "final" ? "正式稿" : "工作稿"}）
               </Button>
             </div>
           </div>

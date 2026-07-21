@@ -108,6 +108,18 @@ pub struct ReviewRisk {
     /// 法律依据(可空)
     #[serde(default)]
     pub basis: String,
+    /// 该判断依赖的合同原文、用户说明或待确认事实。
+    #[serde(default)]
+    pub fact_basis: String,
+    /// AI 结果固定从待律师复核开始，不能直接成为确定事实。
+    #[serde(default = "default_pending_review")]
+    pub fact_status: String,
+    /// 法源未由律师核验前固定为待核验。
+    #[serde(default = "default_source_status")]
+    pub legal_source_status: String,
+    /// 单项律师复核状态；模型不得输出已确认。
+    #[serde(default = "default_pending_review")]
+    pub lawyer_review_status: String,
     /// 整改建议(说明性)
     #[serde(default)]
     pub suggestion: String,
@@ -121,6 +133,24 @@ pub struct ReviewRisk {
 
 fn default_action() -> String {
     "comment".to_string()
+}
+
+fn default_pending_review() -> String {
+    "待律师复核".to_string()
+}
+
+fn default_source_status() -> String {
+    "待核验".to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MaterialReview {
+    #[serde(default)]
+    pub scope_summary: String,
+    #[serde(default)]
+    pub missing_materials: Vec<String>,
+    #[serde(default)]
+    pub consistency_issues: Vec<String>,
 }
 
 impl ReviewRisk {
@@ -159,6 +189,8 @@ pub struct ContractReviewResult {
     pub contract_type: String,
     pub conclusion: ReviewConclusion,
     #[serde(default)]
+    pub material_review: MaterialReview,
+    #[serde(default)]
     pub risks: Vec<ReviewRisk>,
 }
 
@@ -175,7 +207,15 @@ impl ContractReviewResult {
     }
 }
 
-fn system_prompt(stance: Stance, strictness: Strictness, contract_type_hint: &str) -> String {
+fn system_prompt(
+    stance: Stance,
+    strictness: Strictness,
+    contract_type_hint: &str,
+    transaction_goal: &str,
+    transaction_stage: &str,
+    negotiability: &str,
+    attachment_note: &str,
+) -> String {
     let hint = if contract_type_hint.trim().is_empty() {
         String::new()
     } else {
@@ -190,6 +230,10 @@ fn system_prompt(stance: Stance, strictness: Strictness, contract_type_hint: &st
 ## 审查立场与口径
 - 我方代表立场:{stance}
 - 审查口径:{strictness}{hint}
+- 交易目的:{transaction_goal}
+- 当前阶段:{transaction_stage}
+- 可协商程度:{negotiability}
+- 已提供材料/附件说明:{attachment_note}
 
 ## 审查方法(三层 + 分级)
 1. 宏观层(交易结构):合同类型是否匹配交易实质;主体是否适格、授权是否完整;标的是否合法可履行;关键程序(审批/登记/备案/内部决议)是否完备;付款—交付—担保—退出闭环是否可执行。
@@ -209,6 +253,11 @@ fn system_prompt(stance: Stance, strictness: Strictness, contract_type_hint: &st
     "preconditions": ["签署前必须完成的前置事项", "..."],
     "summary": "2-4 句综合审查意见"
   }},
+  "material_review": {{
+    "scope_summary": "本次实际审查的文件范围与附件情况",
+    "missing_materials": ["缺少或待补充的附件/信息"],
+    "consistency_issues": ["主合同与附件、订单、补充协议之间的不一致"]
+  }},
   "risks": [
     {{
       "level": "P0 | P1 | P2",
@@ -218,6 +267,10 @@ fn system_prompt(stance: Stance, strictness: Strictness, contract_type_hint: &st
       "anchor_text": "从该段落里**逐字复制**的、需要改或批注的原文片段",
       "consequence": "风险后果",
       "basis": "法律依据(可留空字符串)",
+      "fact_basis": "支撑判断的原文或用户说明；不确定时明确写待确认",
+      "fact_status": "待律师复核",
+      "legal_source_status": "待核验",
+      "lawyer_review_status": "待律师复核",
       "suggestion": "整改建议",
       "recommended_text": "可直接替换 anchor_text 落入正文的推荐措辞(仅批注类可留空)",
       "action": "revise | comment"
@@ -230,25 +283,53 @@ fn system_prompt(stance: Stance, strictness: Strictness, contract_type_hint: &st
 - `action="revise"` 仅用于:确定性改正(笔误/术语统一)、或你能给出可直接落文的 `recommended_text` 的条款整改。涉及商务谈判、事实待补、需保留弹性的,一律 "comment"。
 - 缺失关键条款(原文没有对应段落)时,`paragraph_index` 用 null、`anchor_text` 留空、`action="comment"`,在 `suggestion` 说明应补什么。
 - 不臆造法律依据;无法确认的写「待核实」。立场为甲/乙方时,优先识别**对我方不利**的条款。
+- 只把合同原文或用户明确说明作为事实基础；推断、缺失和冲突必须写入待确认或材料完整性项。
+- `fact_status` 与 `lawyer_review_status` 必须为「待律师复核」；`legal_source_status` 必须为「待核验」。模型不得自行标记已确认。
 - 至少覆盖该合同最重要的若干风险点;按重要性,不要堆砌无价值的 P2。"###,
         stance = stance.label(),
         strictness = strictness.label(),
         hint = hint,
+        transaction_goal = display_or_unspecified(transaction_goal),
+        transaction_stage = display_or_unspecified(transaction_stage),
+        negotiability = display_or_unspecified(negotiability),
+        attachment_note = display_or_unspecified(attachment_note),
     )
 }
 
+fn display_or_unspecified(value: &str) -> &str {
+    let value = value.trim();
+    if value.is_empty() {
+        "未说明"
+    } else {
+        value
+    }
+}
+
 /// 跑一次合同审查。`numbered_text` 来自 `parse::ParsedContract::numbered_text()`。
+#[allow(clippy::too_many_arguments)]
 pub async fn review_contract(
     config: &LlmConfig,
     numbered_text: &str,
     stance: Stance,
     strictness: Strictness,
     contract_type_hint: &str,
+    transaction_goal: &str,
+    transaction_stage: &str,
+    negotiability: &str,
+    attachment_note: &str,
 ) -> Result<ContractReviewResult, LlmError> {
     if numbered_text.trim().is_empty() {
         return Err(LlmError::ResponseFormat("合同正文为空,无法审查".into()));
     }
-    let sys = system_prompt(stance, strictness, contract_type_hint);
+    let sys = system_prompt(
+        stance,
+        strictness,
+        contract_type_hint,
+        transaction_goal,
+        transaction_stage,
+        negotiability,
+        attachment_note,
+    );
 
     // MiniMax 自有协议不支持 response_format:json_object(对齐 global_extract 注释)。
     let is_minimax = config.endpoint.contains("chatcompletion_v2");
@@ -300,8 +381,15 @@ pub async fn review_contract(
         .ok_or_else(|| LlmError::ResponseFormat("无 choices[0].message.content".into()))?;
 
     let cleaned = extract_json_object(content);
-    serde_json::from_str::<ContractReviewResult>(&cleaned)
-        .map_err(|e| LlmError::ContentJson(format!("{}\n---原始---\n{}", e, cleaned)))
+    let mut result = serde_json::from_str::<ContractReviewResult>(&cleaned)
+        .map_err(|e| LlmError::ContentJson(format!("{}\n---原始---\n{}", e, cleaned)))?;
+    // 状态由应用控制，不能信任模型自行声称“已核验/已确认”。
+    for risk in &mut result.risks {
+        risk.fact_status = default_pending_review();
+        risk.legal_source_status = default_source_status();
+        risk.lawyer_review_status = default_pending_review();
+    }
+    Ok(result)
 }
 
 /// 本地 JSON 提取(不依赖 llm 模块私有 helper,保持 contract_review 解耦):

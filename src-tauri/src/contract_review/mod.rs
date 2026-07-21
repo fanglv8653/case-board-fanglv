@@ -42,11 +42,16 @@ pub struct ContractReviewResponse {
 ///
 /// 不落库、不依赖 pool —— 纯工具形态(合同未必属于某个案件)。失败透传真错(坑 #8)。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn review_contract_docx(
     docx_path: String,
     stance: String,
     strictness: String,
     contract_type_hint: String,
+    transaction_goal: String,
+    transaction_stage: String,
+    negotiability: String,
+    attachment_note: String,
 ) -> Result<ContractReviewResponse, String> {
     let parsed = parse::parse_contract_docx(&docx_path)?;
     let numbered = parsed.numbered_text();
@@ -59,12 +64,28 @@ pub async fn review_contract_docx(
     let st = Stance::from_label(&stance);
     let strict = Strictness::from_label(&strictness);
 
-    let result = analyze::review_contract(&config, &numbered, st, strict, &contract_type_hint)
-        .await
-        .map_err(|e| format!("合同审查失败:{}", e))?;
+    let result = analyze::review_contract(
+        &config,
+        &numbered,
+        st,
+        strict,
+        &contract_type_hint,
+        &transaction_goal,
+        &transaction_stage,
+        &negotiability,
+        &attachment_note,
+    )
+    .await
+    .map_err(|e| format!("合同审查失败:{}", e))?;
 
     let contract_name = contract_name_from_path(&docx_path);
-    let opinion_md = report::build_opinion_md(&result, st.cn_short(), strict.cn_short(), &[]);
+    let opinion_md = report::build_opinion_md(
+        &result,
+        st.cn_short(),
+        strict.cn_short(),
+        &[],
+        "工作稿（待律师复核）",
+    );
 
     Ok(ContractReviewResponse {
         contract_name,
@@ -76,13 +97,31 @@ pub async fn review_contract_docx(
 
 /// 导出审查意见书 Word。前端把 `review_contract_docx` 拿到的 `result` 原样回传。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_contract_opinion_docx(
-    result: ContractReviewResult,
+    mut result: ContractReviewResult,
     contract_name: String,
     stance: String,
     strictness: String,
+    document_status: String,
+    facts_confirmed: bool,
+    sources_verified: bool,
+    lawyer_confirmed: bool,
     save_path: String,
 ) -> Result<String, String> {
+    require_formal_gate(
+        &document_status,
+        facts_confirmed,
+        sources_verified,
+        lawyer_confirmed,
+    )?;
+    if document_status.trim() == "final" {
+        for risk in &mut result.risks {
+            risk.fact_status = "律师已核对".into();
+            risk.legal_source_status = "律师已核验".into();
+            risk.lawyer_review_status = "律师已确认".into();
+        }
+    }
     let st = Stance::from_label(&stance);
     let strict = Strictness::from_label(&strictness);
     let bytes = report::build_opinion_docx(
@@ -91,6 +130,11 @@ pub async fn export_contract_opinion_docx(
         st.cn_short(),
         strict.cn_short(),
         &[],
+        if document_status.trim() == "final" {
+            "正式稿（律师已确认）"
+        } else {
+            "工作稿（待律师复核）"
+        },
     )?;
     std::fs::write(&save_path, &bytes).map_err(|e| format!("写审查意见书 docx 失败:{}", e))?;
     Ok(save_path)
@@ -112,18 +156,31 @@ pub struct RedlineSummary {
 /// 导出修订批注版 Word:在**原合同 docx** 上落 P2 整段批注 + P3 行内修订痕迹。
 /// `src_docx_path` 是审查时上传的原合同;`result` 由前端从 review 结果原样回传。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_contract_redline_docx(
     src_docx_path: String,
     result: ContractReviewResult,
     author: String,
+    document_status: String,
+    facts_confirmed: bool,
+    sources_verified: bool,
+    lawyer_confirmed: bool,
     save_path: String,
 ) -> Result<RedlineSummary, String> {
-    let author = if author.trim().is_empty() {
-        "合同审查(CaseBoard)".to_string()
-    } else {
-        author.trim().to_string()
-    };
-    let outcome = redline::build_redlined_docx(&src_docx_path, &result, &author)?;
+    require_formal_gate(
+        &document_status,
+        facts_confirmed,
+        sources_verified,
+        lawyer_confirmed,
+    )?;
+    let settings = crate::settings::read_settings().unwrap_or_default();
+    let author = resolve_comment_author(&author, &settings);
+    let outcome = redline::build_redlined_docx(
+        &src_docx_path,
+        &result,
+        &author,
+        document_status.trim() != "final",
+    )?;
     std::fs::write(&save_path, &outcome.docx)
         .map_err(|e| format!("写修订批注版 docx 失败:{}", e))?;
     Ok(RedlineSummary {
@@ -132,6 +189,64 @@ pub async fn export_contract_redline_docx(
         skipped: outcome.skipped,
         saved_path: save_path,
     })
+}
+
+fn require_formal_gate(
+    document_status: &str,
+    facts_confirmed: bool,
+    sources_verified: bool,
+    lawyer_confirmed: bool,
+) -> Result<(), String> {
+    if document_status.trim() == "final"
+        && !(facts_confirmed && sources_verified && lawyer_confirmed)
+    {
+        return Err("正式稿导出被拦截：请先完成材料事实、法源有效性和执业律师三项复核。".into());
+    }
+    Ok(())
+}
+
+fn resolve_comment_author(author_override: &str, settings: &crate::settings::Settings) -> String {
+    [
+        Some(author_override),
+        settings.contract_review_comment_author.as_deref(),
+        settings.user_display_name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .unwrap_or("合同审查（CaseBoard）")
+    .to_string()
+}
+
+#[cfg(test)]
+mod author_tests {
+    use super::{require_formal_gate, resolve_comment_author};
+
+    #[test]
+    fn comment_author_uses_documented_priority() {
+        let mut settings = crate::settings::Settings {
+            user_display_name: Some("显示姓名".into()),
+            contract_review_comment_author: Some("默认批注人".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_comment_author("本次作者", &settings), "本次作者");
+        assert_eq!(resolve_comment_author("", &settings), "默认批注人");
+        settings.contract_review_comment_author = Some(" ".into());
+        assert_eq!(resolve_comment_author("", &settings), "显示姓名");
+        settings.user_display_name = None;
+        assert_eq!(
+            resolve_comment_author("", &settings),
+            "合同审查（CaseBoard）"
+        );
+    }
+
+    #[test]
+    fn formal_export_requires_all_three_checks() {
+        assert!(require_formal_gate("draft", false, false, false).is_ok());
+        assert!(require_formal_gate("final", true, true, false).is_err());
+        assert!(require_formal_gate("final", true, true, true).is_ok());
+    }
 }
 
 /// 把旧版 `.doc` / `.rtf` / `.odt` 合同转成 `.docx`,返回转换后文件路径(临时目录)。

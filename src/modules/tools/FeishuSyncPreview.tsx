@@ -4,9 +4,11 @@ import {
   ArrowRight,
   CheckCircle2,
   Clock3,
+  EyeOff,
   Link2,
   Loader2,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
   Unlink,
 } from "lucide-react";
@@ -14,15 +16,24 @@ import {
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { toast } from "@/components/ui/toast";
-import { getFeishuConnectionStatus, getFeishuSyncPreview, pullFeishuSyncPreview } from "@/lib/api";
+import {
+  bindFeishuSyncCase,
+  getFeishuConnectionStatus,
+  getFeishuSyncPreview,
+  ignoreFeishuSyncCase,
+  pullFeishuSyncPreview,
+  restoreFeishuSyncCase,
+  unbindFeishuSyncCase,
+} from "@/lib/api";
 import type { FeishuConnectionStatus, FeishuSyncPreview as PreviewData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Section = "bound" | "pending" | "changes" | "conflicts" | "runs";
+type Section = "bound" | "pending" | "ignored" | "changes" | "conflicts" | "runs";
 
 const SECTIONS: Array<{ id: Section; label: string }> = [
   { id: "bound", label: "已绑定案件" },
   { id: "pending", label: "待绑定案件" },
+  { id: "ignored", label: "已忽略案件" },
   { id: "changes", label: "拟更新字段" },
   { id: "conflicts", label: "冲突字段" },
   { id: "runs", label: "最近同步状态" },
@@ -112,6 +123,8 @@ export function FeishuSyncPreview({
   const [pulling, setPulling] = useState(false);
   const [pullError, setPullError] = useState<string | null>(null);
   const [liveMessage, setLiveMessage] = useState("");
+  const [selectedCases, setSelectedCases] = useState<Record<string, string>>({});
+  const [actingId, setActingId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -155,10 +168,34 @@ export function FeishuSyncPreview({
   const counts = useMemo<Record<Section, number>>(() => ({
     bound: data?.bound_cases.length ?? 0,
     pending: data?.pending_cases.length ?? 0,
+    ignored: data?.ignored_cases.length ?? 0,
     changes: data?.proposed_changes.length ?? 0,
     conflicts: data?.conflicts.length ?? 0,
     runs: data?.recent_runs.length ?? 0,
   }), [data]);
+
+  const runBindingAction = async (id: string, action: () => Promise<void>, success: string) => {
+    setActingId(id);
+    try {
+      await action();
+      await reload();
+      setLiveMessage(success);
+      toast(success, "info");
+    } catch (error) {
+      const code = String(error).toUpperCase();
+      const message = code.includes("FEISHU_BINDING_CONFLICT")
+        ? "该本地案件或飞书记录已经绑定，请刷新后重新选择。"
+        : code.includes("FEISHU_BINDING_STATE_INVALID")
+          ? "绑定状态已变化，请刷新后重试。"
+          : code.includes("FEISHU_BINDING_CASE_NOT_FOUND")
+            ? "所选本地案件已不存在，请刷新后重新选择。"
+            : "本地绑定操作失败；飞书数据和案件业务字段均未修改。";
+      toast(message, "error");
+      setLiveMessage(message);
+    } finally {
+      setActingId(null);
+    }
+  };
 
   if (loading && !data) {
     return <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在读取本地预演结果…</div>;
@@ -204,9 +241,9 @@ export function FeishuSyncPreview({
         </div>
       </section>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {SECTIONS.slice(0, 4).map((section, index) => {
-          const Icon = [Link2, Unlink, ArrowRight, AlertTriangle][index];
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        {SECTIONS.slice(0, 5).map((section, index) => {
+          const Icon = [Link2, Unlink, EyeOff, ArrowRight, AlertTriangle][index];
           return <button key={section.id} type="button" onClick={() => setActive(section.id)} className={cn("rounded-xl border bg-card p-4 text-left transition-colors hover:border-foreground/25 hover:bg-accent/30", active === section.id && "border-foreground/30 ring-2 ring-foreground/5")}>
             <div className="flex items-center justify-between"><Icon className="size-4 text-muted-foreground" /><span className="text-2xl font-semibold tabular-nums text-foreground">{counts[section.id]}</span></div>
             <p className="mt-3 text-sm font-medium text-foreground">{section.label}</p>
@@ -219,8 +256,21 @@ export function FeishuSyncPreview({
           {SECTIONS.map((section) => <button key={section.id} id={`feishu-tab-${section.id}`} role="tab" aria-selected={active === section.id} aria-controls={`feishu-panel-${section.id}`} onClick={() => setActive(section.id)} className={cn("whitespace-nowrap border-b-2 border-transparent px-3 py-3 text-sm text-muted-foreground", active === section.id && "border-foreground font-medium text-foreground")}>{section.label}<span className="ml-1.5 text-xs tabular-nums">{counts[section.id]}</span></button>)}
         </div>
         <div id={`feishu-panel-${active}`} role="tabpanel" aria-labelledby={`feishu-tab-${active}`} className="min-h-56 overflow-x-auto p-4">
-          {active === "bound" && <SimpleTable headers={["本地案件", "匹配方式", "最近同步"]} rows={(data?.bound_cases ?? []).map((item) => [item.local_case_name, item.link_source === "manual" ? "人工确认" : "精确匹配", showTime(item.last_synced_at)])} empty="尚无已绑定的在办案件。" />}
-          {active === "pending" && <SimpleTable headers={["飞书案件", "类型 / 案号", "远端修改时间"]} rows={(data?.pending_cases ?? []).map((item) => [item.display_name || "未命名案件", [item.legal_type, item.case_no].filter(Boolean).join(" · ") || "—", showTime(item.remote_modified_at)])} empty="没有待绑定的在办案件。" />}
+          {active === "bound" && ((data?.bound_cases.length ?? 0) === 0
+            ? <EmptyState text="尚无已绑定的在办案件。" />
+            : <table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["本地案件", "匹配方式", "最近同步", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.bound_cases.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.local_case_name}</td><td className="px-3 py-3 text-muted-foreground">{item.link_source === "manual" ? "人工确认" : "唯一精确案号"}</td><td className="px-3 py-3 text-muted-foreground">{showTime(item.last_synced_at)}</td><td className="px-3 py-3"><Button variant="outline" size="sm" disabled={actingId === item.id} onClick={() => {
+              if (!window.confirm(`确认解除“${item.local_case_name}”的飞书绑定？解除后仍可重新绑定。`)) return;
+              void runBindingAction(item.id, () => unbindFeishuSyncCase(item.id), "已解除本地绑定，案件恢复为待绑定状态。");
+            }}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <Unlink />}解除绑定</Button></td></tr>)}</tbody></table>)}
+          {active === "pending" && ((data?.pending_cases.length ?? 0) === 0
+            ? <EmptyState text="没有待绑定的在办案件。" />
+            : <table className="w-full min-w-[900px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["飞书案件", "类型 / 案号", "选择本地案件", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.pending_cases.map((item) => {
+              const selected = selectedCases[item.id] ?? item.recommended_case_id ?? "";
+              return <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="max-w-64 px-3 py-3 align-top"><p className="font-medium text-foreground">{item.display_name || "未命名案件"}</p><p className="mt-1 text-xs text-muted-foreground">远端更新：{showTime(item.remote_modified_at)}</p></td><td className="px-3 py-3 align-top text-muted-foreground">{[item.legal_type, item.case_no].filter(Boolean).join(" · ") || "—"}</td><td className="min-w-80 px-3 py-3 align-top"><select aria-label={`为${item.display_name || "未命名案件"}选择本地案件`} value={selected} onChange={(event) => setSelectedCases((current) => ({ ...current, [item.id]: event.target.value }))} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"><option value="">请选择本地案件</option>{data?.available_local_cases.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.display_name}{candidate.id === item.recommended_case_id ? "（推荐）" : ""}</option>)}</select>{item.recommendation_reason && <p className="mt-1.5 text-xs text-sky-700 dark:text-sky-300">{item.recommendation_reason}</p>}</td><td className="px-3 py-3 align-top"><div className="flex flex-wrap gap-2"><Button size="sm" disabled={!selected || actingId === item.id} onClick={() => void runBindingAction(item.id, () => bindFeishuSyncCase(item.id, selected), "已确认本地绑定；飞书和案件业务字段均未修改。")}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <Link2 />}确认绑定</Button><Button variant="outline" size="sm" disabled={actingId === item.id} onClick={() => void runBindingAction(item.id, () => ignoreFeishuSyncCase(item.id), "已忽略该记录，可在“已忽略案件”中恢复。")}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <EyeOff />}忽略</Button></div></td></tr>;
+            })}</tbody></table>)}
+          {active === "ignored" && ((data?.ignored_cases.length ?? 0) === 0
+            ? <EmptyState text="没有已忽略案件。" />
+            : <table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["飞书案件", "类型 / 案号", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.ignored_cases.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.display_name || "未命名案件"}</td><td className="px-3 py-3 text-muted-foreground">{[item.legal_type, item.case_no].filter(Boolean).join(" · ") || "—"}</td><td className="px-3 py-3"><Button variant="outline" size="sm" disabled={actingId === item.id} onClick={() => void runBindingAction(item.id, () => restoreFeishuSyncCase(item.id), "已恢复为待绑定案件。")}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <RotateCcw />}恢复</Button></td></tr>)}</tbody></table>)}
           {active === "changes" && <SimpleTable headers={["案件", "字段", "本地值", "", "飞书值", "处理"]} rows={(data?.proposed_changes ?? []).map((item) => [item.case_name, item.field_label || item.field_key, showValue(item.local_value_json), "→", showValue(item.feishu_value_json), item.proposed_action === "review" ? "需人工复核" : "拟填充本地空值"])} empty="最近一次预演没有可建议更新的字段。" />}
           {active === "conflicts" && <SimpleTable headers={["案件", "字段", "本地值", "飞书值", "状态"]} rows={(data?.conflicts ?? []).map((item) => [item.case_name, item.field_key, showValue(item.local_value_json), showValue(item.feishu_value_json), "待人工处理"])} empty="没有待处理的字段冲突。" />}
           {active === "runs" && <SimpleTable headers={["状态", "模式", "案件范围", "开始时间", "完成时间"]} rows={(data?.recent_runs ?? []).map((item) => [runLabel(item.status), item.mode === "readonly_preflight" ? "只读预演" : item.mode, `状态=${item.active_case_filter}`, showTime(item.started_at), showTime(item.completed_at)])} empty="尚无同步预演记录。" />}
@@ -231,6 +281,10 @@ export function FeishuSyncPreview({
 }
 
 function SimpleTable({ headers, rows, empty }: { headers: string[]; rows: string[][]; empty: string }) {
-  if (rows.length === 0) return <div className="flex min-h-48 items-center justify-center text-sm text-muted-foreground">{empty}</div>;
+  if (rows.length === 0) return <EmptyState text={empty} />;
   return <table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{headers.map((header, index) => <th key={`${header}-${index}`} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{rows.map((row, rowIndex) => <tr key={rowIndex} className="border-b border-border/70 last:border-0">{row.map((cell, cellIndex) => <td key={cellIndex} className={cn("max-w-72 px-3 py-3 align-top text-foreground", cellIndex > 0 && "text-muted-foreground")}><span className="line-clamp-3 break-words" title={cell}>{cell}</span></td>)}</tr>)}</tbody></table>;
+}
+
+function EmptyState({ text }: { text: string }) {
+  return <div className="flex min-h-48 items-center justify-center text-sm text-muted-foreground">{text}</div>;
 }
