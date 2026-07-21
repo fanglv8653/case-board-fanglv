@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const source = readFileSync(new URL("./FeishuTool.tsx", import.meta.url), "utf8");
+const source = readFileSync(new URL("./FeishuTool.tsx", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 const functionSource = source.match(
   /function connectionErrorMessage\(error: unknown\): string \{[\s\S]*?\n\}\n\nexport function FeishuTool/,
 )?.[0]
