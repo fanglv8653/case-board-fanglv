@@ -28,6 +28,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_MARGIN_SECONDS: i64 = 120;
 const MAX_CALLBACK_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_CALLBACK_ATTEMPTS: usize = 8;
+#[cfg(target_os = "windows")]
 const CREDENTIAL_SERVICE: &str = "com.fanglv.caseboard.feishu";
 #[cfg(target_os = "windows")]
 const MAX_CREDENTIAL_BLOB_BYTES: usize = 5 * 512;
@@ -150,6 +151,13 @@ impl Drop for SecretValue {
 struct StoredTokenBundle {
     access_token: String,
     refresh_token: String,
+    access_expires_at: i64,
+    refresh_expires_at: i64,
+    scopes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredTokenMetadata {
     access_expires_at: i64,
     refresh_expires_at: i64,
     scopes: Vec<String>,
@@ -296,9 +304,8 @@ pub fn connection_status(app_id: &str) -> Result<FeishuOAuthStatus, FeishuOAuthE
 /// 删除本应用的飞书认证凭据。删除不存在的凭据也视为成功。
 pub fn disconnect(app_id: &str) -> Result<(), FeishuOAuthError> {
     validate_app_id(app_id)?;
-    credential_delete(&credential_account(app_id, "app-secret"))?;
-    credential_delete(&credential_account(app_id, "token-bundle"))?;
-    Ok(())
+    let mut backend = SystemCredentialBackend;
+    disconnect_with(&mut backend, app_id)
 }
 
 fn validate_app_id(app_id: &str) -> Result<(), FeishuOAuthError> {
@@ -439,11 +446,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 async fn write_callback_response(stream: &mut tokio::net::TcpStream, success: bool) {
-    let (status, title, message) = if success {
-        ("200 OK", "飞书授权完成", "可以关闭此页面并返回案件看板。")
-    } else {
-        ("400 Bad Request", "飞书授权未完成", "请返回案件看板重试。")
-    };
+    let (status, title, message) = callback_page_text(success);
     let body = format!(
         "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>{title}</title>\
          <body><h1>{title}</h1><p>{message}</p></body></html>"
@@ -456,6 +459,18 @@ async fn write_callback_response(stream: &mut tokio::net::TcpStream, success: bo
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
+}
+
+fn callback_page_text(success: bool) -> (&'static str, &'static str, &'static str) {
+    if success {
+        (
+            "200 OK",
+            "已收到飞书授权",
+            "案件看板正在完成安全连接，请稍候。",
+        )
+    } else {
+        ("400 Bad Request", "飞书授权未完成", "请返回案件看板重试。")
+    }
 }
 
 fn oauth_client() -> Result<reqwest::Client, FeishuOAuthError> {
@@ -605,44 +620,294 @@ fn credential_account(app_id: &str, kind: &str) -> String {
     format!("{app_id}:{kind}")
 }
 
+const APP_SECRET_KIND: &str = "app-secret";
+const ACCESS_TOKEN_KIND: &str = "access-token";
+const REFRESH_TOKEN_KIND: &str = "refresh-token";
+const TOKEN_METADATA_KIND: &str = "token-metadata";
+const LEGACY_TOKEN_BUNDLE_KIND: &str = "token-bundle";
+#[cfg(test)]
+const CURRENT_CREDENTIAL_KINDS: [&str; 4] = [
+    APP_SECRET_KIND,
+    ACCESS_TOKEN_KIND,
+    REFRESH_TOKEN_KIND,
+    TOKEN_METADATA_KIND,
+];
+const ALL_CREDENTIAL_KINDS: [&str; 5] = [
+    APP_SECRET_KIND,
+    ACCESS_TOKEN_KIND,
+    REFRESH_TOKEN_KIND,
+    TOKEN_METADATA_KIND,
+    LEGACY_TOKEN_BUNDLE_KIND,
+];
+
+trait CredentialBackend {
+    fn set(&mut self, account: &str, value: &str) -> Result<(), FeishuOAuthError>;
+    fn get(&mut self, account: &str) -> Result<Option<String>, FeishuOAuthError>;
+    fn delete(&mut self, account: &str) -> Result<(), FeishuOAuthError>;
+}
+
+struct SystemCredentialBackend;
+
+impl CredentialBackend for SystemCredentialBackend {
+    fn set(&mut self, account: &str, value: &str) -> Result<(), FeishuOAuthError> {
+        credential_set(account, value)
+    }
+
+    fn get(&mut self, account: &str) -> Result<Option<String>, FeishuOAuthError> {
+        credential_get(account)
+    }
+
+    fn delete(&mut self, account: &str) -> Result<(), FeishuOAuthError> {
+        credential_delete(account)
+    }
+}
+
+struct CredentialSnapshot(Vec<(String, Option<String>)>);
+
+impl Drop for CredentialSnapshot {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.0 {
+            if let Some(value) = value {
+                value.zeroize();
+            }
+        }
+    }
+}
+
+fn snapshot_credentials<B: CredentialBackend>(
+    backend: &mut B,
+    app_id: &str,
+    kinds: &[&str],
+) -> Result<CredentialSnapshot, FeishuOAuthError> {
+    let mut snapshot = Vec::with_capacity(kinds.len());
+    for kind in kinds {
+        let account = credential_account(app_id, kind);
+        snapshot.push((account.clone(), backend.get(&account)?));
+    }
+    Ok(CredentialSnapshot(snapshot))
+}
+
+fn restore_snapshot<B: CredentialBackend>(backend: &mut B, snapshot: &CredentialSnapshot) {
+    // 凭据库故障后的回滚只能尽力执行；调用方仍返回原始 CredentialStore 错误。
+    // metadata 也在快照中，恢复顺序保持它最后写入。
+    for (account, value) in snapshot
+        .0
+        .iter()
+        .filter(|(account, _)| !account.ends_with(TOKEN_METADATA_KIND))
+    {
+        match value {
+            Some(value) => {
+                let _ = backend.set(account, value);
+            }
+            None => {
+                let _ = backend.delete(account);
+            }
+        }
+    }
+    for (account, value) in snapshot
+        .0
+        .iter()
+        .filter(|(account, _)| account.ends_with(TOKEN_METADATA_KIND))
+    {
+        match value {
+            Some(value) => {
+                let _ = backend.set(account, value);
+            }
+            None => {
+                let _ = backend.delete(account);
+            }
+        }
+    }
+}
+
 fn store_credentials(
     app_id: &str,
     app_secret: &SecretValue,
     bundle: &StoredTokenBundle,
 ) -> Result<(), FeishuOAuthError> {
-    credential_set(
-        &credential_account(app_id, "app-secret"),
-        app_secret.expose(),
-    )?;
-    if let Err(error) = store_token_bundle(app_id, bundle) {
-        // 避免 token bundle 写失败时留下只有 App Secret 的半套连接。
-        let _ = credential_delete(&credential_account(app_id, "app-secret"));
+    let mut backend = SystemCredentialBackend;
+    store_credentials_with(&mut backend, app_id, app_secret, bundle)
+}
+
+fn store_token_bundle(app_id: &str, bundle: &StoredTokenBundle) -> Result<(), FeishuOAuthError> {
+    let mut backend = SystemCredentialBackend;
+    replace_token_bundle_with(&mut backend, app_id, bundle)
+}
+
+fn load_app_secret(app_id: &str) -> Result<Option<SecretValue>, FeishuOAuthError> {
+    let mut backend = SystemCredentialBackend;
+    load_app_secret_with(&mut backend, app_id)
+}
+
+fn load_token_bundle(app_id: &str) -> Result<Option<StoredTokenBundle>, FeishuOAuthError> {
+    let mut backend = SystemCredentialBackend;
+    load_token_bundle_with(&mut backend, app_id)
+}
+
+fn metadata_json(bundle: &StoredTokenBundle) -> Result<String, FeishuOAuthError> {
+    serde_json::to_string(&StoredTokenMetadata {
+        access_expires_at: bundle.access_expires_at,
+        refresh_expires_at: bundle.refresh_expires_at,
+        scopes: bundle.scopes.clone(),
+    })
+    .map_err(|_| FeishuOAuthError::CredentialStore)
+}
+
+fn store_credentials_with<B: CredentialBackend>(
+    backend: &mut B,
+    app_id: &str,
+    app_secret: &SecretValue,
+    bundle: &StoredTokenBundle,
+) -> Result<(), FeishuOAuthError> {
+    let snapshot = snapshot_credentials(backend, app_id, &ALL_CREDENTIAL_KINDS)?;
+    let mut metadata = metadata_json(bundle)?;
+    let result = (|| {
+        // 先移除完整标记；其他三个秘密全部写入后，metadata 必须最后落库。
+        backend.delete(&credential_account(app_id, TOKEN_METADATA_KIND))?;
+        backend.set(
+            &credential_account(app_id, APP_SECRET_KIND),
+            app_secret.expose(),
+        )?;
+        backend.set(
+            &credential_account(app_id, ACCESS_TOKEN_KIND),
+            &bundle.access_token,
+        )?;
+        backend.set(
+            &credential_account(app_id, REFRESH_TOKEN_KIND),
+            &bundle.refresh_token,
+        )?;
+        backend.delete(&credential_account(app_id, LEGACY_TOKEN_BUNDLE_KIND))?;
+        backend.set(&credential_account(app_id, TOKEN_METADATA_KIND), &metadata)?;
+        Ok(())
+    })();
+    metadata.zeroize();
+    if let Err(error) = result {
+        restore_snapshot(backend, &snapshot);
         return Err(error);
     }
     Ok(())
 }
 
-fn store_token_bundle(app_id: &str, bundle: &StoredTokenBundle) -> Result<(), FeishuOAuthError> {
-    let mut serialized =
-        serde_json::to_string(bundle).map_err(|_| FeishuOAuthError::CredentialStore)?;
-    let result = credential_set(&credential_account(app_id, "token-bundle"), &serialized);
-    serialized.zeroize();
-    result
+fn replace_token_bundle_with<B: CredentialBackend>(
+    backend: &mut B,
+    app_id: &str,
+    bundle: &StoredTokenBundle,
+) -> Result<(), FeishuOAuthError> {
+    // 刷新 token 前必须已有 App Secret；不能制造表面完整但无法再次刷新的连接。
+    if backend
+        .get(&credential_account(app_id, APP_SECRET_KIND))?
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return Err(FeishuOAuthError::ReauthorizationRequired);
+    }
+    let kinds = [
+        ACCESS_TOKEN_KIND,
+        REFRESH_TOKEN_KIND,
+        TOKEN_METADATA_KIND,
+        LEGACY_TOKEN_BUNDLE_KIND,
+    ];
+    let snapshot = snapshot_credentials(backend, app_id, &kinds)?;
+    let mut metadata = metadata_json(bundle)?;
+    let result = (|| {
+        backend.delete(&credential_account(app_id, TOKEN_METADATA_KIND))?;
+        backend.set(
+            &credential_account(app_id, ACCESS_TOKEN_KIND),
+            &bundle.access_token,
+        )?;
+        backend.set(
+            &credential_account(app_id, REFRESH_TOKEN_KIND),
+            &bundle.refresh_token,
+        )?;
+        backend.delete(&credential_account(app_id, LEGACY_TOKEN_BUNDLE_KIND))?;
+        backend.set(&credential_account(app_id, TOKEN_METADATA_KIND), &metadata)?;
+        Ok(())
+    })();
+    metadata.zeroize();
+    if let Err(error) = result {
+        restore_snapshot(backend, &snapshot);
+        return Err(error);
+    }
+    Ok(())
 }
 
-fn load_app_secret(app_id: &str) -> Result<Option<SecretValue>, FeishuOAuthError> {
-    credential_get(&credential_account(app_id, "app-secret"))
-        .map(|value| value.map(SecretValue::new))
+fn load_app_secret_with<B: CredentialBackend>(
+    backend: &mut B,
+    app_id: &str,
+) -> Result<Option<SecretValue>, FeishuOAuthError> {
+    backend
+        .get(&credential_account(app_id, APP_SECRET_KIND))
+        .map(|value| {
+            value
+                .filter(|value| !value.is_empty())
+                .map(SecretValue::new)
+        })
 }
 
-fn load_token_bundle(app_id: &str) -> Result<Option<StoredTokenBundle>, FeishuOAuthError> {
-    let Some(mut serialized) = credential_get(&credential_account(app_id, "token-bundle"))? else {
+fn load_token_bundle_with<B: CredentialBackend>(
+    backend: &mut B,
+    app_id: &str,
+) -> Result<Option<StoredTokenBundle>, FeishuOAuthError> {
+    // metadata 是最后写入的完整标记；缺少它时无需读取任何 token。
+    let Some(mut metadata_json) = backend.get(&credential_account(app_id, TOKEN_METADATA_KIND))?
+    else {
         return Ok(None);
     };
-    let parsed = serde_json::from_str::<StoredTokenBundle>(&serialized)
+    let metadata = serde_json::from_str::<StoredTokenMetadata>(&metadata_json)
         .map_err(|_| FeishuOAuthError::CredentialStore);
-    serialized.zeroize();
-    parsed.map(Some)
+    metadata_json.zeroize();
+    let metadata = metadata?;
+
+    let app_secret = backend.get(&credential_account(app_id, APP_SECRET_KIND))?;
+    let access_token = backend.get(&credential_account(app_id, ACCESS_TOKEN_KIND))?;
+    let refresh_token = backend.get(&credential_account(app_id, REFRESH_TOKEN_KIND))?;
+    let complete = app_secret.as_deref().is_some_and(|value| !value.is_empty())
+        && access_token
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        && refresh_token
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+    let mut app_secret = app_secret;
+    if let Some(value) = &mut app_secret {
+        value.zeroize();
+    }
+    if !complete {
+        let mut access_token = access_token;
+        let mut refresh_token = refresh_token;
+        if let Some(value) = &mut access_token {
+            value.zeroize();
+        }
+        if let Some(value) = &mut refresh_token {
+            value.zeroize();
+        }
+        return Ok(None);
+    }
+    Ok(Some(StoredTokenBundle {
+        access_token: access_token.expect("complete checked"),
+        refresh_token: refresh_token.expect("complete checked"),
+        access_expires_at: metadata.access_expires_at,
+        refresh_expires_at: metadata.refresh_expires_at,
+        scopes: metadata.scopes,
+    }))
+}
+
+fn disconnect_with<B: CredentialBackend>(
+    backend: &mut B,
+    app_id: &str,
+) -> Result<(), FeishuOAuthError> {
+    let mut first_error = None;
+    for kind in ALL_CREDENTIAL_KINDS {
+        if let Err(error) = backend.delete(&credential_account(app_id, kind)) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn credential_value_fits(value: &str) -> bool {
+    value.len() <= 5 * 512
 }
 
 #[cfg(target_os = "windows")]
@@ -652,7 +917,7 @@ fn credential_set(account: &str, value: &str) -> Result<(), FeishuOAuthError> {
         CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
 
-    if value.len() > MAX_CREDENTIAL_BLOB_BYTES {
+    if !credential_value_fits(value) {
         return Err(FeishuOAuthError::CredentialStore);
     }
     let mut target = wide_null(&credential_target(account));
@@ -756,7 +1021,52 @@ fn wide_null(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+
+    #[derive(Default)]
+    struct MemoryCredentialBackend {
+        values: HashMap<String, String>,
+        operations: Vec<(String, String)>,
+        fail_set_once: Option<String>,
+    }
+
+    impl CredentialBackend for MemoryCredentialBackend {
+        fn set(&mut self, account: &str, value: &str) -> Result<(), FeishuOAuthError> {
+            self.operations
+                .push(("set".to_string(), account.to_string()));
+            if self.fail_set_once.as_deref() == Some(account) {
+                self.fail_set_once = None;
+                return Err(FeishuOAuthError::CredentialStore);
+            }
+            self.values.insert(account.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn get(&mut self, account: &str) -> Result<Option<String>, FeishuOAuthError> {
+            self.operations
+                .push(("get".to_string(), account.to_string()));
+            Ok(self.values.get(account).cloned())
+        }
+
+        fn delete(&mut self, account: &str) -> Result<(), FeishuOAuthError> {
+            self.operations
+                .push(("delete".to_string(), account.to_string()));
+            self.values.remove(account);
+            Ok(())
+        }
+    }
+
+    fn test_bundle(access: &str, refresh: &str) -> StoredTokenBundle {
+        StoredTokenBundle {
+            access_token: access.to_string(),
+            refresh_token: refresh.to_string(),
+            access_expires_at: 10,
+            refresh_expires_at: 20,
+            scopes: split_scopes(READONLY_SCOPES),
+        }
+    }
 
     #[test]
     fn authorization_url_has_exact_readonly_scope_and_loopback_redirect() {
@@ -809,6 +1119,15 @@ mod tests {
             parse_callback_request(request, "correct").expect("denial callback"),
             CallbackOutcome::Denied
         ));
+    }
+
+    #[test]
+    fn callback_page_does_not_claim_connection_is_complete_before_token_storage() {
+        let (_, title, message) = callback_page_text(true);
+        assert_eq!(title, "已收到飞书授权");
+        assert!(message.contains("正在完成安全连接"));
+        assert!(!title.contains("授权完成"));
+        assert!(!message.contains("可以关闭"));
     }
 
     #[test]
@@ -873,5 +1192,116 @@ mod tests {
         assert!(first
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'));
+    }
+
+    #[test]
+    fn split_credentials_fit_windows_limit_when_combined_bundle_does_not() {
+        let access = "a".repeat(1486);
+        let refresh = "r".repeat(1486);
+        assert!(credential_value_fits(&access));
+        assert!(credential_value_fits(&refresh));
+        let combined = serde_json::to_string(&test_bundle(&access, &refresh)).expect("bundle JSON");
+        assert!(!credential_value_fits(&combined));
+    }
+
+    #[test]
+    fn stores_metadata_last_and_removes_legacy_bundle() {
+        let app_id = "cli_test123";
+        let mut backend = MemoryCredentialBackend::default();
+        backend.values.insert(
+            credential_account(app_id, LEGACY_TOKEN_BUNDLE_KIND),
+            "legacy-secret".to_string(),
+        );
+        let secret = SecretValue::new("app-secret-value".to_string());
+        let bundle = test_bundle("access-value", "refresh-value");
+
+        store_credentials_with(&mut backend, app_id, &secret, &bundle).expect("split store");
+
+        for kind in CURRENT_CREDENTIAL_KINDS {
+            assert!(backend
+                .values
+                .contains_key(&credential_account(app_id, kind)));
+        }
+        assert!(!backend
+            .values
+            .contains_key(&credential_account(app_id, LEGACY_TOKEN_BUNDLE_KIND)));
+        assert_eq!(
+            backend.operations.last(),
+            Some(&(
+                "set".to_string(),
+                credential_account(app_id, TOKEN_METADATA_KIND)
+            ))
+        );
+        let loaded = load_token_bundle_with(&mut backend, app_id)
+            .expect("load")
+            .expect("complete");
+        assert_eq!(loaded.access_token, "access-value");
+        assert_eq!(loaded.refresh_token, "refresh-value");
+    }
+
+    #[test]
+    fn failed_metadata_write_rolls_back_every_credential() {
+        let app_id = "cli_test123";
+        let mut backend = MemoryCredentialBackend::default();
+        for kind in ALL_CREDENTIAL_KINDS {
+            backend
+                .values
+                .insert(credential_account(app_id, kind), format!("old-{kind}"));
+        }
+        let before = backend.values.clone();
+        backend.fail_set_once = Some(credential_account(app_id, TOKEN_METADATA_KIND));
+        let secret = SecretValue::new("new-app-secret".to_string());
+        let bundle = test_bundle("new-access", "new-refresh");
+
+        assert_eq!(
+            store_credentials_with(&mut backend, app_id, &secret, &bundle),
+            Err(FeishuOAuthError::CredentialStore)
+        );
+        assert_eq!(backend.values, before);
+    }
+
+    #[test]
+    fn loader_rejects_every_incomplete_four_record_combination() {
+        let app_id = "cli_test123";
+        let mut complete = MemoryCredentialBackend::default();
+        let secret = SecretValue::new("app-secret".to_string());
+        store_credentials_with(
+            &mut complete,
+            app_id,
+            &secret,
+            &test_bundle("access", "refresh"),
+        )
+        .expect("complete store");
+
+        for missing_kind in CURRENT_CREDENTIAL_KINDS {
+            let mut incomplete = MemoryCredentialBackend {
+                values: complete.values.clone(),
+                ..Default::default()
+            };
+            incomplete
+                .values
+                .remove(&credential_account(app_id, missing_kind));
+            assert!(load_token_bundle_with(&mut incomplete, app_id)
+                .expect("incomplete read")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn disconnect_removes_split_and_legacy_credentials() {
+        let app_id = "cli_test123";
+        let mut backend = MemoryCredentialBackend::default();
+        for kind in ALL_CREDENTIAL_KINDS {
+            backend
+                .values
+                .insert(credential_account(app_id, kind), format!("secret-{kind}"));
+        }
+        disconnect_with(&mut backend, app_id).expect("disconnect");
+        assert!(backend.values.is_empty());
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert!(backend
+                .operations
+                .contains(&("delete".to_string(), credential_account(app_id, kind))));
+        }
     }
 }

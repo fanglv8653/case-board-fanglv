@@ -25,15 +25,46 @@ import { FeishuSyncPreview } from "./FeishuSyncPreview";
 type Tab = "sync" | "connection" | "calendar";
 
 function connectionErrorMessage(error: unknown): string {
-  const message = String(error).toLowerCase();
-  if (message.includes("权限") || message.includes("scope") || message.includes("permission")) {
+  const message = String(error).toUpperCase();
+  if (message.includes("FEISHU_OAUTH_CREDENTIAL_STORE")) {
+    return "Windows 凭据安全保存失败，请确认当前 Windows 用户凭据库可用后重试。";
+  }
+  if (message.includes("FEISHU_OAUTH_TOKEN_REJECTED")) {
+    return "飞书认证失败，请重新连接并确认应用权限已经发布。";
+  }
+  if (message.includes("FEISHU_OAUTH_INVALID_TOKEN_RESPONSE")) {
+    return "飞书认证响应异常，请稍后重试；如持续出现，请重新连接。";
+  }
+  if (
+    message.includes("FEISHU_OAUTH_INVALID_APP_ID")
+    || message.includes("FEISHU_OAUTH_MISSING_APP_SECRET")
+    || message.includes("FEISHU_OAUTH_INVALID_CLIENT")
+  ) {
+    return "App ID 或 App Secret 无效，请核对后重新连接。";
+  }
+  if (message.includes("FEISHU_OAUTH_MISSING_READONLY_SCOPE")) {
     return "当前应用缺少多维表格只读权限，请在飞书开发者后台补充权限后重新连接。";
   }
-  if (message.includes("超时") || message.includes("timeout") || message.includes("network")) {
+  if (message.includes("FEISHU_OAUTH_REAUTHORIZATION_REQUIRED")) {
+    return "飞书授权已失效，请重新连接。";
+  }
+  if (message.includes("FEISHU_OAUTH_ACCESS_DENIED")) {
+    return "未完成飞书授权，请在授权页面同意只读权限后重试。";
+  }
+  if (message.includes("FEISHU_OAUTH_BROWSER_OPEN_FAILED")) {
+    return "无法打开飞书授权页面，请检查默认浏览器后重试。";
+  }
+  if (message.includes("FEISHU_OAUTH_CALLBACK_PORT_UNAVAILABLE")) {
+    return "无法启动本地授权回调，请关闭占用端口的程序后重试。";
+  }
+  if (message.includes("FEISHU_OAUTH_CALLBACK_TIMEOUT")) {
+    return "飞书授权等待超时，请重新连接。";
+  }
+  if (message.includes("FEISHU_OAUTH_NETWORK")) {
     return "连接飞书超时，请检查网络后重试。";
   }
-  if (message.includes("secret") || message.includes("凭据") || message.includes("app_id")) {
-    return "App ID 或 App Secret 无效，请核对后重新连接。";
+  if (message.includes("FEISHU_OAUTH_IN_PROGRESS")) {
+    return "已有一个飞书授权窗口正在等待完成，请先完成或关闭该窗口。";
   }
   return "暂时无法完成飞书连接，请稍后重试。";
 }
