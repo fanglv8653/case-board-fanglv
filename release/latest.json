@@ -1,11 +1,11 @@
 {
-  "version": "0.7.4",
-  "notes": "方律案件看板 0.7.4：民事、刑事案件管理精简为案件概览、进展记录、待办提醒和案件通讯录；新增飞书只读预览自动刷新，并保持同步关联和业务数据不变。",
-  "pub_date": "2026-07-21T05:45:05.795Z",
+  "version": "0.7.5",
+  "notes": "方律案件看板 0.7.5。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
+  "pub_date": "2026-07-21T11:09:48.705Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UmJTTTB5UU8wVy8vaUtJQk5xTU5jYVpHeE4zRU1IaWo5NjQ1Wi9PZEw4KzJDWm9mb1hMQzZMc2Mvc05aNnlJT1hhN1RrcTIzS1dkNGMwdDZuNGxpU3cwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NjEyNTkyCWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNy40X3g2NC1zZXR1cC5leGUKTno5bGp6N2dCbW04cVRWeW1kbFpPSWtaanU4ZGNzOUpqZVpJS1ZxOEM4TjVYRW5xeEN0eGlFd09jSVpvZmhYYlRpQnBKVmQxZnJGMGxXbkJabERvQVE9PQo=",
-      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.7.4-fanglv/FanglvCaseBoard_0.7.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UmN3TWl6cXBtVGtvdGo5V2t2TXBuZ1pEbnZJMzdLM2RVWXFIck9HaThUdnkzMTdUUTZpekVRa3d1ZkFNVnlXa0hldEphUGpNbDloWGZkcUtzQmxRMXdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NjMyMDg1CWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNy41X3g2NC1zZXR1cC5leGUKdTRuTzJzRWhYL3FRSUc0RU5xYU9nSjBoR29FMkhHYjdlc2dsNVA3bG9WdTFXb0FGck5WRkwxSDd6c240SFRsQU9LT3JNd1ZaMDhrb1RndEVDSkZSQ3c9PQo=",
+      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.7.5-fanglv/FanglvCaseBoard_0.7.5_x64-setup.exe"
     }
   }
 }
