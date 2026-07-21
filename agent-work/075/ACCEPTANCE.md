@@ -38,9 +38,13 @@
 
 验收过程中发现本机增量 Release 曾复用旧 `sqlx::migrate!` 宏展开。现已在 `build.rs` 对全部 SQL 迁移内容生成编译指纹，并由数据库模块显式依赖；第三次全新隔离库确认 47—51 全部嵌入并执行。
 
-## 发布前剩余项
+## 发布与正式升级
 
-- 提交并推送远端 `main`。
-- GitHub Actions 生成 NSIS 安装包及 updater `.sig`。
-- 远端下载后校验摘要、updater 签名和 `latest.json`。
-- 备份正式库后安装 0.7.5，并核对正式库 `quick_check`、migration 51、关键业务表及应用版本。
+- 远端 `main`：功能提交 `6ad395b`；updater 清单提交 `6558acb`。
+- GitHub Actions：运行 `29823930508` 全部成功，包括 Windows NSIS、12 秒启动冒烟、updater minisign 与资产上传。
+- Release：`v0.7.5-fanglv`，正式安装包 `FanglvCaseBoard_0.7.5_x64-setup.exe`。
+- 远端重下载 SHA-256：安装包 `531B78733C4D487A7BB5A4E4688701C506859AB816E87C74AD50B0FEFA43AB08`；签名 `3B2C436B900EE525B47C317CA46F7DEE8183BF23DD4810164A4F2B5A96374DDD`；`latest.json` `F1DEB08BFB8B42B9EFC33B4CF18BDBE0C6452CC02EB58E08D1E66B422D766A53`。
+- 正式库外部备份：`D:\CodexWorkspace\008案件看板应用\formal-backup-v0.7.5-20260721-192005`。
+- 正式升级验证：`D:\CodexWorkspace\008案件看板应用\formal-upgrade-v075\20260721T112043Z`，状态 `formal-install-passed`。
+- 正式库升级后 `quick_check=ok`、最高 migration 51；案件 3、工作记录 1、阶段记录 2、飞书待绑定 16，均与升级前一致；只新增预期审计表。
+- 正式 EXE、卸载项和界面角标均为 0.7.5；正式截图已生成并视觉确认工作台正常渲染。
