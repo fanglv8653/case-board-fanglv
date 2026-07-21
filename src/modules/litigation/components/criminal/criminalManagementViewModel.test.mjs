@@ -13,9 +13,12 @@ const { MANAGEMENT_TABS, isManagementTab } = module.exports;
 
 assert.deepEqual(
   Array.from(MANAGEMENT_TABS, (item) => item.label),
-  ["进展与任务", "案件信息", "阶段与期限", "案件通讯录", "工作记录"],
+  ["案件概览", "进展记录", "待办提醒", "案件通讯录"],
 );
 assert.equal(isManagementTab("progress"), true);
+assert.equal(isManagementTab("overview"), true);
+assert.equal(isManagementTab("todo"), true);
+assert.equal(isManagementTab("work"), false);
 assert.equal(isManagementTab("materials"), false);
 assert.equal(isManagementTab("drafting"), false);
 

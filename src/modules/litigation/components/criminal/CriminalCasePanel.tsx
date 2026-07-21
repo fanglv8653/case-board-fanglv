@@ -165,12 +165,15 @@ const PRIORITY_OPTIONS = [
 
 export function CriminalCasePanel({
   caseId,
+  domain = "criminal",
   onOpenSentencing,
 }: {
   caseId: string;
+  domain?: "criminal" | "civil";
   onOpenSentencing?: (prefill: SentencingPrefill) => void;
 }) {
-  const [managementTab, setManagementTab] = useState<ManagementTab>("progress");
+  const isCriminal = domain === "criminal";
+  const [managementTab, setManagementTab] = useState<ManagementTab>("overview");
   const [profileForm, setProfileForm] = useState<ProfileForm>({
     case_id: caseId,
     ...EMPTY_PROFILE,
@@ -223,12 +226,12 @@ export function CriminalCasePanel({
     try {
       const [profile, stageRows, deadlineRows, contactRows, workRows, candidateRows] =
         await Promise.all([
-          getCriminalCaseProfile(caseId),
+          isCriminal ? getCriminalCaseProfile(caseId) : Promise.resolve(null),
           listCaseStageItems(caseId),
-          listCriminalDeadlineItems(caseId),
+          isCriminal ? listCriminalDeadlineItems(caseId) : Promise.resolve([]),
           listCaseAgencyContacts(caseId),
           listCaseWorkItems({ case_id: caseId }),
-          listCriminalExtractionCandidates(caseId),
+          isCriminal ? listCriminalExtractionCandidates(caseId) : Promise.resolve([]),
         ]);
       setProfileForm(toProfileForm(caseId, profile));
       setProfileRevision(profile?.profile_revision ?? null);
@@ -254,7 +257,7 @@ export function CriminalCasePanel({
     } finally {
       setLoading(false);
     }
-  }, [caseId]);
+  }, [caseId, isCriminal]);
 
   const recognizeMaterials = async () => {
     setRecognizingMaterials(true);
@@ -516,7 +519,7 @@ export function CriminalCasePanel({
 
   const saveWork = async () => {
     if (!workForm?.occurred_at.trim() || !workForm.work_type?.trim() || !workForm.content.trim()) {
-      toast("请填写时间、阶段和工作内容", "error");
+      toast("请填写时间、记录类型和进展内容", "error");
       return;
     }
     const hours = Number(workForm.hours || 0);
@@ -537,7 +540,7 @@ export function CriminalCasePanel({
       await upsertCaseWorkItem({
         ...input,
         case_id: caseId,
-        title: `${input.work_type} ${input.occurred_at.slice(0, 10)}`,
+        title: input.title.trim() || `${input.work_type} ${input.occurred_at.slice(0, 10)}`,
         duration_minutes: hours * 60 + minutes,
       });
       setWorkForm(null);
@@ -644,7 +647,7 @@ export function CriminalCasePanel({
       <section className="rounded-xl border border-border bg-card p-5">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" />
-          正在加载刑事业务信息
+          正在加载案件管理信息
         </div>
       </section>
     );
@@ -655,15 +658,17 @@ export function CriminalCasePanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="font-mono text-caption uppercase tracking-wider text-muted-foreground">
-            CRIMINAL CASE MANAGEMENT
+            {isCriminal ? "CRIMINAL CASE MANAGEMENT" : "CIVIL CASE MANAGEMENT"}
           </p>
-          <h2 className="mt-1 text-lg font-semibold tracking-tight">刑事案件管理工作台</h2>
+          <h2 className="mt-1 text-lg font-semibold tracking-tight">
+            {isCriminal ? "刑事案件管理工作台" : "民事案件管理工作台"}
+          </h2>
           <p className="mt-1 text-xs text-muted-foreground">
             用于案件进展提醒、阶段跟踪、信息记录、案件通讯录和工作留痕；不承担案卷阅卷工作。
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {onOpenSentencing && (
+          {isCriminal && onOpenSentencing && (
             <Button
               type="button"
               size="sm"
@@ -687,13 +692,13 @@ export function CriminalCasePanel({
 
       {error && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          刑事信息加载失败：{error}
+          案件管理信息加载失败：{error}
         </div>
       )}
 
       <nav
-        className="grid grid-cols-2 overflow-hidden rounded-lg border border-border bg-muted/20 md:grid-cols-5"
-        aria-label="刑事案件管理分区"
+        className="grid grid-cols-2 overflow-hidden rounded-lg border border-border bg-muted/20 md:grid-cols-4"
+        aria-label={`${isCriminal ? "刑事" : "民事"}案件管理分区`}
       >
         {MANAGEMENT_TABS.map((item) => (
           <button
@@ -716,7 +721,7 @@ export function CriminalCasePanel({
         ))}
       </nav>
 
-      {managementTab === "progress" && (
+      {managementTab === "todo" && isCriminal && (
         <CriminalWorkflowPanel
           caseId={caseId}
           deadlines={deadlines}
@@ -725,9 +730,16 @@ export function CriminalCasePanel({
         />
       )}
 
-      {managementTab === "profile" && (
+      {managementTab === "overview" && (
         <>
-      <Panel title="案件信息">
+      <ManagementOverview
+        domain={domain}
+        currentStage={profileForm.current_stage}
+        stages={stages}
+        deadlines={deadlines}
+        workItems={workItems}
+      />
+      {isCriminal && <Panel title="刑事案件信息">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <Field label="当前阶段">
             <TextInput
@@ -787,6 +799,11 @@ export function CriminalCasePanel({
               }
             />
           </Field>
+          <details className="md:col-span-3 rounded-md border border-border bg-muted/15">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-foreground">
+              更多刑事信息（按需填写）
+            </summary>
+            <div className="grid grid-cols-1 gap-3 border-t border-border p-3 md:grid-cols-3">
           <Field label="拘留日期">
             <DateInput
               value={profileForm.detention_date}
@@ -969,6 +986,8 @@ export function CriminalCasePanel({
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
             />
           </Field>
+            </div>
+          </details>
           <Field label="备注" className="md:col-span-3">
             <textarea
               value={profileForm.notes ?? ""}
@@ -986,9 +1005,9 @@ export function CriminalCasePanel({
             保存刑事画像
           </Button>
         </div>
-      </Panel>
+      </Panel>}
 
-      <details className="rounded-lg border border-border bg-background/50">
+      {isCriminal && <details className="rounded-lg border border-border bg-background/50">
         <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-foreground">
           材料信息辅助录入（可选）
           <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -1006,16 +1025,16 @@ export function CriminalCasePanel({
             onRejectBatch={rejectCandidateBatch}
           />
         </div>
-      </details>
+      </details>}
         </>
       )}
 
-      {managementTab === "timeline" && (
+      {managementTab === "todo" && (
       <Panel
-        title="办案时间轴"
+        title={isCriminal ? "阶段与期限提醒" : "案件阶段与提醒"}
         action={
           <div className="flex flex-wrap items-center gap-1">
-            <Button
+            {isCriminal && <Button
               type="button"
               variant="ghost"
               size="sm"
@@ -1024,8 +1043,8 @@ export function CriminalCasePanel({
             >
               <RefreshCw className={cn("size-3.5", refreshingDeadlines && "animate-spin")} />
               {refreshingDeadlines ? "刷新中" : "刷新期限"}
-            </Button>
-            <Button
+            </Button>}
+            {isCriminal && <Button
               type="button"
               variant="ghost"
               size="sm"
@@ -1033,12 +1052,12 @@ export function CriminalCasePanel({
             >
               <Plus className="size-3.5" />
               添加期限
-            </Button>
+            </Button>}
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => setStageForm(newStageForm(caseId))}
+              onClick={() => setStageForm(newStageForm(caseId, domain))}
             >
               <Plus className="size-3.5" />
               添加阶段
@@ -1046,9 +1065,9 @@ export function CriminalCasePanel({
           </div>
         }
       >
-        <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
+        {isCriminal && <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
           期限仅作为办案提醒；条件规则需人工确认，具体时点和特殊情形应结合案件事实核对，不替代法律判断。
-        </div>
+        </div>}
         {stageForm && (
           <StageEditor
             form={stageForm}
@@ -1058,7 +1077,7 @@ export function CriminalCasePanel({
             saving={savingList}
           />
         )}
-        {deadlineForm && (
+        {isCriminal && deadlineForm && (
           <DeadlineEditor
             form={deadlineForm}
             stages={stages}
@@ -1088,7 +1107,7 @@ export function CriminalCasePanel({
                     key={item.id}
                     item={item}
                     index={index}
-                    deadlines={timelineGroups.grouped.get(item.id) ?? []}
+                    deadlines={isCriminal ? (timelineGroups.grouped.get(item.id) ?? []) : []}
                     onEditStage={() => setStageForm(stageToForm(caseId, item))}
                     onDeleteStage={() => void removeStage(item)}
                     onEditDeadline={(deadline) =>
@@ -1101,7 +1120,7 @@ export function CriminalCasePanel({
             </SortableContext>
           </DndContext>
         )}
-        {timelineGroups.unassigned.length > 0 && (
+        {isCriminal && timelineGroups.unassigned.length > 0 && (
           <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 p-3">
             <p className="mb-2 text-sm font-semibold">未归入阶段的期限</p>
             <div className="space-y-2">
@@ -1176,13 +1195,13 @@ export function CriminalCasePanel({
       </Panel>
       )}
 
-      {managementTab === "work" && (
-      <Panel title="工作记录">
+      {managementTab === "progress" && (
+      <Panel title="进展记录">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
           <span>{formatConfirmedDuration(workItems)}</span>
           <Button type="button" size="sm" onClick={() => openWorkForm()}>
             <Plus className="size-3.5" />
-            新增工作记录
+            新增进展记录
           </Button>
         </div>
         {workForm && (
@@ -1197,20 +1216,41 @@ export function CriminalCasePanel({
                 }
               />
             </Field>
-            <Field label="阶段">
+            <Field label="记录类型">
               <TextInput
                 value={workForm.work_type}
                 onChange={(value) => setWorkForm({ ...workForm, work_type: value })}
-                placeholder="例如：侦查阶段"
+                placeholder={isCriminal ? "律师工作 / 程序进展 / 沟通" : "律师工作 / 程序进展 / 沟通"}
               />
             </Field>
-            <Field label="工作内容" className="md:col-span-2">
+            <Field label="标题">
+              <TextInput
+                value={workForm.title}
+                onChange={(value) => setWorkForm({ ...workForm, title: value })}
+                placeholder="留空则按类型和日期生成"
+              />
+            </Field>
+            <Field label="进展内容" className="md:col-span-2">
               <textarea
                 className="min-h-20 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
                 value={workForm.content}
                 onChange={(event) =>
                   setWorkForm({ ...workForm, content: event.target.value })
                 }
+              />
+            </Field>
+            <Field label="办理结果">
+              <TextInput
+                value={workForm.result}
+                onChange={(value) => setWorkForm({ ...workForm, result: value })}
+                placeholder="已完成的结果（可选）"
+              />
+            </Field>
+            <Field label="下一步行动">
+              <TextInput
+                value={workForm.next_action}
+                onChange={(value) => setWorkForm({ ...workForm, next_action: value })}
+                placeholder="下一步需要办理的事项（可选）"
               />
             </Field>
             <Field label="工作时间">
@@ -1241,7 +1281,7 @@ export function CriminalCasePanel({
             </div>
           </div>
         )}
-        <ListState emptyText="暂未关联工作记录。">
+        <ListState emptyText="暂未记录案件进展。">
           {workItems.map((item) => (
             <ListRow key={item.id}>
               <div className="min-w-0">
@@ -1260,6 +1300,13 @@ export function CriminalCasePanel({
                 {item.content && (
                   <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
                     {item.content}
+                  </p>
+                )}
+                {(item.result || item.next_action) && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {[item.result ? `结果：${item.result}` : null, item.next_action ? `下一步：${item.next_action}` : null]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </p>
                 )}
               </div>
@@ -1288,6 +1335,54 @@ export function CriminalCasePanel({
       </Panel>
       )}
     </section>
+  );
+}
+
+function ManagementOverview({
+  domain,
+  currentStage,
+  stages,
+  deadlines,
+  workItems,
+}: {
+  domain: "criminal" | "civil";
+  currentStage?: string | null;
+  stages: CaseStageItem[];
+  deadlines: CriminalDeadlineItem[];
+  workItems: CaseWorkItem[];
+}) {
+  const activeStage = stages.find((item) => item.status === "active") ?? stages[0];
+  const latestWork = workItems[0];
+  const reminderCandidates = [
+    ...stages.flatMap((item) => [item.reminder_at, item.due_at]),
+    ...deadlines.flatMap((item) => [item.reminder_at, item.effective_due_at]),
+  ].filter((value): value is string => Boolean(value));
+  reminderCandidates.sort((a, b) => a.localeCompare(b));
+  const nextAction = workItems.find((item) => item.next_action?.trim())?.next_action;
+
+  const rows = [
+    ["当前阶段", currentStage || activeStage?.stage_label || "待补充"],
+    ["最近进展", latestWork ? `${latestWork.occurred_at.slice(0, 10)} · ${latestWork.title}` : "暂无记录"],
+    ["下一步行动", nextAction || "待补充"],
+    ["最近提醒", reminderCandidates[0]?.slice(0, 16) || "暂无提醒"],
+  ];
+
+  return (
+    <Panel title="案件概览">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {rows.map(([label, value]) => (
+          <div key={label} className="rounded-md border border-border bg-card px-3 py-3">
+            <p className="text-caption font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+            <p className="mt-1 line-clamp-2 text-sm font-medium text-foreground">{value}</p>
+          </div>
+        ))}
+      </div>
+      {domain === "civil" && (
+        <p className="mt-3 text-xs text-muted-foreground">
+          民事案件的原告、被告、案由、诉讼请求及承办法院继续在上方案件基本信息中维护；本区只记录进展、待办和联络信息。
+        </p>
+      )}
+    </Panel>
   );
 }
 
@@ -1985,10 +2080,10 @@ function toProfileForm(
   };
 }
 
-function newStageForm(caseId: string): StageForm {
+function newStageForm(caseId: string, domain: "criminal" | "civil" = "criminal"): StageForm {
   return {
     case_id: caseId,
-    domain: "criminal",
+    domain,
     major_stage: "",
     stage_label: "",
     status: "active",

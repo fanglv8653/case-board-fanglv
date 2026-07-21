@@ -176,7 +176,7 @@ export function FeishuSyncPreview({
           <ShieldCheck className="mt-0.5 size-5 shrink-0 text-sky-700 dark:text-sky-300" />
           <div>
             <p className="text-sm font-semibold text-sky-950 dark:text-sky-100">飞书只读预演 · 仅“在办”案件</p>
-            <p className="mt-1 text-xs leading-relaxed text-sky-800 dark:text-sky-200">读取飞书后只更新本地预演记录，不会写入飞书，也不会修改本地案件业务数据。</p>
+        <p className="mt-1 text-xs leading-relaxed text-sky-800 dark:text-sky-200">已连接时会在启动、回到应用及每 30 分钟自动刷新；只更新本地预演记录，不会写入飞书，也不会修改本地案件业务数据。</p>
             <button type="button" onClick={onOpenConnection} className="mt-2 text-xs font-medium text-sky-900 underline-offset-2 hover:underline dark:text-sky-100">
               {connected ? "已连接 · 只读权限" : needsReauthorization ? "授权已失效，前往重新连接" : "未连接，前往连接飞书"}
             </button>

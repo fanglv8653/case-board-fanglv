@@ -513,10 +513,11 @@ export function CaseView({
                 !error &&
                 documents.length === 0 &&
                 selectedCase &&
-                domain === "criminal" && (
+                (domain === "criminal" || domain === "civil") && (
                   <div className="mt-5">
                     <CriminalCasePanel
                       caseId={selectedCase.id}
+                      domain={domain}
                       onOpenSentencing={onOpenSentencing}
                     />
                   </div>
@@ -531,9 +532,10 @@ export function CaseView({
                     domain={domain}
                   />
 
-                  {domain === "criminal" && (
+                  {(domain === "criminal" || domain === "civil") && (
                     <CriminalCasePanel
                       caseId={selectedCase.id}
+                      domain={domain}
                       onOpenSentencing={onOpenSentencing}
                     />
                   )}

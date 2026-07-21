@@ -671,6 +671,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO case_work_items (id,case_id,occurred_at,work_type,title,content,source,external_source,external_record_id) VALUES ('work-1','case-1','2026-07-21','沟通','联系当事人','已完成沟通','feishu','feishu','work-rec-1')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO case_stage_items (id,case_id,domain,stage_label,status,source,external_source,external_record_id) VALUES ('stage-1','case-1','civil','一审','active','feishu','feishu','stage-rec-1')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO case_agency_contacts (id,case_id,agency_name,contact_name,source,external_record_id) VALUES ('contact-1','case-1','测试法院','测试联系人','feishu','contact-rec-1')")
+            .execute(&pool).await.unwrap();
         let remote = FeishuRemoteCaseRecord {
             record_id: "rec-1".into(),
             fields: json!({
@@ -682,6 +688,12 @@ mod tests {
             }),
             last_modified_time: Some("1784518994000".into()),
         };
+        let linked_business_before: (String, String, String, String, String, String) = sqlx::query_as(
+            "SELECT w.external_record_id,s.external_record_id,c.external_record_id,w.content,s.stage_label,c.contact_name FROM case_work_items w JOIN case_stage_items s ON s.case_id=w.case_id JOIN case_agency_contacts c ON c.case_id=w.case_id WHERE w.case_id='case-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         for _ in 0..2 {
             let run_id = start_pull_run(&pool).await.unwrap();
@@ -716,9 +728,16 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let linked_business_after: (String, String, String, String, String, String) = sqlx::query_as(
+            "SELECT w.external_record_id,s.external_record_id,c.external_record_id,w.content,s.stage_label,c.contact_name FROM case_work_items w JOIN case_stage_items s ON s.case_id=w.case_id JOIN case_agency_contacts c ON c.case_id=w.case_id WHERE w.case_id='case-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(link_count.0, 1);
         assert_eq!(inbox_count.0, 1);
         assert_eq!(snapshot_count.0, 1);
+        assert_eq!(linked_business_before, linked_business_after);
         assert_eq!(
             case_after,
             (
