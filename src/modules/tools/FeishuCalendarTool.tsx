@@ -177,7 +177,7 @@ export function FeishuCalendarTool() {
         />
       </div>
 
-      {/* 案件池配置(可选折叠) */}
+      {/* 飞书案件总表配置 */}
       <div className="rounded-lg border border-border">
         <button
           type="button"
@@ -185,13 +185,13 @@ export function FeishuCalendarTool() {
           className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-foreground"
         >
           {poolOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-          案件池多维表格 <span className="text-xs font-normal text-muted-foreground">(可选 · 点日历事件一键导入对应案件)</span>
+          案件管理多维表格
         </button>
         {poolOpen && (
           <div className="space-y-3 border-t border-border px-4 py-3">
             <p className="text-xs text-muted-foreground">
-              在飞书多维表格里建一张"案件池"表,含「案件名称」「本地路径」两列。配好后,
-              点首页飞书日历的事件可按标题反查本地案件目录并一键导入。不配则只展示日历、不影响。
+              用于案件同步预演。App Token 填多维表格的 base 标识；Table ID 必须填写
+              “🚩案件总表”的表标识，不要填写进度表、阶段表或当前视图的其他表标识。
             </p>
             <div className="space-y-1.5">
               <label className="text-sm text-foreground">App Token</label>
@@ -207,7 +207,7 @@ export function FeishuCalendarTool() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-sm text-foreground">Table ID</label>
+              <label className="text-sm text-foreground">案件总表 Table ID</label>
               <input
                 type="text"
                 value={tableId}
@@ -215,7 +215,7 @@ export function FeishuCalendarTool() {
                   setTableId(e.target.value);
                   markDirty();
                 }}
-                placeholder="tbl... / 多维表格 URL 里的 table_id"
+                placeholder="tbl... / 请选择“🚩案件总表”的 table_id"
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
               />
             </div>

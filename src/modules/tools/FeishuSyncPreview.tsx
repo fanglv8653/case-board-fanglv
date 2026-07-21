@@ -54,24 +54,44 @@ function runLabel(status: string): string {
 }
 
 function pullErrorMessage(error: unknown): string {
-  const message = String(error).toLowerCase();
-  if (message.includes("未连接") || message.includes("授权") || message.includes("token") || message.includes("auth")) {
+  const message = String(error).toUpperCase();
+  if (message.includes("FEISHU_CONFIG_INVALID")) {
+    return "请先在“日历设置—案件管理多维表格”填写 App Token 和案件总表 Table ID。";
+  }
+  if (
+    message.includes("FEISHU_AUTH_REQUIRED")
+    || message.includes("FEISHU_OAUTH_REAUTHORIZATION_REQUIRED")
+    || message.includes("FEISHU_OAUTH_TOKEN_REJECTED")
+  ) {
     return "飞书连接未建立或已失效，请重新连接后再试。";
   }
-  if (message.includes("权限") || message.includes("scope") || message.includes("permission")) {
+  if (
+    message.includes("FEISHU_PERMISSION_DENIED")
+    || message.includes("FEISHU_OAUTH_MISSING_READONLY_SCOPE")
+  ) {
     return "当前连接缺少多维表格只读权限，请补充授权后重试。";
   }
-  if (message.includes("字段") || message.includes("schema")) {
-    return "飞书表字段结构发生变化，本次未生成新建议；请检查表结构。";
+  if (
+    message.includes("FEISHU_TABLE_SCHEMA_MISMATCH")
+    || message.includes("FEISHU_SCHEMA_CHANGED")
+    || message.includes("FEISHU_FILTER_MISMATCH")
+  ) {
+    return "当前 Table ID 不是案件总表，或案件表字段结构发生变化；请选择含“案件名称”和“☑状态”的案件总表。";
   }
-  if (message.includes("config_invalid") || message.includes("app token") || message.includes("table id")) {
-    return "请先在“日历设置—案件池多维表格”填写 App Token 和案件总表 Table ID。";
+  if (message.includes("FEISHU_TABLE_NOT_FOUND")) {
+    return "找不到飞书案件总表，请检查 App Token、Table ID 和应用访问权限。";
   }
-  if (message.includes("超时") || message.includes("timeout") || message.includes("network")) {
+  if (message.includes("FEISHU_NETWORK_TIMEOUT") || message.includes("FEISHU_NETWORK_ERROR")) {
     return "读取飞书超时，请检查网络后重试。";
   }
-  if (message.includes("db_preview") || message.includes("保存预演") || message.includes("数据库")) {
+  if (message.includes("FEISHU_RESPONSE_INVALID")) {
+    return "飞书返回的数据格式异常，本次未更新预演结果，请稍后重试。";
+  }
+  if (message.includes("FEISHU_DB_PREVIEW_WRITE_FAILED")) {
     return "已读取飞书，但本地预演结果保存失败；案件业务数据未被修改。";
+  }
+  if (message.includes("FEISHU_PULL_IN_PROGRESS")) {
+    return "已有一次飞书预演正在进行，请等待完成后再试。";
   }
   return "本次读取未完成，请稍后重试。";
 }

@@ -22,6 +22,7 @@ use crate::settings::Settings;
 
 const LARK_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const BITABLE_MAX_PAGES: usize = 50;
+const BITABLE_FIELD_MAX_PAGES: usize = 5;
 
 /// 飞书日历事件(传给前端月历)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,10 +180,17 @@ fn parse_case_records(
     value: &Value,
 ) -> Result<(Vec<FeishuRemoteCaseRecord>, Option<String>), String> {
     let data = response_data(value);
-    let items = data
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 飞书记录列表缺少 data.items".to_string())?;
+    let items: &[Value] = match data.get("items") {
+        Some(Value::Array(items)) => items,
+        // 飞书的空结果页可能省略 `items`。只有服务端同时明确声明
+        // total=0 且 has_more=false 时才按空列表处理，避免吞掉真实协议变化。
+        None if data.get("total").and_then(Value::as_u64) == Some(0)
+            && data.get("has_more").and_then(Value::as_bool) == Some(false) =>
+        {
+            &[]
+        }
+        _ => return Err("FEISHU_RESPONSE_INVALID: 飞书记录列表缺少有效的 data.items".to_string()),
+    };
 
     let mut records = Vec::with_capacity(items.len());
     for item in items {
@@ -212,6 +220,11 @@ fn parse_case_records(
         .get("has_more")
         .and_then(Value::as_bool)
         .unwrap_or(page_token.is_some());
+    if has_more && page_token.is_none() {
+        return Err(
+            "FEISHU_RESPONSE_INVALID: 飞书记录列表声明 has_more 但缺少 page_token".to_string(),
+        );
+    }
     Ok((records, has_more.then_some(page_token).flatten()))
 }
 
@@ -235,6 +248,150 @@ fn classify_bitable_code(code: i64) -> &'static str {
     }
 }
 
+fn ensure_bitable_success(value: &Value) -> Result<(), String> {
+    let code = value
+        .get("code")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 飞书响应缺少整数业务 code".to_string())?;
+    if code == 0 {
+        return Ok(());
+    }
+    let stable = classify_bitable_code(code);
+    Err(format!("{stable}: 飞书接口拒绝本次读取（code={code}）"))
+}
+
+async fn read_bitable_response(response: reqwest::Response) -> Result<Value, String> {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err("FEISHU_PERMISSION_DENIED: 应用没有多维表格只读权限".to_string());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "FEISHU_RESPONSE_INVALID: 飞书响应不可读取".to_string())?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("FEISHU_RESPONSE_INVALID: 飞书单页响应超过安全上限".to_string());
+    }
+    if !status.is_success() {
+        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+            ensure_bitable_success(&value)?;
+        }
+        return Err(format!(
+            "FEISHU_PULL_FAILED: 飞书服务返回 HTTP {}",
+            status.as_u16()
+        ));
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "FEISHU_RESPONSE_INVALID: 飞书响应不是有效 JSON".to_string())?;
+    ensure_bitable_success(&value)?;
+    Ok(value)
+}
+
+fn parse_field_names(value: &Value) -> Result<(Vec<String>, Option<String>), String> {
+    let data = response_data(value);
+    let items = data
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 飞书字段列表缺少 data.items".to_string())?;
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        let name = item
+            .get("field_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "FEISHU_RESPONSE_INVALID: 飞书字段列表包含无效 field_name".to_string()
+            })?;
+        names.push(name.to_string());
+    }
+    let page_token = data
+        .get("page_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let has_more = data
+        .get("has_more")
+        .and_then(Value::as_bool)
+        .unwrap_or(page_token.is_some());
+    if has_more && page_token.is_none() {
+        return Err(
+            "FEISHU_RESPONSE_INVALID: 飞书字段列表声明 has_more 但缺少 page_token".to_string(),
+        );
+    }
+    Ok((names, has_more.then_some(page_token).flatten()))
+}
+
+fn validate_case_table_fields(field_names: &[String]) -> Result<String, String> {
+    let has_case_name = field_names.iter().any(|name| name == "案件名称");
+    let status_field = field_names
+        .iter()
+        .find(|name| matches!(name.as_str(), "☑状态" | "☑️状态"));
+    if has_case_name {
+        if let Some(status_field) = status_field {
+            return Ok(status_field.clone());
+        }
+    }
+    Err(
+        "FEISHU_TABLE_SCHEMA_MISMATCH: 目标数据表不是案件总表（缺少“案件名称”或“☑状态”字段）"
+            .to_string(),
+    )
+}
+
+fn active_case_filter(status_field: &str) -> Result<String, String> {
+    if !matches!(status_field, "☑状态" | "☑️状态") {
+        return Err("FEISHU_TABLE_SCHEMA_MISMATCH: 案件状态字段名称不受支持".to_string());
+    }
+    Ok(format!(r#"AND(CurrentValue.[{status_field}]="在办")"#))
+}
+
+async fn validate_case_table_schema(
+    client: &reqwest::Client,
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+) -> Result<String, String> {
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+    );
+    let mut page_token: Option<String> = None;
+    let mut field_names = Vec::new();
+    for _ in 0..BITABLE_FIELD_MAX_PAGES {
+        let mut query = vec![("page_size", "100".to_string())];
+        if let Some(token) = page_token.as_ref() {
+            query.push(("page_token", token.clone()));
+        }
+        let response = client
+            .get(&endpoint)
+            .bearer_auth(access_token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 读取飞书字段结构超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?;
+        let value = read_bitable_response(response).await?;
+        let (mut names, next_page_token) = parse_field_names(&value)?;
+        field_names.append(&mut names);
+        if let Ok(status_field) = validate_case_table_fields(&field_names) {
+            return Ok(status_field);
+        }
+        page_token = next_page_token;
+        if page_token.is_none() {
+            return validate_case_table_fields(&field_names);
+        }
+    }
+    Err("FEISHU_RESPONSE_INVALID: 飞书字段列表分页超过安全上限".to_string())
+}
+
 /// 通过飞书开放平台原生 HTTP API 拉取“状态=在办”的案件。
 ///
 /// access token 仅存在于 Rust 内存和 Windows 凭据管理器，绝不进入命令行、SQLite 或日志。
@@ -256,6 +413,9 @@ pub async fn fetch_active_case_records(
     let endpoint = format!(
         "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     );
+    let status_field =
+        validate_case_table_schema(&client, access_token, app_token, table_id).await?;
+    let filter = active_case_filter(&status_field)?;
     let mut page_token: Option<String> = None;
     let mut records = Vec::new();
 
@@ -263,7 +423,7 @@ pub async fn fetch_active_case_records(
         let mut query = vec![
             ("page_size", "500".to_string()),
             ("automatic_fields", "true".to_string()),
-            ("filter", r#"AND(CurrentValue.[☑状态]="在办")"#.to_string()),
+            ("filter", filter.clone()),
         ];
         if let Some(token) = page_token.as_ref() {
             query.push(("page_token", token.clone()));
@@ -282,34 +442,7 @@ pub async fn fetch_active_case_records(
                     "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
                 }
             })?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
-        }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return Err("FEISHU_PERMISSION_DENIED: 应用没有多维表格只读权限".to_string());
-        }
-        if !status.is_success() {
-            return Err(format!(
-                "FEISHU_PULL_FAILED: 飞书服务返回 HTTP {}",
-                status.as_u16()
-            ));
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| "FEISHU_RESPONSE_INVALID: 飞书响应不可读取".to_string())?;
-        if bytes.len() > 8 * 1024 * 1024 {
-            return Err("FEISHU_RESPONSE_INVALID: 飞书单页响应超过安全上限".to_string());
-        }
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| "FEISHU_RESPONSE_INVALID: 飞书响应不是有效 JSON".to_string())?;
-        if let Some(code) = value.get("code").and_then(Value::as_i64) {
-            if code != 0 {
-                let stable = classify_bitable_code(code);
-                return Err(format!("{stable}: 飞书接口拒绝本次读取（code={code}）"));
-            }
-        }
+        let value = read_bitable_response(response).await?;
         let (mut page_records, next_page_token) = parse_case_records(&value)?;
         records.append(&mut page_records);
         page_token = next_page_token;
@@ -557,5 +690,89 @@ mod tests {
     fn query_filter_is_utf8_percent_encoded_and_readonly() {
         assert!(validate_bitable_id("bascn123_ABC-9", "App Token").is_ok());
         assert!(validate_bitable_id("../bad", "App Token").is_err());
+    }
+
+    #[test]
+    fn accepts_explicit_empty_record_page_when_items_is_omitted() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {"has_more": false, "total": 0}
+        });
+
+        ensure_bitable_success(&response).unwrap();
+        let (records, next) = parse_case_records(&response).unwrap();
+        assert!(records.is_empty());
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn rejects_missing_items_when_response_is_not_an_explicit_empty_page() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {"has_more": false, "total": 1}
+        });
+
+        let error = parse_case_records(&response).unwrap_err();
+        assert!(error.starts_with("FEISHU_RESPONSE_INVALID:"));
+    }
+
+    #[test]
+    fn rejects_incomplete_pagination_contract() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {"items": [], "has_more": true, "total": 1}
+        });
+
+        let error = parse_case_records(&response).unwrap_err();
+        assert!(error.contains("page_token"));
+    }
+
+    #[test]
+    fn classifies_bitable_business_error_before_parsing_data() {
+        let response = serde_json::json!({"code": 99991672, "msg": "forbidden"});
+
+        let error = ensure_bitable_success(&response).unwrap_err();
+        assert!(error.starts_with("FEISHU_PERMISSION_DENIED:"));
+        assert!(!error.contains("forbidden"));
+    }
+
+    #[test]
+    fn validates_case_table_schema_with_supported_status_variants() {
+        for status_name in ["☑状态", "☑️状态"] {
+            let names = vec!["案件名称".to_string(), status_name.to_string()];
+            let selected = validate_case_table_fields(&names).unwrap();
+            assert_eq!(selected, status_name);
+            assert_eq!(
+                active_case_filter(&selected).unwrap(),
+                format!(r#"AND(CurrentValue.[{status_name}]="在办")"#)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_case_table_before_an_empty_filtered_result_can_be_accepted() {
+        let wrong_table_fields = vec!["事项名称".to_string(), "进度".to_string()];
+
+        let error = validate_case_table_fields(&wrong_table_fields).unwrap_err();
+        assert!(error.starts_with("FEISHU_TABLE_SCHEMA_MISMATCH:"));
+    }
+
+    #[test]
+    fn parses_paginated_field_names_without_field_values() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {
+                "items": [
+                    {"field_id": "fld1", "field_name": "案件名称", "type": 1},
+                    {"field_id": "fld2", "field_name": "☑状态", "type": 3}
+                ],
+                "has_more": true,
+                "page_token": "next-page"
+            }
+        });
+
+        let (names, next) = parse_field_names(&response).unwrap();
+        assert_eq!(names, ["案件名称", "☑状态"]);
+        assert_eq!(next.as_deref(), Some("next-page"));
     }
 }
