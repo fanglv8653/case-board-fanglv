@@ -1,11 +1,11 @@
 {
-  "version": "0.7.0",
-  "notes": "方律案件看板 0.7.0：新增刑事案件材料阅卷、证据争点、案件分析、文书草拟、流程任务五区工作台；AI 结果默认待律师复核，并支持模型不可用时回落原生流程。",
-  "pub_date": "2026-07-19T14:48:43.584Z",
+  "version": "0.7.2",
+  "notes": "方律案件看板 0.7.2。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
+  "pub_date": "2026-07-21T03:19:05.120Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UlZPcjArWWdtbHkxNTk5b0RuL3UrcnpkYnhPL3c2N29jZkFhUmhiQVI4WEgyQ2RIRkloZUVweDVqMEQ1YnFYZXlsMkVuNWQxRm5EMUwvTEI0QVdzeWdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NDcyNDEyCWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNy4wX3g2NC1zZXR1cC5leGUKK2JsdEFtZmpSRkRtblFUQ0w2QVVnM1dta2JDcFlpMkxhZlVaVENvSHpzd2c3UlN5RXZEekQwMGppZHJnTEYwNWthVmhZaDJvMEZWOGVDc2hFQVk3QWc9PQo=",
-      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.7.0-fanglv/FanglvCaseBoard_0.7.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UmFidzNPQWZsMUlNRVU2azNBZ0owY2pvL0VmZ2dvNlVVMHdjUHBubmVrbHNyVVFSaGJCaFFiMXd0SWNqM2l6NHZmcWNDb0I5cTNjNko0bVgraXdFUkEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NjAzNDc0CWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNy4yX3g2NC1zZXR1cC5leGUKZWgvL09CL2V5amxYenIwK3RSY2czU2tRblg3MmRSYnE2U29RUytOVlhXVE1ibDFodkQ1MWJYV1ZmS1ZjcDFxWDRJYW1vZGZOY0g4ZUs5MHViS0ZWQ2c9PQo=",
+      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.7.2-fanglv/FanglvCaseBoard_0.7.2_x64-setup.exe"
     }
   }
 }
