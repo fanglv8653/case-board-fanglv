@@ -1,11 +1,11 @@
 {
-  "version": "0.7.5",
-  "notes": "方律案件看板 0.7.5。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
-  "pub_date": "2026-07-21T11:09:48.705Z",
+  "version": "0.7.6",
+  "notes": "方律案件看板 0.7.6。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
+  "pub_date": "2026-07-22T04:00:36.093Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UmN3TWl6cXBtVGtvdGo5V2t2TXBuZ1pEbnZJMzdLM2RVWXFIck9HaThUdnkzMTdUUTZpekVRa3d1ZkFNVnlXa0hldEphUGpNbDloWGZkcUtzQmxRMXdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NjMyMDg1CWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNy41X3g2NC1zZXR1cC5leGUKdTRuTzJzRWhYL3FRSUc0RU5xYU9nSjBoR29FMkhHYjdlc2dsNVA3bG9WdTFXb0FGck5WRkwxSDd6c240SFRsQU9LT3JNd1ZaMDhrb1RndEVDSkZSQ3c9PQo=",
-      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.7.5-fanglv/FanglvCaseBoard_0.7.5_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRaUJHNlREdmd0UlRZS2V2SEt2Mi8wVkU0MEZCTkhIcThDNU9DVFpOTndRYkFOMnFERmFGanZsQjZvSXlKeEpMdHBBemdqd29YOHBpOWQwckdNQjRENTUveTEwSlZiSHcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0NjkyMjkyCWZpbGU65pa55b6L5qGI5Lu255yL5p2/XzAuNy42X3g2NC1zZXR1cC5leGUKZDRua1MvRTFFWllxdWthRVBDNnNlTTRBbGdxcVd5Q0tKS0JWOW1McnltcC9OcjIwekhjUC9iMTFqODN0NFJ6cXk2clVOU1ErbTd6M1YxMS9TSkFHQUE9PQo=",
+      "url": "https://github.com/fanglv8653/case-board-fanglv/releases/download/v0.7.6-fanglv/FanglvCaseBoard_0.7.6_x64-setup.exe"
     }
   }
 }
