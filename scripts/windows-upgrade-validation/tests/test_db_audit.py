@@ -53,6 +53,23 @@ class DbAuditTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertIn("cases", result["business_table_changes"])
 
+    def test_feishu_entity_audit_growth_is_runtime_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "caseboard.db"
+            self.make_db(path)
+            connection = sqlite3.connect(path)
+            connection.execute("CREATE TABLE feishu_sync_entity_audits(id INTEGER PRIMARY KEY)")
+            connection.commit()
+            connection.close()
+            before = db_audit.snapshot(path)
+            connection = sqlite3.connect(path)
+            connection.execute("INSERT INTO feishu_sync_entity_audits DEFAULT VALUES")
+            connection.commit()
+            connection.close()
+            result = db_audit.compare(before, db_audit.snapshot(path))
+            self.assertEqual(result["status"], "passed")
+            self.assertIn("feishu_sync_entity_audits", result["runtime_snapshot_changes"])
+
     def test_backup_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.db"

@@ -21,6 +21,9 @@ RUNTIME_ONLY_TABLES = {
     "feishu_sync_snapshots",
     "feishu_sync_conflicts",
     "feishu_sync_field_previews",
+    # 0.7.6 records every idempotent Feishu entity decision here. It is an
+    # append-only synchronization audit, not a case/work/stage/contact record.
+    "feishu_sync_entity_audits",
 }
 
 
