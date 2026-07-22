@@ -20,6 +20,7 @@ import { Gavel, GripVertical, Loader2, Plus, RefreshCw, Trash2 } from "lucide-re
 
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/toast";
+import { TodosCard } from "@/components/TodosCard";
 import { confirmDialog } from "@/lib/dialog";
 import {
   deleteCaseAgencyContact,
@@ -47,6 +48,7 @@ import {
 import type {
   CaseAgencyContact,
   CaseAgencyContactUpsertInput,
+  Case,
   CaseStageItem,
   CaseStageItemUpsertInput,
   CaseWorkItem,
@@ -63,6 +65,7 @@ import {
   formatRecognitionFailureList,
 } from "@/lib/caseIdentity";
 import { buildSentencingPrefill, type SentencingPrefill } from "@/modules/tools/sentencing/prefill";
+import { buildCriminalCaseIdentity } from "@/lib/criminalCaseIdentity";
 import {
   resolveStructuredListJson,
   structuredListToText,
@@ -81,8 +84,14 @@ import {
   type CriminalExtractionCandidateBatchView,
 } from "./criminalExtractionReviewModels";
 import { CriminalWorkflowPanel } from "./CriminalWorkflowPanel";
-import { MANAGEMENT_TABS, type ManagementTab } from "./criminalManagementViewModel";
-import { criminalPartyNameLabel } from "./partyTerminology";
+import {
+  MANAGEMENT_TABS,
+  buildLegacyContactCandidates,
+  parseManagementPartyNames,
+  resolveProsecutionAgency,
+  type LegacyContactCandidate,
+  type ManagementTab,
+} from "./criminalManagementViewModel";
 import {
   appliedCandidateTriggerFields,
   buildCriminalWorkflowTriggerEvents,
@@ -165,12 +174,16 @@ const PRIORITY_OPTIONS = [
 
 export function CriminalCasePanel({
   caseId,
+  caseData,
   domain = "criminal",
   onOpenSentencing,
+  basicInformation,
 }: {
   caseId: string;
+  caseData: Case;
   domain?: "criminal" | "civil";
   onOpenSentencing?: (prefill: SentencingPrefill) => void;
+  basicInformation: ReactNode;
 }) {
   const isCriminal = domain === "criminal";
   const [managementTab, setManagementTab] = useState<ManagementTab>("overview");
@@ -219,6 +232,52 @@ export function CriminalCasePanel({
     }
     return { grouped, unassigned };
   }, [deadlines, stages]);
+  const plaintiffs = useMemo(
+    () => parseManagementPartyNames(caseData.agg_plaintiffs),
+    [caseData.agg_plaintiffs],
+  );
+  const defendants = useMemo(
+    () => parseManagementPartyNames(caseData.agg_defendants),
+    [caseData.agg_defendants],
+  );
+  const prosecutionAgency = useMemo(
+    () => resolveProsecutionAgency(contacts, plaintiffs),
+    [contacts, plaintiffs],
+  );
+  const criminalIdentity = useMemo(
+    () =>
+      buildCriminalCaseIdentity({
+        displayNameOverride: caseData.display_name_override,
+        storedName: caseData.name,
+        currentStage: profileForm.current_stage,
+        suspectedCharge: profileForm.suspected_charge,
+        suspectOrDefendantName: profileForm.suspect_or_defendant_name,
+        prosecutionAuthority: prosecutionAgency,
+        clientName: profileForm.client_name,
+        detention_date: profileForm.detention_date,
+        prosecution_received_date: profileForm.prosecution_received_date,
+        first_instance_accepted_date: profileForm.first_instance_accepted_date,
+        second_instance_accepted_date: profileForm.second_instance_accepted_date,
+      }),
+    [caseData.display_name_override, caseData.name, profileForm, prosecutionAgency],
+  );
+  const pendingLegacyContacts = useMemo(
+    () =>
+      buildLegacyContactCandidates(
+        {
+          courtContactsJson: caseData.agg_court_contacts,
+          partyContactsJson: caseData.agg_party_contacts,
+          fallbackAgencyName: caseData.agg_court,
+        },
+        contacts,
+      ),
+    [
+      caseData.agg_court,
+      caseData.agg_court_contacts,
+      caseData.agg_party_contacts,
+      contacts,
+    ],
+  );
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -475,6 +534,28 @@ export function CriminalCasePanel({
     }
   };
 
+  const confirmLegacyContact = async (candidate: LegacyContactCandidate) => {
+    setSavingList(true);
+    try {
+      await upsertCaseAgencyContact({
+        case_id: caseId,
+        agency_type: candidate.agencyType,
+        agency_name: candidate.agencyName,
+        contact_role: candidate.contactRole,
+        contact_name: candidate.contactName,
+        phone: candidate.phone,
+        notes: `${candidate.sourceLabel}；已由律师人工确认录入`,
+        source: "manual",
+      });
+      toast("已确认并录入案件通讯录", "success");
+      await reload();
+    } catch (e) {
+      toast(`联系人确认失败:${e}`, "error");
+    } finally {
+      setSavingList(false);
+    }
+  };
+
   const refreshDeadlines = async () => {
     setRefreshingDeadlines(true);
     try {
@@ -721,6 +802,15 @@ export function CriminalCasePanel({
         ))}
       </nav>
 
+      {managementTab === "todo" && (
+        <Panel title="手工待办清单">
+          <p className="mb-3 text-xs text-muted-foreground">
+            手工待办与流程期限分别保存并在本页统一呈现；勾选手工待办不会改动刑事流程提醒。
+          </p>
+          <TodosCard caseId={caseId} />
+        </Panel>
+      )}
+
       {managementTab === "todo" && isCriminal && (
         <CriminalWorkflowPanel
           caseId={caseId}
@@ -732,14 +822,12 @@ export function CriminalCasePanel({
 
       {managementTab === "overview" && (
         <>
-      <ManagementOverview
-        domain={domain}
-        currentStage={profileForm.current_stage}
-        stages={stages}
-        deadlines={deadlines}
-        workItems={workItems}
-      />
+      {basicInformation}
       {isCriminal && <Panel title="刑事案件信息">
+        <div className="mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <FactTile label="公诉机关" value={criminalIdentity.prosecutionAuthority || "待核实"} />
+          <FactTile label="当前承办 / 审判机关" value={caseData.agg_court || caseData.court || "待核实"} />
+        </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <Field label="当前阶段">
             <TextInput
@@ -748,6 +836,28 @@ export function CriminalCasePanel({
               placeholder="侦查 / 审查起诉 / 一审"
             />
           </Field>
+          {criminalIdentity.stageDate ? (
+            <Field label={criminalIdentity.stageDate.label}>
+              <div>
+                <DateInput
+                  value={profileForm[criminalIdentity.stageDate.field]}
+                  onChange={(v) =>
+                    setProfileForm({
+                      ...profileForm,
+                      [criminalIdentity.stageDate!.field]: v,
+                    })
+                  }
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {criminalIdentity.stageDate.status === "missing"
+                    ? "待核实；仅记录当前程序阶段对应日期"
+                    : "已记录当前程序阶段对应日期"}
+                </p>
+              </div>
+            </Field>
+          ) : (
+            <FactTile label="阶段专属日期" value="待核实（请先确认当前阶段）" />
+          )}
           <Field label="程序类型">
             <TextInput
               value={profileForm.procedure_type}
@@ -762,19 +872,27 @@ export function CriminalCasePanel({
               placeholder="侦查阶段辩护人"
             />
           </Field>
-          <Field label="涉嫌罪名">
+          <Field label="罪名">
             <TextInput
-              value={profileForm.suspected_charge}
+              value={criminalIdentity.pureCharge ?? ""}
               onChange={(v) => setProfileForm({ ...profileForm, suspected_charge: v })}
-              placeholder="如：诈骗罪"
+              placeholder={caseData.agg_cause ? `${caseData.agg_cause}（材料聚合，待确认）` : "待补充"}
             />
           </Field>
-          <Field label={criminalPartyNameLabel(profileForm.current_stage)}>
+          <Field label={criminalIdentity.partyNameLabel}>
             <TextInput
-              value={profileForm.suspect_or_defendant_name}
+              value={profileForm.suspect_or_defendant_name ?? ""}
               onChange={(v) =>
                 setProfileForm({ ...profileForm, suspect_or_defendant_name: v })
               }
+              placeholder={defendants[0] ? `${defendants[0]}（材料聚合，待确认）` : "待补充"}
+            />
+          </Field>
+          <Field label="委托人">
+            <TextInput
+              value={profileForm.client_name ?? ""}
+              onChange={(v) => setProfileForm({ ...profileForm, client_name: v })}
+              placeholder="待补充；与犯罪嫌疑人/被告人分别记录"
             />
           </Field>
           <Field label="委托关系">
@@ -804,12 +922,12 @@ export function CriminalCasePanel({
               更多刑事信息（按需填写）
             </summary>
             <div className="grid grid-cols-1 gap-3 border-t border-border p-3 md:grid-cols-3">
-          <Field label="拘留日期">
+          {criminalIdentity.stageDate?.field !== "detention_date" && <Field label="拘留日期">
             <DateInput
               value={profileForm.detention_date}
               onChange={(v) => setProfileForm({ ...profileForm, detention_date: v })}
             />
-          </Field>
+          </Field>}
           <Field label="逮捕日期">
             <DateInput
               value={profileForm.arrest_date}
@@ -827,15 +945,15 @@ export function CriminalCasePanel({
               }
             />
           </Field>
-          <Field label="检察院受理">
+          {criminalIdentity.stageDate?.field !== "prosecution_received_date" && <Field label="审查起诉收案日期">
             <DateInput
               value={profileForm.prosecution_received_date}
               onChange={(v) =>
                 setProfileForm({ ...profileForm, prosecution_received_date: v })
               }
             />
-          </Field>
-          <Field label="一审受理">
+          </Field>}
+          {criminalIdentity.stageDate?.field !== "first_instance_accepted_date" && <Field label="一审受理日期">
             <DateInput
               value={profileForm.first_instance_accepted_date}
               onChange={(v) =>
@@ -845,8 +963,8 @@ export function CriminalCasePanel({
                 })
               }
             />
-          </Field>
-          <Field label="二审受理">
+          </Field>}
+          {criminalIdentity.stageDate?.field !== "second_instance_accepted_date" && <Field label="二审受理日期">
             <DateInput
               value={profileForm.second_instance_accepted_date}
               onChange={(v) =>
@@ -856,7 +974,7 @@ export function CriminalCasePanel({
                 })
               }
             />
-          </Field>
+          </Field>}
           <Field label="判决/裁定接收">
             <div className="grid grid-cols-2 gap-2">
               <DateInput
@@ -1153,6 +1271,9 @@ export function CriminalCasePanel({
           </Button>
         }
       >
+        <p className="mb-3 text-xs text-muted-foreground">
+          本页以案件通讯录记录为正式数据源。材料聚合联系人只有经人工确认后才会进入正式通讯录。
+        </p>
         {contactForm && (
           <ContactEditor
             form={contactForm}
@@ -1192,6 +1313,44 @@ export function CriminalCasePanel({
             </ListRow>
           ))}
         </ListState>
+        {pendingLegacyContacts.length > 0 && (
+          <details className="mt-4 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5">
+            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-foreground">
+              材料抽取的待确认联系人（{pendingLegacyContacts.length}）
+            </summary>
+            <div className="space-y-2 border-t border-amber-500/20 p-3">
+              <p className="text-xs text-muted-foreground">
+                以下内容来自旧 agg 聚合字段，不是正式通讯录；请核对后逐项确认录入。
+              </p>
+              {pendingLegacyContacts.map((candidate) => (
+                <div
+                  key={candidate.key}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground">
+                      {candidate.contactName}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {[candidate.sourceLabel, candidate.agencyName, candidate.contactRole, candidate.phone]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={savingList}
+                    onClick={() => void confirmLegacyContact(candidate)}
+                  >
+                    确认录入
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
       </Panel>
       )}
 
@@ -1338,51 +1497,14 @@ export function CriminalCasePanel({
   );
 }
 
-function ManagementOverview({
-  domain,
-  currentStage,
-  stages,
-  deadlines,
-  workItems,
-}: {
-  domain: "criminal" | "civil";
-  currentStage?: string | null;
-  stages: CaseStageItem[];
-  deadlines: CriminalDeadlineItem[];
-  workItems: CaseWorkItem[];
-}) {
-  const activeStage = stages.find((item) => item.status === "active") ?? stages[0];
-  const latestWork = workItems[0];
-  const reminderCandidates = [
-    ...stages.flatMap((item) => [item.reminder_at, item.due_at]),
-    ...deadlines.flatMap((item) => [item.reminder_at, item.effective_due_at]),
-  ].filter((value): value is string => Boolean(value));
-  reminderCandidates.sort((a, b) => a.localeCompare(b));
-  const nextAction = workItems.find((item) => item.next_action?.trim())?.next_action;
-
-  const rows = [
-    ["当前阶段", currentStage || activeStage?.stage_label || "待补充"],
-    ["最近进展", latestWork ? `${latestWork.occurred_at.slice(0, 10)} · ${latestWork.title}` : "暂无记录"],
-    ["下一步行动", nextAction || "待补充"],
-    ["最近提醒", reminderCandidates[0]?.slice(0, 16) || "暂无提醒"],
-  ];
-
+function FactTile({ label, value }: { label: string; value?: string | null }) {
   return (
-    <Panel title="案件概览">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {rows.map(([label, value]) => (
-          <div key={label} className="rounded-md border border-border bg-card px-3 py-3">
-            <p className="text-caption font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
-            <p className="mt-1 line-clamp-2 text-sm font-medium text-foreground">{value}</p>
-          </div>
-        ))}
-      </div>
-      {domain === "civil" && (
-        <p className="mt-3 text-xs text-muted-foreground">
-          民事案件的原告、被告、案由、诉讼请求及承办法院继续在上方案件基本信息中维护；本区只记录进展、待办和联络信息。
-        </p>
-      )}
-    </Panel>
+    <div className="rounded-md border border-border bg-card px-3 py-3">
+      <p className="text-caption font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </p>
+      <p className="mt-1 text-sm font-medium text-foreground">{value?.trim() || "—"}</p>
+    </div>
   );
 }
 

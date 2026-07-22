@@ -517,28 +517,49 @@ export function CaseView({
                   <div className="mt-5">
                     <CriminalCasePanel
                       caseId={selectedCase.id}
+                      caseData={selectedCase}
                       domain={domain}
                       onOpenSentencing={onOpenSentencing}
+                      basicInformation={
+                        <CaseSnapshotView
+                          caseData={selectedCase}
+                          documents={documents}
+                          isEditMode={isEditMode}
+                          domain={domain}
+                          contentMode="basic"
+                        />
+                      }
                     />
                   </div>
                 )}
               {!loading && !error && documents.length > 0 && selectedCase && (
                 <div className="space-y-5">
-                  {/* 整套案件信息(框架永远显示,字段空就 "—",作者 2026-05-23 晚十四) */}
+                  {(domain === "criminal" || domain === "civil") && (
+                    <CriminalCasePanel
+                      caseId={selectedCase.id}
+                      caseData={selectedCase}
+                      domain={domain}
+                      onOpenSentencing={onOpenSentencing}
+                      basicInformation={
+                        <CaseSnapshotView
+                          caseData={selectedCase}
+                          documents={documents}
+                          isEditMode={isEditMode}
+                          domain={domain}
+                          contentMode="basic"
+                        />
+                      }
+                    />
+                  )}
+
+                  {/* 四页签承接案件信息/待办/通讯录；外层只保留收费、时间轴等非重复画像。 */}
                   <CaseSnapshotView
                     caseData={selectedCase}
                     documents={documents}
                     isEditMode={isEditMode}
                     domain={domain}
+                    contentMode="supplemental"
                   />
-
-                  {(domain === "criminal" || domain === "civil") && (
-                    <CriminalCasePanel
-                      caseId={selectedCase.id}
-                      domain={domain}
-                      onOpenSentencing={onOpenSentencing}
-                    />
-                  )}
 
                   {/* 原文件(默认折叠) */}
                   <SourceFilesSection

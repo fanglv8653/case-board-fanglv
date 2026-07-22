@@ -1488,8 +1488,8 @@ async fn pull_feishu_sync_preview(
             .await
             .map_err(feishu_oauth_error)?;
         let records =
-            feishu::fetch_active_case_records(token.expose(), app_token, table_id).await?;
-        db::feishu_sync::complete_pull_preview(pool.inner(), &run_id, app_token, table_id, records)
+            feishu::fetch_active_case_management_records(token.expose(), app_token, table_id).await?;
+        db::feishu_sync::complete_pull_with_entities(pool.inner(), &run_id, app_token, table_id, records)
             .await
     }
     .await;

@@ -150,7 +150,7 @@ export function FeishuSyncPreview({
       const result = await pullFeishuSyncPreview();
       const next = await getFeishuSyncPreview();
       setData(next);
-      const message = `只读预演已更新：读取 ${result.remote_count} 件，已绑定 ${result.bound_count} 件，待绑定 ${result.pending_count} 件，拟更新 ${result.proposed_change_count} 项。`;
+      const message = `飞书单向同步完成：读取 ${result.remote_count} 件在办案件；同步进展 ${result.work_item_count} 条、阶段 ${result.stage_count} 条、联系人 ${result.contact_count} 条${result.archived_entity_count > 0 ? `，归档失效记录 ${result.archived_entity_count} 条` : ""}。待绑定 ${result.pending_count} 件。`;
       setLiveMessage(message);
       toast(message, "info");
       void getFeishuConnectionStatus().then(onConnectionStatusChange).catch(() => {});

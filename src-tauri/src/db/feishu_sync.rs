@@ -9,7 +9,7 @@ use sqlx::{FromRow, SqlitePool};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::feishu::FeishuRemoteCaseRecord;
+use crate::feishu::{FeishuCaseManagementRecords, FeishuRemoteCaseRecord};
 
 const ACTIVE_FILTER: &str = "在办";
 
@@ -20,6 +20,10 @@ pub struct FeishuPullResult {
     pub bound_count: usize,
     pub pending_count: usize,
     pub proposed_change_count: usize,
+    pub work_item_count: usize,
+    pub stage_count: usize,
+    pub contact_count: usize,
+    pub archived_entity_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -270,12 +274,13 @@ fn classify(local: Option<&str>, remote: Option<&str>) -> (&'static str, &'stati
     }
 }
 
-pub async fn complete_pull_preview(
+async fn complete_pull_internal(
     pool: &SqlitePool,
     run_id: &str,
     app_token: &str,
     table_id: &str,
     records: Vec<FeishuRemoteCaseRecord>,
+    management: Option<&FeishuCaseManagementRecords>,
 ) -> Result<FeishuPullResult, String> {
     let mapped = records
         .iter()
@@ -490,7 +495,28 @@ pub async fn complete_pull_preview(
                 .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 归档过期待绑定记录失败".to_string())?;
         }
     }
-    let counts = json!({"remote": mapped.len(), "bound": bound_count, "pending": pending_count, "proposed_changes": proposed_change_count});
+    let entity_counts = if let Some(bundle) = management {
+        crate::db::feishu_entities::import_management_records(
+            &mut tx,
+            run_id,
+            app_token,
+            table_id,
+            bundle,
+        )
+        .await?
+    } else {
+        Default::default()
+    };
+    let counts = json!({
+        "remote": mapped.len(),
+        "bound": bound_count,
+        "pending": pending_count,
+        "proposed_changes": proposed_change_count,
+        "work_items": entity_counts.work_items,
+        "stages": entity_counts.stages,
+        "contacts": entity_counts.contacts,
+        "archived_entities": entity_counts.archived,
+    });
     sqlx::query("UPDATE feishu_sync_runs SET status='succeeded',completed_at=datetime('now'),counts_json=?2,error_code=NULL,error_message=NULL WHERE id=?1")
         .bind(run_id).bind(counts.to_string()).execute(&mut *tx).await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法完成预演运行记录".to_string())?;
@@ -503,7 +529,40 @@ pub async fn complete_pull_preview(
         bound_count,
         pending_count,
         proposed_change_count,
+        work_item_count: entity_counts.work_items,
+        stage_count: entity_counts.stages,
+        contact_count: entity_counts.contacts,
+        archived_entity_count: entity_counts.archived,
     })
+}
+
+pub async fn complete_pull_preview(
+    pool: &SqlitePool,
+    run_id: &str,
+    app_token: &str,
+    table_id: &str,
+    records: Vec<FeishuRemoteCaseRecord>,
+) -> Result<FeishuPullResult, String> {
+    complete_pull_internal(pool, run_id, app_token, table_id, records, None).await
+}
+
+pub async fn complete_pull_with_entities(
+    pool: &SqlitePool,
+    run_id: &str,
+    app_token: &str,
+    table_id: &str,
+    bundle: FeishuCaseManagementRecords,
+) -> Result<FeishuPullResult, String> {
+    let records = bundle.cases.clone();
+    complete_pull_internal(
+        pool,
+        run_id,
+        app_token,
+        table_id,
+        records,
+        Some(&bundle),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -1018,6 +1077,149 @@ pub async fn restore_case(pool: &SqlitePool, inbox_id: &str) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn active_case_record() -> FeishuRemoteCaseRecord {
+        FeishuRemoteCaseRecord {
+            record_id: "remote-case-1".into(),
+            fields: json!({
+                "案件名称": "陈某诈骗案",
+                "类型": "刑事诉讼",
+                "案号": "（2026）粤01刑初1号",
+                "☑状态": "在办",
+                "案件进度": [{"record_ids": ["progress-1"]}],
+                "☑️阶段表": [{"record_ids": ["stage-1"]}],
+                "案件联系表": [{"record_ids": ["contact-1"]}]
+            }),
+            last_modified_time: Some("1784518994000".into()),
+        }
+    }
+
+    fn management_bundle(include_children: bool) -> FeishuCaseManagementRecords {
+        let mut bundle = FeishuCaseManagementRecords {
+            cases: vec![active_case_record()],
+            progress: Vec::new(),
+            stages: Vec::new(),
+            contacts: Vec::new(),
+        };
+        if include_children {
+            bundle.progress.push(FeishuRemoteCaseRecord {
+                record_id: "progress-1".into(),
+                fields: json!({
+                    "所属案件": {"link_record_ids": ["remote-case-1"]},
+                    "进度日期": 1784682000000_i64,
+                    "进度填写区": [{"text": "已与承办法官沟通"}],
+                    "进展类型": "沟通",
+                    "小时": 1,
+                    "分钟": 15
+                }),
+                last_modified_time: Some("1784682000000".into()),
+            });
+            bundle.stages.push(FeishuRemoteCaseRecord {
+                record_id: "stage-1".into(),
+                fields: json!({
+                    "所属案件": {"link_record_ids": ["remote-case-1"]},
+                    "程序": "一审",
+                    "阶段": "审判",
+                    "开始时间": 1784595600000_i64,
+                    "提醒时间": {"type": 5, "value": [1784768400000_i64]},
+                    "🔁【状态】": {"type": 1, "value": [{"text": "进行中"}]}
+                }),
+                last_modified_time: Some("1784682000000".into()),
+            });
+            bundle.contacts.push(FeishuRemoteCaseRecord {
+                record_id: "contact-1".into(),
+                fields: json!({
+                    "🚩案件总表": {"link_record_ids": ["remote-case-1"]},
+                    "审判机关": "广州市中级人民法院",
+                    "法官": [{"text": "张法官"}],
+                    "书记员": [{"text": "李书记员"}],
+                    "案号": "（2026）粤01刑初1号",
+                    "案件查询码/备注": "查询码123"
+                }),
+                last_modified_time: Some("1784682000000".into()),
+            });
+        }
+        bundle
+    }
+
+    async fn inbound_fixture() -> SqlitePool {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        sqlx::query("INSERT INTO cases (id,name,case_type,source_folder,case_no,legal_domain,management_status,display_name_override) VALUES ('case-1','20260721陈某诈骗案','诉讼','C:/cases/20260721陈某诈骗案','（2026）粤01刑初1号','criminal','active','陈某诈骗案')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO feishu_sync_links (id,entity_type,local_entity_id,app_token,table_id,record_id,link_source,status,confirmed_at) VALUES ('link-1','case','case-1','app','table','remote-case-1','manual','active',datetime('now'))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO case_work_items (id,case_id,occurred_at,work_type,title,content,source) VALUES ('manual-work','case-1','2026-07-01','other','人工记录','不得覆盖','manual')")
+            .execute(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn inbound_entities_are_idempotent_and_manual_rows_are_preserved() {
+        let pool = inbound_fixture().await;
+        for _ in 0..2 {
+            let run_id = start_pull_run(&pool).await.unwrap();
+            let result = complete_pull_with_entities(
+                &pool,
+                &run_id,
+                "app",
+                "table",
+                management_bundle(true),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.work_item_count, 1);
+            assert_eq!(result.stage_count, 1);
+            assert_eq!(result.contact_count, 2);
+        }
+        let work_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_work_items")
+            .fetch_one(&pool).await.unwrap();
+        let stage_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_stage_items")
+            .fetch_one(&pool).await.unwrap();
+        let contact_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_agency_contacts")
+            .fetch_one(&pool).await.unwrap();
+        let manual_content: String = sqlx::query_scalar("SELECT content FROM case_work_items WHERE id='manual-work'")
+            .fetch_one(&pool).await.unwrap();
+        let case_fields: (String, String) = sqlx::query_as("SELECT name,display_name_override FROM cases WHERE id='case-1'")
+            .fetch_one(&pool).await.unwrap();
+        let unchanged_audits: i64 = sqlx::query_scalar("SELECT count(*) FROM feishu_sync_entity_audits WHERE action='unchanged'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!((work_count, stage_count, contact_count), (2, 1, 2));
+        assert_eq!(manual_content, "不得覆盖");
+        assert_eq!(case_fields, ("20260721陈某诈骗案".into(), "陈某诈骗案".into()));
+        assert_eq!(unchanged_audits, 4);
+    }
+
+    #[tokio::test]
+    async fn missing_remote_entities_are_soft_archived() {
+        let pool = inbound_fixture().await;
+        let first = start_pull_run(&pool).await.unwrap();
+        complete_pull_with_entities(&pool, &first, "app", "table", management_bundle(true))
+            .await.unwrap();
+        let second = start_pull_run(&pool).await.unwrap();
+        let result = complete_pull_with_entities(&pool, &second, "app", "table", management_bundle(false))
+            .await.unwrap();
+        let visible_remote: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM case_work_items WHERE external_source='feishu' AND deleted_at IS NULL) + (SELECT count(*) FROM case_stage_items WHERE external_source='feishu' AND deleted_at IS NULL) + (SELECT count(*) FROM case_agency_contacts WHERE external_source='feishu' AND deleted_at IS NULL)")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(result.archived_entity_count, 4);
+        assert_eq!(visible_remote, 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_child_rolls_back_preview_and_entity_transaction() {
+        let pool = inbound_fixture().await;
+        let run_id = start_pull_run(&pool).await.unwrap();
+        let mut bundle = management_bundle(true);
+        bundle.progress[0].fields.as_object_mut().unwrap().remove("进度日期");
+        let error = complete_pull_with_entities(&pool, &run_id, "app", "table", bundle)
+            .await.unwrap_err();
+        assert!(error.contains("缺少进度日期"));
+        let snapshot_count: i64 = sqlx::query_scalar("SELECT count(*) FROM feishu_sync_snapshots")
+            .fetch_one(&pool).await.unwrap();
+        let remote_entity_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_work_items WHERE external_source='feishu'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(snapshot_count, 0);
+        assert_eq!(remote_entity_count, 0);
+    }
 
     #[test]
     fn date_prefix_is_removed_only_for_matching() {

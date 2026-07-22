@@ -39,6 +39,7 @@ pub mod document_tags;
 pub mod documents;
 pub mod income_records;
 pub mod feishu_sync;
+pub mod feishu_entities;
 pub mod lawyer_profiles;
 pub mod metrics;
 pub mod payments;

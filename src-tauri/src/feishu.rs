@@ -11,6 +11,7 @@
 //! 找 `lark-cli`(Windows 会自动匹配 `lark-cli.exe`);也可在设置里填 CLI 全路径。
 
 use std::path::Path;
+use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,37 @@ pub struct FeishuRemoteCaseRecord {
     pub fields: Value,
     pub last_modified_time: Option<String>,
 }
+
+/// 飞书案件管理四表的只读抓取结果。
+///
+/// 三张子表只包含“在办”案件关联字段中明确列出的 record_id；本结构不触发任何数据库写入。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuCaseManagementRecords {
+    pub cases: Vec<FeishuRemoteCaseRecord>,
+    pub progress: Vec<FeishuRemoteCaseRecord>,
+    pub stages: Vec<FeishuRemoteCaseRecord>,
+    pub contacts: Vec<FeishuRemoteCaseRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct BitableFieldMetadata {
+    field_name: String,
+    field_type: Option<i64>,
+    ui_type: Option<String>,
+    property: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagementTableIds {
+    progress: String,
+    stages: String,
+    contacts: String,
+}
+
+const PROGRESS_LINK_FIELD: &str = "案件进度";
+const STAGE_LINK_FIELD: &str = "☑️阶段表";
+const CONTACT_LINK_FIELD: &str = "案件联系表";
+const BATCH_GET_LIMIT: usize = 100;
 
 /// 计算 lark-cli 可执行文件:优先用设置里填的全路径,否则按平台兜底。
 pub fn lark_bin(settings: &Settings) -> String {
@@ -326,6 +358,143 @@ fn parse_field_names(value: &Value) -> Result<(Vec<String>, Option<String>), Str
     Ok((names, has_more.then_some(page_token).flatten()))
 }
 
+fn parse_field_metadata(
+    value: &Value,
+) -> Result<(Vec<BitableFieldMetadata>, Option<String>), String> {
+    let data = response_data(value);
+    let items = data
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 飞书字段列表缺少 data.items".to_string())?;
+    let mut fields = Vec::with_capacity(items.len());
+    for item in items {
+        let field_name = item
+            .get("field_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "FEISHU_RESPONSE_INVALID: 飞书字段列表包含无效 field_name".to_string()
+            })?;
+        fields.push(BitableFieldMetadata {
+            field_name: field_name.to_string(),
+            field_type: item.get("type").and_then(Value::as_i64),
+            ui_type: item
+                .get("ui_type")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            property: item.get("property").cloned().unwrap_or(Value::Null),
+        });
+    }
+    let page_token = data
+        .get("page_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let has_more = data
+        .get("has_more")
+        .and_then(Value::as_bool)
+        .unwrap_or(page_token.is_some());
+    if has_more && page_token.is_none() {
+        return Err(
+            "FEISHU_RESPONSE_INVALID: 飞书字段列表声明 has_more 但缺少 page_token".to_string(),
+        );
+    }
+    Ok((fields, has_more.then_some(page_token).flatten()))
+}
+
+fn duplex_link_table_id(
+    fields: &[BitableFieldMetadata],
+    field_name: &str,
+) -> Result<String, String> {
+    let matches: Vec<&BitableFieldMetadata> = fields
+        .iter()
+        .filter(|field| field.field_name == field_name)
+        .collect();
+    let [field] = matches.as_slice() else {
+        return Err(format!(
+            "FEISHU_TABLE_SCHEMA_MISMATCH: 案件总表必须且只能包含一个“{field_name}”关联字段"
+        ));
+    };
+    if field.field_type != Some(21) || field.ui_type.as_deref() != Some("DuplexLink") {
+        return Err(format!(
+            "FEISHU_TABLE_SCHEMA_MISMATCH: “{field_name}”不是双向关联字段"
+        ));
+    }
+    let table_id = field
+        .property
+        .get("table_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!("FEISHU_TABLE_SCHEMA_MISMATCH: “{field_name}”缺少关联 table_id")
+        })?;
+    validate_bitable_id(table_id, &format!("{field_name} 关联 Table ID"))?;
+    Ok(table_id.to_string())
+}
+
+fn discover_management_table_ids(
+    fields: &[BitableFieldMetadata],
+) -> Result<ManagementTableIds, String> {
+    let ids = ManagementTableIds {
+        progress: duplex_link_table_id(fields, PROGRESS_LINK_FIELD)?,
+        stages: duplex_link_table_id(fields, STAGE_LINK_FIELD)?,
+        contacts: duplex_link_table_id(fields, CONTACT_LINK_FIELD)?,
+    };
+    let unique: HashSet<&str> = [
+        ids.progress.as_str(),
+        ids.stages.as_str(),
+        ids.contacts.as_str(),
+    ]
+    .into_iter()
+    .collect();
+    if unique.len() != 3 {
+        return Err(
+            "FEISHU_TABLE_SCHEMA_MISMATCH: 三个案件管理关联字段不能指向同一数据表"
+                .to_string(),
+        );
+    }
+    Ok(ids)
+}
+
+fn validate_required_fields(
+    fields: &[BitableFieldMetadata],
+    table_label: &str,
+    required: &[&str],
+) -> Result<(), String> {
+    let names: HashSet<&str> = fields.iter().map(|field| field.field_name.as_str()).collect();
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|name| !names.contains(name))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "FEISHU_TABLE_SCHEMA_MISMATCH: {table_label}缺少字段：{}",
+            missing.join("、")
+        ))
+    }
+}
+
+fn validate_back_link(
+    fields: &[BitableFieldMetadata],
+    field_name: &str,
+    case_table_id: &str,
+    table_label: &str,
+) -> Result<(), String> {
+    let linked_table_id = duplex_link_table_id(fields, field_name)?;
+    if linked_table_id != case_table_id {
+        return Err(format!(
+            "FEISHU_TABLE_SCHEMA_MISMATCH: {table_label}的“{field_name}”未关联当前案件总表"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_case_table_fields(field_names: &[String]) -> Result<String, String> {
     let has_case_name = field_names.iter().any(|name| name == "案件名称");
     let status_field = field_names
@@ -392,6 +561,197 @@ async fn validate_case_table_schema(
     Err("FEISHU_RESPONSE_INVALID: 飞书字段列表分页超过安全上限".to_string())
 }
 
+async fn fetch_table_field_metadata(
+    client: &reqwest::Client,
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+) -> Result<Vec<BitableFieldMetadata>, String> {
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+    );
+    let mut page_token: Option<String> = None;
+    let mut fields = Vec::new();
+    for _ in 0..BITABLE_FIELD_MAX_PAGES {
+        let mut query = vec![("page_size", "100".to_string())];
+        if let Some(token) = page_token.as_ref() {
+            query.push(("page_token", token.clone()));
+        }
+        let response = client
+            .get(&endpoint)
+            .bearer_auth(access_token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 读取飞书字段结构超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?;
+        let value = read_bitable_response(response).await?;
+        let (mut page_fields, next_page_token) = parse_field_metadata(&value)?;
+        fields.append(&mut page_fields);
+        page_token = next_page_token;
+        if page_token.is_none() {
+            return Ok(fields);
+        }
+    }
+    Err("FEISHU_RESPONSE_INVALID: 飞书字段列表分页超过安全上限".to_string())
+}
+
+fn collect_record_ids(value: &Value, output: &mut BTreeSet<String>) -> Result<bool, String> {
+    match value {
+        Value::Array(items) => {
+            let mut found = false;
+            for item in items {
+                found |= collect_record_ids(item, output)?;
+            }
+            Ok(found)
+        }
+        Value::Object(object) => {
+            let mut found = false;
+            for key in ["record_ids", "link_record_ids"] {
+                if let Some(ids) = object.get(key) {
+                    let ids = ids.as_array().ok_or_else(|| {
+                        "FEISHU_SCHEMA_CHANGED: 关联字段 record_ids 不是数组".to_string()
+                    })?;
+                    for id in ids {
+                        let id = id.as_str().map(str::trim).filter(|id| !id.is_empty()).ok_or_else(
+                            || "FEISHU_SCHEMA_CHANGED: 关联字段包含无效 record_id".to_string(),
+                        )?;
+                        validate_bitable_id(id, "Record ID")?;
+                        output.insert(id.to_string());
+                    }
+                    found = true;
+                }
+            }
+            Ok(found)
+        }
+        Value::Null => Ok(false),
+        _ => Err("FEISHU_SCHEMA_CHANGED: 关联字段值不是受支持的链接结构".to_string()),
+    }
+}
+
+fn related_record_ids(
+    records: &[FeishuRemoteCaseRecord],
+    field_name: &str,
+) -> Result<Vec<String>, String> {
+    let mut ids = BTreeSet::new();
+    for record in records {
+        let fields = record.fields.as_object().ok_or_else(|| {
+            "FEISHU_SCHEMA_CHANGED: 飞书案件记录 fields 不是对象".to_string()
+        })?;
+        let Some(value) = fields.get(field_name) else {
+            continue;
+        };
+        let mut record_ids = BTreeSet::new();
+        let found_container = collect_record_ids(value, &mut record_ids)?;
+        if !found_container {
+            let empty_relation = match value {
+                Value::Null => true,
+                Value::Array(items) => items.is_empty()
+                    || items.iter().all(|item| {
+                        item.get("text_arr")
+                            .and_then(Value::as_array)
+                            .is_some_and(Vec::is_empty)
+                    }),
+                _ => false,
+            };
+            if !empty_relation {
+                return Err(format!(
+                    "FEISHU_SCHEMA_CHANGED: “{field_name}”缺少可读取的 record_ids"
+                ));
+            }
+        }
+        ids.extend(record_ids);
+    }
+    Ok(ids.into_iter().collect())
+}
+
+fn parse_batch_get_records(value: &Value) -> Result<Vec<FeishuRemoteCaseRecord>, String> {
+    let data = response_data(value);
+    let records = data
+        .get("records")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "FEISHU_RESPONSE_INVALID: 飞书批量读取响应缺少 data.records".to_string()
+        })?;
+    let mut parsed = Vec::with_capacity(records.len());
+    for item in records {
+        let record_id = item
+            .get("record_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "FEISHU_SCHEMA_CHANGED: 飞书批量读取记录缺少 record_id".to_string()
+            })?;
+        let fields = item.get("fields").cloned().unwrap_or(Value::Null);
+        if !fields.is_object() {
+            return Err("FEISHU_SCHEMA_CHANGED: 飞书批量读取记录 fields 不是对象".to_string());
+        }
+        parsed.push(FeishuRemoteCaseRecord {
+            record_id: record_id.to_string(),
+            fields,
+            last_modified_time: value_as_time_string(item.get("last_modified_time")),
+        });
+    }
+    Ok(parsed)
+}
+
+async fn batch_get_records(
+    client: &reqwest::Client,
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+    record_ids: &[String],
+) -> Result<Vec<FeishuRemoteCaseRecord>, String> {
+    if record_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_get"
+    );
+    let mut records = Vec::with_capacity(record_ids.len());
+    for chunk in record_ids.chunks(BATCH_GET_LIMIT) {
+        let response = client
+            .post(&endpoint)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({
+                "automatic_fields": true,
+                "record_ids": chunk,
+                "user_id_type": "open_id",
+                "with_shared_url": false
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 批量读取飞书关联记录超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?;
+        let value = read_bitable_response(response).await?;
+        let chunk_records = parse_batch_get_records(&value)?;
+        let requested: HashSet<&str> = chunk.iter().map(String::as_str).collect();
+        let returned: HashSet<&str> = chunk_records
+            .iter()
+            .map(|record| record.record_id.as_str())
+            .collect();
+        if returned.len() != chunk_records.len() || returned != requested {
+            return Err(
+                "FEISHU_RESPONSE_INVALID: 飞书批量读取未完整返回全部关联 record_id"
+                    .to_string(),
+            );
+        }
+        records.extend(chunk_records);
+    }
+    Ok(records)
+}
+
 /// 通过飞书开放平台原生 HTTP API 拉取“状态=在办”的案件。
 ///
 /// access token 仅存在于 Rust 内存和 Windows 凭据管理器，绝不进入命令行、SQLite 或日志。
@@ -452,6 +812,136 @@ pub async fn fetch_active_case_records(
     }
 
     Err("FEISHU_RESPONSE_INVALID: 飞书记录分页超过安全上限".to_string())
+}
+
+/// 只读抓取“在办案件 + 三张关联明细表”。
+///
+/// 子表 ID 从案件总表的 DuplexLink 字段元数据动态发现；禁止硬编码。三张子表均会先
+/// 校验真实字段和回链关系，再按在办案件关联的 record_id 使用只读 batch_get 获取。
+/// 任一发现、校验或批次失败都会令整次调用失败，本函数不接触数据库。
+pub async fn fetch_active_case_management_records(
+    access_token: &str,
+    app_token: &str,
+    case_table_id: &str,
+) -> Result<FeishuCaseManagementRecords, String> {
+    validate_bitable_id(app_token, "App Token")?;
+    validate_bitable_id(case_table_id, "案件总表 Table ID")?;
+    if access_token.trim().is_empty() {
+        return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "FEISHU_NETWORK_ERROR: 无法初始化网络客户端".to_string())?;
+
+    let case_fields = fetch_table_field_metadata(
+        &client,
+        access_token,
+        app_token,
+        case_table_id,
+    )
+    .await?;
+    validate_case_table_fields(
+        &case_fields
+            .iter()
+            .map(|field| field.field_name.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    let table_ids = discover_management_table_ids(&case_fields)?;
+
+    let progress_fields = fetch_table_field_metadata(
+        &client,
+        access_token,
+        app_token,
+        &table_ids.progress,
+    )
+    .await?;
+    validate_required_fields(
+        &progress_fields,
+        "进度表",
+        &["所属案件", "进度日期", "进度填写区", "进展类型"],
+    )?;
+    validate_back_link(&progress_fields, "所属案件", case_table_id, "进度表")?;
+
+    let stage_fields = fetch_table_field_metadata(
+        &client,
+        access_token,
+        app_token,
+        &table_ids.stages,
+    )
+    .await?;
+    validate_required_fields(
+        &stage_fields,
+        "阶段表",
+        &["所属案件", "程序", "阶段", "开始时间"],
+    )?;
+    validate_back_link(&stage_fields, "所属案件", case_table_id, "阶段表")?;
+
+    let contact_fields = fetch_table_field_metadata(
+        &client,
+        access_token,
+        app_token,
+        &table_ids.contacts,
+    )
+    .await?;
+    validate_required_fields(
+        &contact_fields,
+        "案件联系表",
+        &[
+            "🚩案件总表",
+            "侦查机关",
+            "侦办人",
+            "审查起诉",
+            "检察官",
+            "审判机关",
+            "案号",
+            "法官",
+        ],
+    )?;
+    validate_back_link(
+        &contact_fields,
+        "🚩案件总表",
+        case_table_id,
+        "案件联系表",
+    )?;
+
+    let cases = fetch_active_case_records(access_token, app_token, case_table_id).await?;
+    let progress_ids = related_record_ids(&cases, PROGRESS_LINK_FIELD)?;
+    let stage_ids = related_record_ids(&cases, STAGE_LINK_FIELD)?;
+    let contact_ids = related_record_ids(&cases, CONTACT_LINK_FIELD)?;
+
+    // 同一 Base 的读取串行执行，避免飞书按文档维度串行计算时发生并发阻塞。
+    let progress = batch_get_records(
+        &client,
+        access_token,
+        app_token,
+        &table_ids.progress,
+        &progress_ids,
+    )
+    .await?;
+    let stages = batch_get_records(
+        &client,
+        access_token,
+        app_token,
+        &table_ids.stages,
+        &stage_ids,
+    )
+    .await?;
+    let contacts = batch_get_records(
+        &client,
+        access_token,
+        app_token,
+        &table_ids.contacts,
+        &contact_ids,
+    )
+    .await?;
+
+    Ok(FeishuCaseManagementRecords {
+        cases,
+        progress,
+        stages,
+        contacts,
+    })
 }
 
 fn clean_required(value: Option<&str>) -> Option<&str> {
@@ -774,5 +1264,132 @@ mod tests {
         let (names, next) = parse_field_names(&response).unwrap();
         assert_eq!(names, ["案件名称", "☑状态"]);
         assert_eq!(next.as_deref(), Some("next-page"));
+    }
+
+    #[test]
+    fn discovers_management_tables_only_from_duplex_link_metadata() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {
+                "items": [
+                    {"field_name": "案件进度", "type": 21, "ui_type": "DuplexLink", "property": {"table_id": "tbl_progress"}},
+                    {"field_name": "☑️阶段表", "type": 21, "ui_type": "DuplexLink", "property": {"table_id": "tbl_stages"}},
+                    {"field_name": "案件联系表", "type": 21, "ui_type": "DuplexLink", "property": {"table_id": "tbl_contacts"}}
+                ],
+                "has_more": false
+            }
+        });
+        let (fields, next) = parse_field_metadata(&response).unwrap();
+        let ids = discover_management_table_ids(&fields).unwrap();
+        assert_eq!(
+            ids,
+            ManagementTableIds {
+                progress: "tbl_progress".into(),
+                stages: "tbl_stages".into(),
+                contacts: "tbl_contacts".into(),
+            }
+        );
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn rejects_missing_or_non_duplex_management_links() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {
+                "items": [
+                    {"field_name": "案件进度", "type": 1, "ui_type": "Text", "property": {}},
+                    {"field_name": "☑️阶段表", "type": 21, "ui_type": "DuplexLink", "property": {"table_id": "tbl_stages"}}
+                ],
+                "has_more": false
+            }
+        });
+        let (fields, _) = parse_field_metadata(&response).unwrap();
+        let error = discover_management_table_ids(&fields).unwrap_err();
+        assert!(error.starts_with("FEISHU_TABLE_SCHEMA_MISMATCH:"));
+    }
+
+    #[test]
+    fn collects_and_deduplicates_only_explicit_related_record_ids() {
+        let cases = vec![
+            FeishuRemoteCaseRecord {
+                record_id: "case-1".into(),
+                fields: serde_json::json!({
+                    "案件进度": [{"record_ids": ["rec-b", "rec-a"]}],
+                    "☑️阶段表": [{"table_id": "tbl_stage", "text_arr": [], "type": "text"}]
+                }),
+                last_modified_time: None,
+            },
+            FeishuRemoteCaseRecord {
+                record_id: "case-2".into(),
+                fields: serde_json::json!({
+                    "案件进度": {"link_record_ids": ["rec-a", "rec-c"]}
+                }),
+                last_modified_time: None,
+            },
+        ];
+        assert_eq!(
+            related_record_ids(&cases, "案件进度").unwrap(),
+            ["rec-a", "rec-b", "rec-c"]
+        );
+        assert!(related_record_ids(&cases, "☑️阶段表")
+            .unwrap()
+            .is_empty());
+        assert!(related_record_ids(&cases, "案件联系表")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_link_values_instead_of_guessing() {
+        let cases = vec![FeishuRemoteCaseRecord {
+            record_id: "case-1".into(),
+            fields: serde_json::json!({"案件进度": "rec-should-not-be-guessed"}),
+            last_modified_time: None,
+        }];
+        let error = related_record_ids(&cases, "案件进度").unwrap_err();
+        assert!(error.starts_with("FEISHU_SCHEMA_CHANGED:"));
+    }
+
+    #[test]
+    fn parses_batch_get_records_and_requires_records_container() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {"records": [{
+                "record_id": "rec1",
+                "fields": {"进度填写区": "只读内容"},
+                "last_modified_time": 1784518994000_i64
+            }]}
+        });
+        let records = parse_batch_get_records(&response).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_id, "rec1");
+        assert_eq!(
+            records[0].last_modified_time.as_deref(),
+            Some("1784518994000")
+        );
+
+        let invalid = serde_json::json!({"code": 0, "data": {"items": []}});
+        assert!(parse_batch_get_records(&invalid)
+            .unwrap_err()
+            .starts_with("FEISHU_RESPONSE_INVALID:"));
+    }
+
+    #[test]
+    fn validates_child_table_back_link_to_current_case_table() {
+        let response = serde_json::json!({
+            "code": 0,
+            "data": {"items": [{
+                "field_name": "所属案件",
+                "type": 21,
+                "ui_type": "DuplexLink",
+                "property": {"table_id": "tbl_case"}
+            }], "has_more": false}
+        });
+        let (fields, _) = parse_field_metadata(&response).unwrap();
+        validate_back_link(&fields, "所属案件", "tbl_case", "进度表").unwrap();
+        assert!(validate_back_link(&fields, "所属案件", "tbl_other", "进度表")
+            .unwrap_err()
+            .starts_with("FEISHU_TABLE_SCHEMA_MISMATCH:"));
     }
 }

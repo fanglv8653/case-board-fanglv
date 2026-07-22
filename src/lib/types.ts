@@ -1357,6 +1357,10 @@ export interface FeishuPullResult {
   bound_count: number;
   pending_count: number;
   proposed_change_count: number;
+  work_item_count: number;
+  stage_count: number;
+  contact_count: number;
+  archived_entity_count: number;
 }
 
 // ===== 法院一张网在线立案(整合外部贡献 PR #8) =====

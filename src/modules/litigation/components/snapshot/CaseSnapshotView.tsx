@@ -60,12 +60,15 @@ export function CaseSnapshotView({
   documents,
   isEditMode = false,
   domain = "civil",
+  contentMode = "full",
 }: {
   caseData: Case;
   documents: Document[];
   isEditMode?: boolean;
   /** 案件领域(2026-06-17)。"criminal" = 刑事 tab:部分标签按刑事适配(罪名/办案机关/被告人…)。 */
   domain?: "civil" | "criminal";
+  /** 四页签内渲染基本信息，外层只渲染收费/时间轴等补充画像。 */
+  contentMode?: "full" | "basic" | "supplemental";
 }) {
   // 刑事 tab 只做「标签级」适配(老板:先复刻框架 + 能做的轻适配,不深改字段管线)。
   const isCriminal = domain === "criminal";
@@ -221,15 +224,15 @@ export function CaseSnapshotView({
 
   /* ---------- 6 张卡片渲染器,按 ov.resolveOrder 顺序排版 ---------- */
   const defaultSectionOrder = [
-    TITLES.BASIC,
-    TITLES.TODOS,
+    ...(contentMode !== "supplemental" ? [TITLES.BASIC] : []),
+    ...(contentMode === "full" ? [TITLES.TODOS] : []),
     // ≥2 个审级才显示历程卡(单审级时与基本信息重复);紧跟基本信息,最新审级在上
-    ...(instances.length >= 2 ? [TITLES.INSTANCES] : []),
-    TITLES.COURT,
-    TITLES.PARTY,
-    TITLES.FEE,
-    TITLES.TIMELINE,
-    ...(snap.preservations.length > 0 ? [TITLES.PRESERVATION] : []),
+    ...(contentMode !== "basic" && instances.length >= 2 ? [TITLES.INSTANCES] : []),
+    ...(contentMode === "full" ? [TITLES.COURT, TITLES.PARTY] : []),
+    ...(contentMode !== "basic" ? [TITLES.FEE, TITLES.TIMELINE] : []),
+    ...(contentMode !== "basic" && snap.preservations.length > 0
+      ? [TITLES.PRESERVATION]
+      : []),
   ];
 
   const sections: SectionRenderer[] = [
@@ -253,39 +256,43 @@ export function CaseSnapshotView({
             {executionCaseNo && (
               <FactRow label="审判案号" value={trialCaseNo} mono {...edit("agg_case_no")} />
             )}
-            <FactRow label="案件类型" value={snap.case_type} />
+            {!isCriminal && <FactRow label="案件类型" value={snap.case_type} />}
             <FactRow label="案件名称" value={getCaseDisplayName(caseData)} />
-            <FactRow label="承办机关" value={snap.court} {...edit("agg_court")} />
-            <FactRow
-              label="当前阶段"
-              value={snap.case_stage}
-              pill={!isEditMode}
-              {...edit("case_stage")}
-            />
+            <FactRow label="案件领域" value={isCriminal ? "刑事" : "民事"} />
+            {!isCriminal && (
+              <FactRow label="承办机关" value={snap.court} {...edit("agg_court")} />
+            )}
+            {!isCriminal && (
+              <FactRow
+                label="当前阶段"
+                value={snap.case_stage}
+                pill={!isEditMode}
+                {...edit("case_stage")}
+              />
+            )}
             <FactRow
               label="案件状态"
               value={snap.case_status}
               pill={!isEditMode}
               {...edit("agg_status_text")}
             />
-            <FactRow
-              label={isCriminal ? "罪名 / 案由" : "案由"}
-              value={snap.cause}
-              {...edit("agg_cause")}
-            />
-            <FactRow label="委托人" value={snap.plaintiffs[0] || null} />
-            <FactRow
-              label={isCriminal ? "被告人 / 对方" : "对方当事人"}
-              value={snap.defendants[0] || null}
-            />
-            <FactRow label="立案日期" value={snap.filed_at} mono {...edit("agg_filed_at")} />
-            <FactRow
-              label="预计结案日期"
-              value={snap.expected_close_at}
-              mono
-              {...edit("expected_close_at")}
-            />
-            <FactRow label="备注" value={snap.case_note} {...edit("case_note")} />
+            {!isCriminal && (
+              <FactRow label="案由" value={snap.cause} {...edit("agg_cause")} />
+            )}
+            {!isCriminal && <FactRow label="原告 / 申请人" value={snap.plaintiffs[0] || null} />}
+            {!isCriminal && <FactRow label="被告 / 被申请人" value={snap.defendants[0] || null} />}
+            {!isCriminal && (
+              <FactRow label="立案日期" value={snap.filed_at} mono {...edit("agg_filed_at")} />
+            )}
+            {!isCriminal && (
+              <FactRow
+                label="预计结案日期"
+                value={snap.expected_close_at}
+                mono
+                {...edit("expected_close_at")}
+              />
+            )}
+            {!isCriminal && <FactRow label="备注" value={snap.case_note} {...edit("case_note")} />}
           </dl>
         </CardSection>
       ),
@@ -574,7 +581,7 @@ export function CaseSnapshotView({
       )}
 
       {/* Hero:案由 + 案号 + 法院 + vs banner + 关键数字 */}
-      <section className="rounded-lg border border-border bg-card px-6 py-5 shadow-sm">
+      {contentMode === "full" && <section className="rounded-lg border border-border bg-card px-6 py-5 shadow-sm">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-semibold text-foreground">
             {isEditMode ? (
@@ -734,7 +741,7 @@ export function CaseSnapshotView({
             value={snap.judges.join("、") || null}
           />
         </div>
-      </section>
+      </section>}
 
       {/* 6 张卡片打包成 sortable list — 编辑模式拖把手才能拖,普通模式仅顺序应用 */}
       <SortableCards
