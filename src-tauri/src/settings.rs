@@ -20,12 +20,25 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::chat::mcp_bridge::McpServerConfig;
 use crate::chat::mcp_credentials::McpStoredServer;
 use crate::db::app_data_dir;
+
+static SETTINGS_READ_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn with_settings_read_migration_lock<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = SETTINGS_READ_MIGRATION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "SETTINGS_MIGRATION_LOCK_POISONED".to_string())?;
+    operation()
+}
 
 /// 用户配置。字段全部 Option<String>,因为初始全是空的。
 ///
@@ -1026,22 +1039,24 @@ fn migrate_legacy_settings_before_current_with_backend<B: crate::credentials::Cr
 /// 读取设置。文件不存在时返回 `Settings::default()`。
 /// 静态 provider 凭据永不进入返回值；调用方必须使用 credentials resolver。
 pub fn read_settings() -> Result<Settings, String> {
-    let mut backend = crate::credentials::SystemCredentialBackend;
-    if let Some((current_dir, legacy_dir)) =
-        crate::db::default_data_dirs_if_unoverridden().map_err(|error| error.to_string())?
-    {
-        migrate_legacy_settings_before_current_with_backend(
-            &current_dir.join("settings.json"),
-            Some(&legacy_dir.join("settings.json")),
-            &mut backend,
-        )?;
-    }
-    // Resolve the active path only after the legacy settings cleanup. In
-    // default mode this may copy the now-sanitized legacy directory when the
-    // current database does not exist. Override mode never reaches the branch
-    // above and therefore never touches either default directory.
-    let path = settings_path()?;
-    read_settings_with_backend(&path, &mut backend)
+    with_settings_read_migration_lock(|| {
+        let mut backend = crate::credentials::SystemCredentialBackend;
+        if let Some((current_dir, legacy_dir)) =
+            crate::db::default_data_dirs_if_unoverridden().map_err(|error| error.to_string())?
+        {
+            migrate_legacy_settings_before_current_with_backend(
+                &current_dir.join("settings.json"),
+                Some(&legacy_dir.join("settings.json")),
+                &mut backend,
+            )?;
+        }
+        // Resolve the active path only after the legacy settings cleanup. In
+        // default mode this may copy the now-sanitized legacy directory when
+        // the current database does not exist. Override mode never reaches the
+        // branch above and therefore never touches either default directory.
+        let path = settings_path()?;
+        read_settings_with_backend(&path, &mut backend)
+    })
 }
 
 /// 写入设置(覆盖)。会自动创建父目录。
@@ -1082,6 +1097,9 @@ pub fn ensure_client_id() -> Result<String, String> {
 #[cfg(test)]
 mod secure_settings_tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex as TestMutex};
+    use std::time::Duration;
 
     use super::*;
     use crate::credentials::{
@@ -1117,6 +1135,47 @@ mod secure_settings_tests {
 
         fn delete(&mut self, locator: &CredentialLocator) -> Result<(), CredentialError> {
             self.values.remove(locator.id());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConcurrentBackend {
+        values: Arc<TestMutex<HashMap<String, String>>>,
+        fail_next_set: Arc<AtomicBool>,
+    }
+
+    impl CredentialBackend for ConcurrentBackend {
+        fn set(
+            &mut self,
+            locator: &CredentialLocator,
+            secret: &SecretValue,
+        ) -> Result<(), CredentialError> {
+            if self.fail_next_set.swap(false, Ordering::SeqCst) {
+                return Err(CredentialError::SecureStore);
+            }
+            self.values
+                .lock()
+                .expect("store")
+                .insert(locator.id().to_string(), secret.expose().to_string());
+            Ok(())
+        }
+
+        fn get(
+            &mut self,
+            locator: &CredentialLocator,
+        ) -> Result<Option<SecretValue>, CredentialError> {
+            self.values
+                .lock()
+                .expect("store")
+                .get(locator.id())
+                .cloned()
+                .map(SecretValue::new)
+                .transpose()
+        }
+
+        fn delete(&mut self, locator: &CredentialLocator) -> Result<(), CredentialError> {
+            self.values.lock().expect("store").remove(locator.id());
             Ok(())
         }
     }
@@ -1451,6 +1510,112 @@ mod secure_settings_tests {
         );
         assert_eq!(std::fs::read(legacy).expect("legacy"), original);
         assert_eq!(backend.values, before);
+    }
+
+    #[test]
+    fn concurrent_double_directory_migration_is_serial_and_recovers_after_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join("current-settings.json");
+        let legacy = temp.path().join("legacy-settings.json");
+        let current_values = [
+            ("mineru_api_key", "current-mineru"),
+            ("paddle_vl_api_key", "current-paddle"),
+            ("cloud_llm_api_key", "current-deepseek"),
+            ("yuandian_api_key", "current-yuandian"),
+            ("kuaidi100_customer", "current-kuaidi-customer"),
+            ("kuaidi100_key", "current-kuaidi-key"),
+        ];
+        let current_json = serde_json::Value::Object(
+            current_values
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        (*key).to_string(),
+                        serde_json::Value::String((*value).to_string()),
+                    )
+                })
+                .collect(),
+        );
+        std::fs::write(
+            &current,
+            serde_json::to_vec(&current_json).expect("current json"),
+        )
+        .expect("current");
+        std::fs::write(
+            &legacy,
+            serde_json::to_vec(&serde_json::json!({
+                "mineru_api_key": "legacy-mineru",
+                "paddle_vl_api_key": "legacy-paddle",
+                "cloud_llm_api_key": "legacy-deepseek"
+            }))
+            .expect("legacy json"),
+        )
+        .expect("legacy");
+
+        let values = Arc::new(TestMutex::new(HashMap::new()));
+        let fail_next_set = Arc::new(AtomicBool::new(true));
+        let start = Arc::new(Barrier::new(2));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let current = current.clone();
+            let legacy = legacy.clone();
+            let values = values.clone();
+            let fail_next_set = fail_next_set.clone();
+            let start = start.clone();
+            let active = active.clone();
+            let max_active = max_active.clone();
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                with_settings_read_migration_lock(|| {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    let mut backend = ConcurrentBackend {
+                        values,
+                        fail_next_set,
+                    };
+                    let result = migrate_legacy_settings_before_current_with_backend(
+                        &current,
+                        Some(&legacy),
+                        &mut backend,
+                    )
+                    .and_then(|_| read_settings_with_backend(&current, &mut backend));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    result
+                })
+            }));
+        }
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        let stored = values.lock().expect("store");
+        for (slot, expected) in [
+            (StaticCredential::Mineru, "current-mineru"),
+            (StaticCredential::PaddleVl, "current-paddle"),
+            (StaticCredential::Deepseek, "current-deepseek"),
+            (StaticCredential::Yuandian, "current-yuandian"),
+            (StaticCredential::KuaidiCustomer, "current-kuaidi-customer"),
+            (StaticCredential::KuaidiKey, "current-kuaidi-key"),
+        ] {
+            assert_eq!(
+                stored.get(slot.locator().id()).map(String::as_str),
+                Some(expected)
+            );
+        }
+        drop(stored);
+        for path in [&current, &legacy] {
+            let disk = std::fs::read_to_string(path).expect("settings");
+            for (key, _) in &current_values {
+                assert!(!disk.contains(key), "{key} must be scrubbed");
+            }
+        }
     }
 
     #[test]
