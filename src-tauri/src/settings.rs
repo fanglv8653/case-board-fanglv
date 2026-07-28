@@ -17,6 +17,7 @@
 //! }
 //! ```
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -902,11 +903,145 @@ fn read_settings_with_backend<B: crate::credentials::CredentialBackend>(
     Ok(settings)
 }
 
+struct PreserveExistingCredentials<'a, B> {
+    inner: &'a mut B,
+    protected: HashSet<String>,
+    shadow: HashMap<String, Option<crate::credentials::SecretValue>>,
+}
+
+impl<B: crate::credentials::CredentialBackend> crate::credentials::CredentialBackend
+    for PreserveExistingCredentials<'_, B>
+{
+    fn set(
+        &mut self,
+        locator: &crate::credentials::CredentialLocator,
+        secret: &crate::credentials::SecretValue,
+    ) -> Result<(), crate::credentials::CredentialError> {
+        if self.protected.contains(locator.id()) {
+            self.shadow
+                .insert(locator.id().to_string(), Some(secret.clone()));
+            Ok(())
+        } else {
+            self.inner.set(locator, secret)
+        }
+    }
+
+    fn get(
+        &mut self,
+        locator: &crate::credentials::CredentialLocator,
+    ) -> Result<Option<crate::credentials::SecretValue>, crate::credentials::CredentialError> {
+        if self.protected.contains(locator.id()) {
+            if let Some(value) = self.shadow.get(locator.id()) {
+                return Ok(value.clone());
+            }
+        }
+        self.inner.get(locator)
+    }
+
+    fn delete(
+        &mut self,
+        locator: &crate::credentials::CredentialLocator,
+    ) -> Result<(), crate::credentials::CredentialError> {
+        if self.protected.contains(locator.id()) {
+            self.shadow.insert(locator.id().to_string(), None);
+            Ok(())
+        } else {
+            self.inner.delete(locator)
+        }
+    }
+}
+
+fn current_preferred_locators(
+    current_path: &Path,
+) -> Result<Vec<crate::credentials::CredentialLocator>, String> {
+    let mut locators = crate::credentials::StaticCredential::ALL
+        .iter()
+        .map(|slot| slot.locator())
+        .collect::<Vec<_>>();
+    let Some(original) = existing_settings_json(current_path)? else {
+        return Ok(locators);
+    };
+    let raw_mcp_servers = original.get("mcp_servers").cloned();
+    let mut settings_without_mcp = original;
+    settings_without_mcp
+        .as_object_mut()
+        .ok_or_else(|| "SETTINGS_ROOT_NOT_OBJECT".to_string())?
+        .remove("mcp_servers");
+    let settings = serde_json::from_value::<Settings>(settings_without_mcp)
+        .map_err(|_| "SETTINGS_EXISTING_PARSE_FAILED".to_string())?;
+    if let Some(team) = settings.team {
+        if let Ok(locator) = crate::team::credentials::secret_locator(&team.team_id) {
+            locators.push(locator);
+        }
+        if let Ok(locator) = crate::team::credentials::pairing_locator(&team.team_id) {
+            locators.push(locator);
+        }
+    }
+    if let Some(raw) = raw_mcp_servers.filter(|value| !value.is_null()) {
+        if let Ok(stored) = serde_json::from_value::<Vec<McpStoredServer>>(raw) {
+            for server in stored {
+                locators.extend(
+                    server
+                        .credential_locators()
+                        .map_err(|error| error.code().to_string())?,
+                );
+            }
+        }
+    }
+    Ok(locators)
+}
+
+fn migrate_legacy_settings_before_current_with_backend<B: crate::credentials::CredentialBackend>(
+    current_path: &Path,
+    legacy_path: Option<&Path>,
+    backend: &mut B,
+) -> Result<(), String> {
+    let Some(legacy_path) = legacy_path else {
+        return Ok(());
+    };
+    if current_path == legacy_path || !legacy_path.exists() {
+        return Ok(());
+    }
+    // Existing credentials referenced by the current directory are authoritative.
+    // The legacy migration may fill a missing locator, but it can only shadow an
+    // existing current value while verifying its own atomic cleanup.
+    let mut protected = HashSet::new();
+    for locator in current_preferred_locators(current_path)? {
+        if backend
+            .get(&locator)
+            .map_err(|error| error.code().to_string())?
+            .is_some()
+        {
+            protected.insert(locator.id().to_string());
+        }
+    }
+    let mut preserving = PreserveExistingCredentials {
+        inner: backend,
+        protected,
+        shadow: HashMap::new(),
+    };
+    read_settings_with_backend(legacy_path, &mut preserving).map(|_| ())
+}
+
 /// 读取设置。文件不存在时返回 `Settings::default()`。
 /// 静态 provider 凭据永不进入返回值；调用方必须使用 credentials resolver。
 pub fn read_settings() -> Result<Settings, String> {
+    let mut backend = crate::credentials::SystemCredentialBackend;
+    if let Some((current_dir, legacy_dir)) =
+        crate::db::default_data_dirs_if_unoverridden().map_err(|error| error.to_string())?
+    {
+        migrate_legacy_settings_before_current_with_backend(
+            &current_dir.join("settings.json"),
+            Some(&legacy_dir.join("settings.json")),
+            &mut backend,
+        )?;
+    }
+    // Resolve the active path only after the legacy settings cleanup. In
+    // default mode this may copy the now-sanitized legacy directory when the
+    // current database does not exist. Override mode never reaches the branch
+    // above and therefore never touches either default directory.
     let path = settings_path()?;
-    read_settings_with_backend(&path, &mut crate::credentials::SystemCredentialBackend)
+    read_settings_with_backend(&path, &mut backend)
 }
 
 /// 写入设置(覆盖)。会自动创建父目录。
@@ -1204,6 +1339,117 @@ mod secure_settings_tests {
             "MCP_STDIO_SECRET_ARG_FORBIDDEN_USE_SECRET_ENV"
         );
         assert_eq!(std::fs::read(path).expect("original"), original);
+        assert_eq!(backend.values, before);
+    }
+
+    #[test]
+    fn legacy_cleanup_preserves_existing_current_credential() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join("current-settings.json");
+        let legacy = temp.path().join("legacy-settings.json");
+        std::fs::write(&current, b"{}").expect("current");
+        std::fs::write(&legacy, br#"{"mineru_api_key":"legacy-mineru-value"}"#).expect("legacy");
+        let locator = StaticCredential::Mineru.locator();
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &locator,
+                &SecretValue::new("current-vault-value".to_string()).expect("secret"),
+            )
+            .expect("seed");
+
+        migrate_legacy_settings_before_current_with_backend(&current, Some(&legacy), &mut backend)
+            .expect("legacy cleanup");
+
+        assert_eq!(
+            backend
+                .get(&locator)
+                .expect("vault")
+                .expect("credential")
+                .expose(),
+            "current-vault-value"
+        );
+        assert!(!std::fs::read_to_string(legacy)
+            .expect("legacy")
+            .contains("mineru_api_key"));
+    }
+
+    #[test]
+    fn current_plaintext_migration_wins_after_legacy_cleanup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join("current-settings.json");
+        let legacy = temp.path().join("legacy-settings.json");
+        std::fs::write(&current, br#"{"mineru_api_key":"current-plaintext-value"}"#)
+            .expect("current");
+        std::fs::write(&legacy, br#"{"mineru_api_key":"legacy-plaintext-value"}"#).expect("legacy");
+        let locator = StaticCredential::Mineru.locator();
+        let mut backend = MemoryBackend::default();
+
+        migrate_legacy_settings_before_current_with_backend(&current, Some(&legacy), &mut backend)
+            .expect("legacy cleanup");
+        read_settings_with_backend(&current, &mut backend).expect("current migration");
+
+        assert_eq!(
+            backend
+                .get(&locator)
+                .expect("vault")
+                .expect("credential")
+                .expose(),
+            "current-plaintext-value"
+        );
+        for path in [&current, &legacy] {
+            assert!(!std::fs::read_to_string(path)
+                .expect("settings")
+                .contains("mineru_api_key"));
+        }
+    }
+
+    #[test]
+    fn override_mode_skips_legacy_settings_entirely() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let active = temp.path().join("override-settings.json");
+        let legacy = temp.path().join("default-legacy-settings.json");
+        std::fs::write(&active, b"{}").expect("active");
+        let original = br#"{"mineru_api_key":"must-remain-untouched"}"#;
+        std::fs::write(&legacy, original).expect("legacy");
+        let mut backend = MemoryBackend::default();
+
+        migrate_legacy_settings_before_current_with_backend(&active, None, &mut backend)
+            .expect("override must skip");
+
+        assert_eq!(std::fs::read(legacy).expect("legacy"), original);
+        assert!(backend.values.is_empty());
+    }
+
+    #[test]
+    fn legacy_migration_failure_keeps_file_and_vault_unchanged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join("current-settings.json");
+        let legacy = temp.path().join("legacy-settings.json");
+        std::fs::write(&current, b"{}").expect("current");
+        let original = br#"{"mcp_servers":[{"name":"unsafe","enabled":true,"transport":{"type":"stdio","command":"node","args":["--token","legacy-secret"],"env":{}}}]}"#;
+        std::fs::write(&legacy, original).expect("legacy");
+        let locator = StaticCredential::Mineru.locator();
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &locator,
+                &SecretValue::new("current-vault-value".to_string()).expect("secret"),
+            )
+            .expect("seed");
+        let before = backend.values.clone();
+
+        let result = migrate_legacy_settings_before_current_with_backend(
+            &current,
+            Some(&legacy),
+            &mut backend,
+        );
+
+        assert_eq!(
+            result.expect_err("must fail"),
+            "MCP_STDIO_SECRET_ARG_FORBIDDEN_USE_SECRET_ENV"
+        );
+        assert_eq!(std::fs::read(legacy).expect("legacy"), original);
         assert_eq!(backend.values, before);
     }
 
