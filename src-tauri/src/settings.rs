@@ -17,17 +17,19 @@
 //! }
 //! ```
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::chat::mcp_bridge::McpServerConfig;
+use crate::chat::mcp_credentials::McpStoredServer;
 use crate::db::app_data_dir;
 
 /// 用户配置。字段全部 Option<String>,因为初始全是空的。
 ///
 /// 这里**只放每个用户私有的配置**——不放飞书 webhook 这种"全局共享"的常量。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// 用户的显示称呼(例:"刘律师" / "周律师"),首页问候用。
@@ -65,6 +67,7 @@ pub struct Settings {
     pub cloud_enabled: bool,
 
     /// MinerU 在线 OCR 的 API key(用户自己注册账号拿)
+    #[serde(skip_serializing)]
     pub mineru_api_key: Option<String>,
     /// MinerU endpoint(一般不用改,默认值)
     pub mineru_endpoint: Option<String>,
@@ -72,6 +75,7 @@ pub struct Settings {
     /// 2026-06-12:PaddleOCR VL-1.6(百度 AI Studio 星河社区)访问令牌。
     /// 申请:https://aistudio.baidu.com/account/accessToken,免费 20,000 页/天。
     /// 作者实测与 MinerU 精度打平、速度约快一倍;详 ingest/paddle_vl_http.rs 头注释。
+    #[serde(skip_serializing)]
     pub paddle_vl_api_key: Option<String>,
     /// PaddleOCR key 验证通过时间(坑#11:新 cloud key 必配 verified_at,改 key 重置)
     pub paddle_vl_verified_at: Option<String>,
@@ -95,6 +99,7 @@ pub struct Settings {
     /// 默认 flash;不再有"工具型任务偷偷强制 pro"的隐藏逻辑。
     pub cloud_llm_model: Option<String>,
     /// 云端 LLM API key
+    #[serde(skip_serializing)]
     pub cloud_llm_api_key: Option<String>,
 
     /// 2026-06-15:云端 LLM 后端选择 —— `"deepseek"`(默认/缺省)/ `"minimax"`。
@@ -103,6 +108,7 @@ pub struct Settings {
     /// 设计见 docs/MiniMax模型接入-2026-06-15.md。
     pub cloud_llm_backend: Option<String>,
     /// MiniMax API key(独立于 DeepSeek key,切后端互不覆盖)。
+    #[serde(skip_serializing)]
     pub minimax_api_key: Option<String>,
     /// MiniMax endpoint base(默认 `https://api.minimaxi.com`;聊天真实路径
     /// `/v1/text/chatcompletion_v2` 由 LlmConfig 自动补,**不是** OpenAI 兼容的 /v1/chat/completions)。
@@ -126,6 +132,7 @@ pub struct Settings {
     /// 通用兼容后端模型名(具体型号,如 `glm-4.6`;自由文本,以服务商控制台为准)。
     pub compat_llm_model: Option<String>,
     /// 通用兼容后端 API key(独立于 DeepSeek / MiniMax)。
+    #[serde(skip_serializing)]
     pub compat_llm_api_key: Option<String>,
     /// 通用兼容后端 key 验证通过时间(坑#11)。
     pub compat_llm_verified_at: Option<String>,
@@ -133,29 +140,35 @@ pub struct Settings {
     /// 智谱 GLM 独立配置(OpenAI-compatible chat completions)。
     pub glm_llm_endpoint: Option<String>,
     pub glm_llm_model: Option<String>,
+    #[serde(skip_serializing)]
     pub glm_llm_api_key: Option<String>,
     pub glm_llm_verified_at: Option<String>,
 
     /// 小米 MiMo 独立配置(OpenAI-compatible chat completions)。
     pub mimo_llm_endpoint: Option<String>,
     pub mimo_llm_model: Option<String>,
+    #[serde(skip_serializing)]
     pub mimo_llm_api_key: Option<String>,
     pub mimo_llm_verified_at: Option<String>,
 
     /// 自定义 OpenAI 兼容模型独立配置。
     pub custom_llm_endpoint: Option<String>,
     pub custom_llm_model: Option<String>,
+    #[serde(skip_serializing)]
     pub custom_llm_api_key: Option<String>,
     pub custom_llm_verified_at: Option<String>,
 
     /// 2026-05-24 k:元典法律开放平台 API key — 执行案件查被执行人 / 失信 / 财产线索 用
     /// 申请:https://open.chineselaw.com/
+    #[serde(skip_serializing)]
     pub yuandian_api_key: Option<String>,
 
     /// 2026-06-01 V0.3:快递100 实时查询 customer 编号 + 授权 key(快递查询工具用)。
     /// 申请:https://api.kuaidi100.com/(个人免费版约 50 次/天,无需企业资质)。
     /// 签名 = 大写 MD5(param + key + customer)。两者都填了才启用快递查询。
+    #[serde(skip_serializing)]
     pub kuaidi100_customer: Option<String>,
+    #[serde(skip_serializing)]
     pub kuaidi100_key: Option<String>,
 
     /// 2026-06-01 V0.3.3:Embedding 云端模型(案件文档语义检索)。OpenAI 兼容 /embeddings。
@@ -163,6 +176,7 @@ pub struct Settings {
     /// 申请:https://cloud.siliconflow.cn/me/account/ak
     pub embedding_endpoint: Option<String>,
     pub embedding_model: Option<String>,
+    #[serde(skip_serializing)]
     pub embedding_api_key: Option<String>,
     /// embedding key 验证通过时间(坑#11:新 cloud key 必配 verified_at,改 key 重置)
     pub embedding_verified_at: Option<String>,
@@ -215,11 +229,14 @@ pub struct Settings {
     pub court_filing_cli_path: Option<String>,
     /// Python 解释器路径。None = 用 "python3"(Windows 用户需填 "python" 或 venv 内全路径)。
     pub court_filing_python: Option<String>,
-    /// 全国法院一张网账号(手机号)。只存本机,不进 git。
+    /// 全国法院一张网账号(手机号)。仅用于旧 settings.json 一次性迁移。
+    #[serde(skip_serializing)]
     pub court_filing_account: Option<String>,
-    /// 全国法院一张网密码。只存本机,不进 git。
+    /// 全国法院一张网密码。仅用于旧 settings.json 一次性迁移。
+    #[serde(skip_serializing)]
     pub court_filing_password: Option<String>,
-    /// 一张网登录态 cookie 缓存目录。None = 用默认应用数据目录。
+    /// 已废弃：法院登录态不持久化。仅反序列化用于清理旧设置。
+    #[serde(skip_serializing)]
     pub court_filing_cookie_dir: Option<String>,
 
     // ===== V0.2 D2 新增 · 本地知识库 + chat V2 budget =====
@@ -251,13 +268,33 @@ pub struct Settings {
     pub chat_max_attached: Option<u32>,
     /// 2026-06-21 方律场景路由总开关。默认 false,关闭时聊天主链保持原行为。
     pub enable_fanglv_router: bool,
+    /// Static provider credentials were migrated out of settings.json.
+    pub credential_migration_version: Option<u32>,
     /// V0.3.6 · 外部 MCP server 白名单(CaseBoard 当客户端消费其工具)。默认空 = 桥接关闭、零行为变化。
     /// 每项 `{name, transport:{type:"stdio",command,args,env}|{type:"http",url}, enabled}`,详 ADR-0008。
-    pub mcp_servers: Vec<McpServerConfig>,
+    pub mcp_servers: Vec<McpStoredServer>,
 
     /// 2026-06-10 团队版 Phase 1(LAN 接力同步,详 docs/提案-团队版-2026-06-10.md §6)。
     /// None = 未加入团队,团队功能整体关闭零开销。secret/配对码跟 API key 同级:只存本机不进 git。
     pub team: Option<crate::team::TeamIdentity>,
+}
+
+/// Settings returned to the WebView. Static credential values are excluded by
+/// `Settings` serialization and represented only by non-sensitive statuses.
+#[derive(Serialize)]
+pub struct PublicSettings {
+    #[serde(flatten)]
+    pub settings: Settings,
+    pub credential_statuses: Vec<crate::credentials::CredentialStatus>,
+}
+
+impl PublicSettings {
+    pub fn from_settings(settings: Settings) -> Self {
+        Self {
+            settings: settings.with_defaults_for_display(),
+            credential_statuses: crate::credentials::static_statuses(),
+        }
+    }
 }
 
 impl Settings {
@@ -322,17 +359,6 @@ impl Settings {
             _ => None,
         };
         current.or_else(|| Self::clean_string(&self.compat_llm_model))
-    }
-
-    /// 当前兼容后端的 API key。新字段优先,旧版 compat_llm_* 兜底。
-    pub fn effective_compat_llm_api_key(&self) -> Option<String> {
-        let current = match self.effective_cloud_llm_backend() {
-            "glm" => Self::clean_string(&self.glm_llm_api_key),
-            "mimo" => Self::clean_string(&self.mimo_llm_api_key),
-            "custom" => Self::clean_string(&self.custom_llm_api_key),
-            _ => None,
-        };
-        current.or_else(|| Self::clean_string(&self.compat_llm_api_key))
     }
 
     /// 一次性迁移:把旧的「共享 `compat_llm_*`」搬进**当前兼容后端**的专属字段,然后清空旧字段。
@@ -400,15 +426,11 @@ impl Settings {
         true
     }
 
-    /// 云端 OCR 主力(2026-06-12)。`"paddle-vl"` 仅当用户显式选择**且** key 已填才生效,
-    /// 否则一律 `"mineru"`(老用户 / key 被清掉后零感知回到原行为)。
+    /// 云端 OCR 主力偏好(2026-06-12)。这里只读取非敏感配置；
+    /// token 是否可用由构造 `OcrContext` 时的凭据 resolver 和 OCR 排序过滤决定。
     pub fn effective_ocr_cloud_primary(&self) -> &str {
-        let paddle_key_set = self
-            .paddle_vl_api_key
-            .as_deref()
-            .is_some_and(|k| !k.trim().is_empty());
         match self.ocr_cloud_primary.as_deref() {
-            Some("paddle-vl") if paddle_key_set => "paddle-vl",
+            Some("paddle-vl") => "paddle-vl",
             _ => "mineru",
         }
     }
@@ -478,37 +500,431 @@ pub fn settings_path() -> Result<PathBuf, String> {
         .join("settings.json"))
 }
 
-/// 读取设置。文件不存在 / 解析失败,**不报错**,返回 `Settings::default()`。
-/// 第一次启动时这是预期行为。
-pub fn read_settings() -> Result<Settings, String> {
-    let path = settings_path()?;
+fn static_secret(
+    settings: &Settings,
+    slot: crate::credentials::StaticCredential,
+) -> Option<&String> {
+    use crate::credentials::StaticCredential::*;
+    match slot {
+        Mineru => settings.mineru_api_key.as_ref(),
+        PaddleVl => settings.paddle_vl_api_key.as_ref(),
+        Deepseek => settings.cloud_llm_api_key.as_ref(),
+        Minimax => settings.minimax_api_key.as_ref(),
+        Glm => settings.glm_llm_api_key.as_ref(),
+        Mimo => settings.mimo_llm_api_key.as_ref(),
+        Custom => settings.custom_llm_api_key.as_ref(),
+        Yuandian => settings.yuandian_api_key.as_ref(),
+        KuaidiCustomer => settings.kuaidi100_customer.as_ref(),
+        KuaidiKey => settings.kuaidi100_key.as_ref(),
+        Embedding => settings.embedding_api_key.as_ref(),
+        CourtFilingAccount => settings.court_filing_account.as_ref(),
+        CourtFilingPassword => settings.court_filing_password.as_ref(),
+    }
+}
+
+fn set_static_secret(
+    settings: &mut Settings,
+    slot: crate::credentials::StaticCredential,
+    value: Option<String>,
+) {
+    use crate::credentials::StaticCredential::*;
+    match slot {
+        Mineru => settings.mineru_api_key = value,
+        PaddleVl => settings.paddle_vl_api_key = value,
+        Deepseek => settings.cloud_llm_api_key = value,
+        Minimax => settings.minimax_api_key = value,
+        Glm => settings.glm_llm_api_key = value,
+        Mimo => settings.mimo_llm_api_key = value,
+        Custom => settings.custom_llm_api_key = value,
+        Yuandian => settings.yuandian_api_key = value,
+        KuaidiCustomer => settings.kuaidi100_customer = value,
+        KuaidiKey => settings.kuaidi100_key = value,
+        Embedding => settings.embedding_api_key = value,
+        CourtFilingAccount => settings.court_filing_account = value,
+        CourtFilingPassword => settings.court_filing_password = value,
+    }
+}
+
+const LEGACY_STATIC_CREDENTIALS: [crate::credentials::StaticCredential; 13] = [
+    crate::credentials::StaticCredential::Mineru,
+    crate::credentials::StaticCredential::PaddleVl,
+    crate::credentials::StaticCredential::Deepseek,
+    crate::credentials::StaticCredential::Minimax,
+    crate::credentials::StaticCredential::Glm,
+    crate::credentials::StaticCredential::Mimo,
+    crate::credentials::StaticCredential::Custom,
+    crate::credentials::StaticCredential::Yuandian,
+    crate::credentials::StaticCredential::KuaidiCustomer,
+    crate::credentials::StaticCredential::KuaidiKey,
+    crate::credentials::StaticCredential::Embedding,
+    crate::credentials::StaticCredential::CourtFilingAccount,
+    crate::credentials::StaticCredential::CourtFilingPassword,
+];
+
+fn clear_static_secrets(settings: &mut Settings) {
+    for slot in LEGACY_STATIC_CREDENTIALS {
+        set_static_secret(settings, slot, None);
+    }
+    settings.compat_llm_api_key = None;
+    settings.court_filing_cookie_dir = None;
+}
+
+const LEGACY_STATIC_SECRET_KEYS: [&str; 15] = [
+    "mineru_api_key",
+    "paddle_vl_api_key",
+    "cloud_llm_api_key",
+    "minimax_api_key",
+    "compat_llm_api_key",
+    "glm_llm_api_key",
+    "mimo_llm_api_key",
+    "custom_llm_api_key",
+    "yuandian_api_key",
+    "kuaidi100_customer",
+    "kuaidi100_key",
+    "embedding_api_key",
+    "court_filing_account",
+    "court_filing_password",
+    "court_filing_cookie_dir",
+];
+
+fn sanitized_json(
+    settings: &Settings,
+    original: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let known =
+        serde_json::to_value(settings).map_err(|_| "SETTINGS_SERIALIZE_FAILED".to_string())?;
+    let mut result = original
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+    let result_object = result
+        .as_object_mut()
+        .ok_or_else(|| "SETTINGS_ROOT_NOT_OBJECT".to_string())?;
+    let known_object = known
+        .as_object()
+        .ok_or_else(|| "SETTINGS_SERIALIZE_FAILED".to_string())?;
+    for (key, value) in known_object {
+        result_object.insert(key.clone(), value.clone());
+    }
+    for key in LEGACY_STATIC_SECRET_KEYS {
+        result_object.remove(key);
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "windows")]
+fn atomic_replace_file(temporary: &Path, target: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let temporary = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    if target.exists() {
+        unsafe {
+            ReplaceFileW(
+                PCWSTR(target_wide.as_ptr()),
+                PCWSTR(temporary.as_ptr()),
+                PCWSTR::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                None,
+                None,
+            )
+        }
+        .map_err(|_| "SETTINGS_ATOMIC_REPLACE_FAILED".to_string())
+    } else {
+        unsafe {
+            MoveFileExW(
+                PCWSTR(temporary.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(|_| "SETTINGS_ATOMIC_REPLACE_FAILED".to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn atomic_replace_file(temporary: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(temporary, target).map_err(|_| "SETTINGS_ATOMIC_REPLACE_FAILED".to_string())
+}
+
+fn atomic_write_settings_with<F>(
+    path: &Path,
+    settings: &Settings,
+    original: Option<&serde_json::Value>,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path) -> Result<(), String>,
+{
+    let value = sanitized_json(settings, original)?;
+    atomic_write_json_value_with(path, &value, replace)
+}
+
+fn atomic_write_json_value_with<F>(
+    path: &Path,
+    value: &serde_json::Value,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path) -> Result<(), String>,
+{
+    let parent = path
+        .parent()
+        .ok_or_else(|| "settings.json 路径无父目录".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|_| "SETTINGS_CREATE_DIR_FAILED".to_string())?;
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|_| "SETTINGS_SERIALIZE_FAILED".to_string())?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| "SETTINGS_TEMPFILE_FAILED".to_string())?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|_| temporary.flush())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|_| "SETTINGS_TEMPFILE_WRITE_FAILED".to_string())?;
+    let temporary = temporary.into_temp_path();
+    replace(temporary.as_ref(), path)
+}
+
+fn atomic_write_json_value(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    atomic_write_json_value_with(path, value, atomic_replace_file)
+}
+
+fn atomic_write_settings(
+    path: &Path,
+    settings: &Settings,
+    original: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    atomic_write_settings_with(path, settings, original, atomic_replace_file)
+}
+
+fn restore_snapshot<B: crate::credentials::CredentialBackend>(
+    backend: &mut B,
+    snapshot: &[(
+        crate::credentials::CredentialLocator,
+        Option<crate::credentials::SecretValue>,
+    )],
+) -> bool {
+    let mut complete = true;
+    for (locator, value) in snapshot {
+        let restored = match value {
+            Some(value) => backend.set(locator, value).is_ok(),
+            None => backend.delete(locator).is_ok(),
+        };
+        complete &= restored;
+    }
+    complete
+}
+
+fn write_settings_with_backend<B: crate::credentials::CredentialBackend>(
+    path: &Path,
+    settings: &Settings,
+    backend: &mut B,
+    original: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let mut sanitized = settings.clone();
+    clear_static_secrets(&mut sanitized);
+
+    let mut updates = Vec::new();
+    for slot in LEGACY_STATIC_CREDENTIALS {
+        if let Some(value) = static_secret(settings, slot).filter(|value| !value.trim().is_empty())
+        {
+            let secret = crate::credentials::SecretValue::new(value.clone())
+                .map_err(|error| error.code().to_string())?;
+            updates.push((slot.locator(), secret));
+        }
+    }
+
+    if updates.is_empty() {
+        return atomic_write_settings(path, &sanitized, original);
+    }
+
+    let mut snapshot = Vec::with_capacity(updates.len());
+    for (locator, _) in &updates {
+        snapshot.push((
+            locator.clone(),
+            backend
+                .get(locator)
+                .map_err(|error| error.code().to_string())?,
+        ));
+    }
+    for (locator, value) in &updates {
+        if let Err(error) = crate::credentials::replace_verified_with(backend, locator, value) {
+            let restored = restore_snapshot(backend, &snapshot);
+            return Err(if restored {
+                error.code().to_string()
+            } else {
+                crate::credentials::CredentialError::RollbackFailed
+                    .code()
+                    .to_string()
+            });
+        }
+    }
+    sanitized.credential_migration_version = Some(1);
+    if let Err(error) = atomic_write_settings(path, &sanitized, original) {
+        if !restore_snapshot(backend, &snapshot) {
+            return Err(crate::credentials::CredentialError::RollbackFailed
+                .code()
+                .to_string());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn existing_settings_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path).map_err(|_| "SETTINGS_EXISTING_READ_FAILED".to_string())?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|_| "SETTINGS_EXISTING_PARSE_FAILED".to_string())?;
+    if !value.is_object() {
+        return Err("SETTINGS_ROOT_NOT_OBJECT".to_string());
+    }
+    Ok(Some(value))
+}
+
+fn write_settings_preserving_existing_with_backend<B: crate::credentials::CredentialBackend>(
+    path: &Path,
+    settings: &Settings,
+    backend: &mut B,
+) -> Result<(), String> {
+    let original = existing_settings_json(path)?;
+    write_settings_with_backend(path, settings, backend, original.as_ref())
+}
+
+fn read_settings_with_backend<B: crate::credentials::CredentialBackend>(
+    path: &Path,
+    backend: &mut B,
+) -> Result<Settings, String> {
     if !path.exists() {
         return Ok(Settings::default());
     }
     let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("读 settings.json 失败: {}", e))?;
+        std::fs::read_to_string(path).map_err(|e| format!("读 settings.json 失败: {}", e))?;
     if text.trim().is_empty() {
         return Ok(Settings::default());
     }
-    let mut settings = serde_json::from_str::<Settings>(&text)
+    let original = serde_json::from_str::<serde_json::Value>(&text)
         .map_err(|e| format!("settings.json 格式错误: {}", e))?;
-    // 一次性把旧共享 compat_llm_* 归位到当前兼容后端的专属字段(幂等;迁移过/没用过都是 no-op)。
-    // 回写失败不致命:下次读再迁一次(in-memory 已是迁移后的值,本次调用方拿到的就是对的)。
-    if settings.migrate_legacy_compat_inplace() {
-        let _ = write_settings(&settings);
+    let raw_mcp_servers = original.get("mcp_servers").cloned();
+    let mut settings_without_mcp = original.clone();
+    settings_without_mcp
+        .as_object_mut()
+        .ok_or_else(|| "SETTINGS_ROOT_NOT_OBJECT".to_string())?
+        .remove("mcp_servers");
+    let mut settings = serde_json::from_value::<Settings>(settings_without_mcp)
+        .map_err(|e| format!("settings.json 格式错误: {}", e))?;
+    let legacy_team = settings.team.clone().filter(|identity| {
+        !identity.team_secret.trim().is_empty()
+            || identity
+                .pairing_code
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+    });
+    let had_plaintext = LEGACY_STATIC_CREDENTIALS
+        .iter()
+        .any(|slot| static_secret(&settings, *slot).is_some_and(|value| !value.trim().is_empty()))
+        || settings
+            .compat_llm_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    let compat_migrated = settings.migrate_legacy_compat_inplace();
+    if settings
+        .compat_llm_api_key
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err("CREDENTIAL_MIGRATION_AMBIGUOUS_COMPAT".to_string());
     }
+    if let Some(identity) = legacy_team {
+        let sanitized = crate::team::credentials::migrate_legacy_identity_with(
+            &identity,
+            backend,
+            |_, sanitized| {
+                let mut cleaned = original.clone();
+                cleaned
+                    .as_object_mut()
+                    .ok_or_else(|| "SETTINGS_ROOT_NOT_OBJECT".to_string())?
+                    .insert(
+                        "team".to_string(),
+                        serde_json::to_value(sanitized)
+                            .map_err(|_| "SETTINGS_SERIALIZE_FAILED".to_string())?,
+                    );
+                atomic_write_json_value(path, &cleaned)
+            },
+        )?;
+        settings.team = Some(sanitized);
+    }
+    let mut migrated_legacy_mcp = false;
+    if let Some(raw_mcp_servers) = raw_mcp_servers.filter(|value| !value.is_null()) {
+        match serde_json::from_value::<Vec<McpStoredServer>>(raw_mcp_servers.clone()) {
+            Ok(stored) => settings.mcp_servers = stored,
+            Err(_) => {
+                let legacy = serde_json::from_value::<Vec<McpServerConfig>>(raw_mcp_servers)
+                    .map_err(|_| "MCP_CONFIG_INVALID".to_string())?;
+                let server_ids = vec![None; legacy.len()];
+                crate::chat::mcp_credentials::migrate_legacy_servers_with(
+                    backend,
+                    &legacy,
+                    &server_ids,
+                    |backend, stored| {
+                        settings.mcp_servers = stored.to_vec();
+                        write_settings_with_backend(path, &settings, backend, Some(&original))
+                            .map_err(|_| ())
+                    },
+                )
+                .map_err(|error| error.code().to_string())?;
+                migrated_legacy_mcp = true;
+            }
+        }
+    }
+    if !migrated_legacy_mcp && (had_plaintext || compat_migrated) {
+        write_settings_with_backend(path, &settings, backend, Some(&original))?;
+    }
+    // 普通 Settings 对象绝不水合静态凭据。旧 settings.json 中的明文只在上面的
+    // 一次性迁移局部变量中短暂存在，成功写入凭据后立即清空再返回。
+    clear_static_secrets(&mut settings);
+    settings.compat_llm_api_key = None;
     Ok(settings)
+}
+
+/// 读取设置。文件不存在时返回 `Settings::default()`。
+/// 静态 provider 凭据永不进入返回值；调用方必须使用 credentials resolver。
+pub fn read_settings() -> Result<Settings, String> {
+    let path = settings_path()?;
+    read_settings_with_backend(&path, &mut crate::credentials::SystemCredentialBackend)
 }
 
 /// 写入设置(覆盖)。会自动创建父目录。
 pub fn write_settings(settings: &Settings) -> Result<(), String> {
     let path = settings_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败: {}", e))?;
-    }
-    let text = serde_json::to_string_pretty(settings).map_err(|e| format!("序列化失败: {}", e))?;
-    std::fs::write(&path, text).map_err(|e| format!("写 settings.json 失败: {}", e))?;
-    Ok(())
+    write_settings_preserving_existing_with_backend(
+        &path,
+        settings,
+        &mut crate::credentials::SystemCredentialBackend,
+    )
+}
+
+pub(crate) fn write_settings_using_backend<B: crate::credentials::CredentialBackend>(
+    settings: &Settings,
+    backend: &mut B,
+) -> Result<(), String> {
+    let path = settings_path()?;
+    write_settings_preserving_existing_with_backend(&path, settings, backend)
 }
 
 /// 2026-05-24 e:确保 client_id 存在(给反馈通道用的匿名识别码)。
@@ -526,6 +942,489 @@ pub fn ensure_client_id() -> Result<String, String> {
     s.client_id = Some(new_id.clone());
     write_settings(&s)?;
     Ok(new_id)
+}
+
+#[cfg(test)]
+mod secure_settings_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::credentials::{
+        CredentialBackend, CredentialError, CredentialLocator, SecretValue, StaticCredential,
+    };
+
+    #[derive(Default)]
+    struct MemoryBackend {
+        values: HashMap<String, String>,
+    }
+
+    impl CredentialBackend for MemoryBackend {
+        fn set(
+            &mut self,
+            locator: &CredentialLocator,
+            secret: &SecretValue,
+        ) -> Result<(), CredentialError> {
+            self.values
+                .insert(locator.id().to_string(), secret.expose().to_string());
+            Ok(())
+        }
+
+        fn get(
+            &mut self,
+            locator: &CredentialLocator,
+        ) -> Result<Option<SecretValue>, CredentialError> {
+            self.values
+                .get(locator.id())
+                .cloned()
+                .map(SecretValue::new)
+                .transpose()
+        }
+
+        fn delete(&mut self, locator: &CredentialLocator) -> Result<(), CredentialError> {
+            self.values.remove(locator.id());
+            Ok(())
+        }
+    }
+
+    fn assert_static_secrets_absent(settings: &Settings) {
+        for slot in LEGACY_STATIC_CREDENTIALS {
+            assert!(
+                static_secret(settings, slot).is_none(),
+                "{} must not be hydrated into Settings",
+                slot.locator().id()
+            );
+        }
+        assert!(settings.compat_llm_api_key.is_none());
+    }
+
+    #[test]
+    fn read_settings_migrates_legacy_secret_without_hydrating_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let legacy_marker = "legacy-mineru-secret";
+        let court_account = "legacy-court-account";
+        let court_password = "legacy-court-password";
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "mineru_api_key": legacy_marker,
+                "ocr_cloud_primary": "paddle-vl",
+                "court_filing_account": court_account,
+                "court_filing_password": court_password,
+                "court_filing_cookie_dir": "C:/legacy/plaintext-cookies"
+            }))
+            .expect("json"),
+        )
+        .expect("write");
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &StaticCredential::PaddleVl.locator(),
+                &SecretValue::new("saved-paddle-secret".to_string()).expect("secret"),
+            )
+            .expect("seed");
+
+        let settings =
+            read_settings_with_backend(&path, &mut backend).expect("read and migrate settings");
+
+        assert_static_secrets_absent(&settings);
+        assert_eq!(settings.effective_ocr_cloud_primary(), "paddle-vl");
+        assert!(
+            crate::credentials::status_with(&mut backend, &StaticCredential::Mineru.locator())
+                .configured
+        );
+        assert!(
+            crate::credentials::status_with(&mut backend, &StaticCredential::PaddleVl.locator())
+                .configured
+        );
+        assert_eq!(
+            backend
+                .get(&StaticCredential::CourtFilingAccount.locator())
+                .expect("vault")
+                .expect("court account")
+                .expose(),
+            court_account
+        );
+        assert_eq!(
+            backend
+                .get(&StaticCredential::CourtFilingPassword.locator())
+                .expect("vault")
+                .expect("court password")
+                .expose(),
+            court_password
+        );
+        let disk = std::fs::read_to_string(path).expect("settings file");
+        assert!(!disk.contains(legacy_marker));
+        assert!(!disk.contains("mineru_api_key"));
+        assert!(!disk.contains(court_account));
+        assert!(!disk.contains(court_password));
+        assert!(!disk.contains("court_filing_account"));
+        assert!(!disk.contains("court_filing_password"));
+        assert!(!disk.contains("court_filing_cookie_dir"));
+    }
+
+    #[test]
+    fn read_settings_migrates_team_credentials_and_cleans_plaintext() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let team_id = "11111111-2222-3333-4444-555555555555";
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "team": {
+                    "team_id": team_id,
+                    "team_name": "Test Team",
+                    "team_secret": "legacy-team-secret",
+                    "member_id": "member-1",
+                    "my_name": "Alice",
+                    "role": "leader",
+                    "pairing_code": "654321"
+                }
+            }))
+            .expect("json"),
+        )
+        .expect("write");
+        let mut backend = MemoryBackend::default();
+
+        let settings = read_settings_with_backend(&path, &mut backend).expect("migrate");
+        let identity = settings.team.expect("team");
+        assert!(identity.team_secret.is_empty());
+        assert!(identity.pairing_code.is_none());
+        let disk = std::fs::read_to_string(path).expect("settings");
+        assert!(!disk.contains("legacy-team-secret"));
+        assert!(!disk.contains("654321"));
+        assert!(!disk.contains("team_secret"));
+        assert!(!disk.contains("pairing_code"));
+        assert_eq!(
+            backend
+                .get(&crate::team::credentials::secret_locator(team_id).expect("locator"))
+                .expect("vault")
+                .expect("secret")
+                .expose(),
+            "legacy-team-secret"
+        );
+        assert_eq!(
+            backend
+                .get(&crate::team::credentials::pairing_locator(team_id).expect("locator"))
+                .expect("vault")
+                .expect("code")
+                .expose(),
+            "654321"
+        );
+    }
+
+    #[test]
+    fn settings_and_public_settings_never_serialize_team_credentials() {
+        let settings = Settings {
+            team: Some(crate::team::TeamIdentity {
+                team_id: "team-1".into(),
+                team_name: "Test Team".into(),
+                team_secret: "team-secret-marker".into(),
+                member_id: "member-1".into(),
+                my_name: "Alice".into(),
+                role: "leader".into(),
+                pairing_code: Some("123456".into()),
+            }),
+            ..Settings::default()
+        };
+        for json in [
+            serde_json::to_string(&settings).expect("settings"),
+            serde_json::to_string(&PublicSettings::from_settings(settings)).expect("public"),
+        ] {
+            assert!(!json.contains("team-secret-marker"));
+            assert!(!json.contains("123456"));
+            assert!(!json.contains("team_secret"));
+            assert!(!json.contains("pairing_code"));
+        }
+    }
+
+    #[test]
+    fn read_settings_migrates_legacy_mcp_without_webview_or_disk_secret() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let marker = "mcp-legacy-header-marker";
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "mcp_servers": [{
+                    "name": "legal-data",
+                    "enabled": true,
+                    "transport": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        "headers": {"Authorization": marker}
+                    }
+                }]
+            }))
+            .expect("json"),
+        )
+        .expect("write");
+        let mut backend = MemoryBackend::default();
+
+        let settings = read_settings_with_backend(&path, &mut backend).expect("migrate MCP");
+
+        assert_eq!(settings.mcp_servers.len(), 1);
+        assert!(settings.mcp_servers[0].complete.configured);
+        let public_json = serde_json::to_string(&PublicSettings {
+            settings: settings.clone(),
+            credential_statuses: Vec::new(),
+        })
+        .expect("WebView projection");
+        let disk = std::fs::read_to_string(path).expect("settings file");
+        assert!(!public_json.contains(marker));
+        assert!(!disk.contains(marker));
+        assert!(backend.values.values().any(|value| value == marker));
+    }
+
+    #[test]
+    fn legacy_mcp_secret_argv_keeps_original_settings_and_existing_vault_entries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let original = br#"{"mcp_servers":[{"name":"unsafe","enabled":true,"transport":{"type":"stdio","command":"node","args":["server.js","--token","legacy-argv-secret"],"env":{}}}],"keep":"byte-for-byte"}"#;
+        std::fs::write(&path, original).expect("seed");
+        let existing_locator = CredentialLocator::new(
+            "mcp",
+            "11111111-2222-3333-4444-555555555555",
+            "stdio-env-api-key",
+        )
+        .expect("locator");
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &existing_locator,
+                &SecretValue::new("existing-vault-value".to_string()).expect("secret"),
+            )
+            .expect("seed vault");
+        let before = backend.values.clone();
+
+        let result = read_settings_with_backend(&path, &mut backend);
+
+        assert_eq!(
+            result.err().expect("migration must fail"),
+            "MCP_STDIO_SECRET_ARG_FORBIDDEN_USE_SECRET_ENV"
+        );
+        assert_eq!(std::fs::read(path).expect("original"), original);
+        assert_eq!(backend.values, before);
+    }
+
+    #[test]
+    fn mcp_migration_persist_failure_restores_vault_and_original_bytes() {
+        use crate::chat::mcp_bridge::{McpServerConfig, McpTransport};
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let original = br#"{"mcp_servers":[],"keep":"byte-for-byte"}"#;
+        std::fs::write(&path, original).expect("seed");
+        let marker = "mcp-rollback-marker";
+        let legacy = McpServerConfig {
+            name: "rollback".to_string(),
+            enabled: true,
+            transport: McpTransport::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                headers: BTreeMap::from([("Authorization".to_string(), marker.to_string())]),
+            },
+        };
+        let mut backend = MemoryBackend::default();
+        let mut settings = Settings::default();
+
+        let result = crate::chat::mcp_credentials::migrate_legacy_servers_with(
+            &mut backend,
+            &[legacy],
+            &[None],
+            |_, stored| {
+                settings.mcp_servers = stored.to_vec();
+                atomic_write_settings_with(&path, &settings, None, |_, _| {
+                    Err("FORCED_REPLACE_FAILURE".to_string())
+                })
+                .map_err(|_| ())
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err().code(),
+            "MCP_CONFIG_ATOMIC_PERSIST_FAILED"
+        );
+        assert!(backend.values.is_empty());
+        assert_eq!(std::fs::read(path).expect("original"), original);
+    }
+
+    #[test]
+    fn public_settings_serialization_never_contains_static_secrets() {
+        let marker = "must-not-cross-public-boundary";
+        let mut settings = Settings {
+            mineru_api_key: Some(marker.to_string()),
+            paddle_vl_api_key: Some(marker.to_string()),
+            cloud_llm_api_key: Some(marker.to_string()),
+            minimax_api_key: Some(marker.to_string()),
+            glm_llm_api_key: Some(marker.to_string()),
+            mimo_llm_api_key: Some(marker.to_string()),
+            custom_llm_api_key: Some(marker.to_string()),
+            yuandian_api_key: Some(marker.to_string()),
+            kuaidi100_customer: Some(marker.to_string()),
+            kuaidi100_key: Some(marker.to_string()),
+            embedding_api_key: Some(marker.to_string()),
+            ..Settings::default()
+        };
+        settings.compat_llm_api_key = Some(marker.to_string());
+        let public = PublicSettings {
+            settings,
+            credential_statuses: vec![crate::credentials::CredentialStatus {
+                locator: StaticCredential::Mineru.locator().id().to_string(),
+                configured: true,
+                backend: "windows_credential_manager",
+                error_code: None,
+            }],
+        };
+
+        let json = serde_json::to_string(&public).expect("serialize");
+
+        assert!(!json.contains(marker));
+        for key in LEGACY_STATIC_SECRET_KEYS {
+            assert!(!json.contains(key), "{key} leaked into PublicSettings");
+        }
+    }
+
+    #[test]
+    fn settings_json_excludes_static_provider_fields_and_values() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let marker = "settings-secret-marker";
+        let settings = Settings {
+            mineru_api_key: Some(marker.to_string()),
+            ..Settings::default()
+        };
+        let mut backend = MemoryBackend::default();
+        let original = serde_json::json!({
+            "mineru_api_key": marker,
+            "future_non_secret_setting": {"enabled": true}
+        });
+
+        write_settings_with_backend(&path, &settings, &mut backend, Some(&original))
+            .expect("secure write");
+        let disk = std::fs::read_to_string(path).expect("settings file");
+        assert!(!disk.contains(marker));
+        assert!(!disk.contains("mineru_api_key"));
+        assert!(disk.contains("future_non_secret_setting"));
+        assert!(disk.contains("\"credential_migration_version\": 1"));
+        assert_eq!(
+            backend
+                .get(&StaticCredential::Mineru.locator())
+                .expect("vault")
+                .expect("stored")
+                .expose(),
+            marker
+        );
+    }
+
+    #[test]
+    fn failed_atomic_replace_restores_previous_credential() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        std::fs::create_dir(&path).expect("force persist failure");
+        let locator = StaticCredential::Mineru.locator();
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &locator,
+                &SecretValue::new("old-marker".to_string()).expect("old"),
+            )
+            .expect("seed");
+        let settings = Settings {
+            mineru_api_key: Some("new-marker".to_string()),
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            write_settings_with_backend(&path, &settings, &mut backend, None),
+            Err("SETTINGS_ATOMIC_REPLACE_FAILED".to_string())
+        );
+        assert_eq!(
+            backend
+                .get(&locator)
+                .expect("vault")
+                .expect("restored")
+                .expose(),
+            "old-marker"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_atomic_replace_replaces_an_existing_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        std::fs::write(&path, br#"{"old":true}"#).expect("seed");
+        let settings = Settings {
+            setup_completed: true,
+            ..Settings::default()
+        };
+
+        atomic_write_settings(&path, &settings, None).expect("replace existing file");
+        let replaced = std::fs::read_to_string(path).expect("replaced file");
+        assert!(replaced.contains("\"setup_completed\": true"));
+        assert!(!replaced.contains("\"old\": true"));
+    }
+
+    #[test]
+    fn forced_atomic_replace_failure_keeps_original_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let original = br#"{"original":"byte-for-byte"}"#;
+        std::fs::write(&path, original).expect("seed");
+        let settings = Settings {
+            setup_completed: true,
+            ..Settings::default()
+        };
+
+        let result = atomic_write_settings_with(&path, &settings, None, |_, _| {
+            Err("FORCED_REPLACE_FAILURE".to_string())
+        });
+        assert_eq!(result, Err("FORCED_REPLACE_FAILURE".to_string()));
+        assert_eq!(std::fs::read(path).expect("original"), original);
+    }
+
+    #[test]
+    fn daily_write_preserves_unknown_non_secret_keys() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{"future_non_secret":{"enabled":true},"setup_completed":false}"#,
+        )
+        .expect("seed");
+        let settings = Settings {
+            setup_completed: true,
+            ..Settings::default()
+        };
+        let mut backend = MemoryBackend::default();
+
+        write_settings_preserving_existing_with_backend(&path, &settings, &mut backend)
+            .expect("daily write");
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("written")).expect("json");
+        assert_eq!(value["future_non_secret"]["enabled"], true);
+        assert_eq!(value["setup_completed"], true);
+    }
+
+    #[test]
+    fn daily_write_refuses_to_overwrite_unreadable_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("settings.json");
+        let original = b"{not-json";
+        std::fs::write(&path, original).expect("seed");
+        let mut backend = MemoryBackend::default();
+
+        assert_eq!(
+            write_settings_preserving_existing_with_backend(
+                &path,
+                &Settings::default(),
+                &mut backend,
+            ),
+            Err("SETTINGS_EXISTING_PARSE_FAILED".to_string())
+        );
+        assert_eq!(std::fs::read(path).expect("original"), original);
+    }
 }
 
 // ============================================================================

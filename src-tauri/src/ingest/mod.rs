@@ -6,13 +6,13 @@
 //!
 //! V0.1 阶段纯规则,不调 LLM。后续 V0.2 可在规则之上叠 LLM 兜底。
 
-pub mod case_split;
 pub mod extractor;
 pub mod global_pipeline;
+pub mod material_control;
 pub mod mineru_http;
 pub mod ocr;
 pub mod paddle_vl_http;
 pub mod pipeline;
 pub mod ppocrv6_http;
-pub mod scanner;
 pub mod reliability;
+pub mod scanner;

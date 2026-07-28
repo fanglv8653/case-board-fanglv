@@ -289,9 +289,7 @@ fn task_focus_hint(task: TaskType) -> &'static str {
         TaskType::FindSimilarCases => {
             "- 当前入口偏向类案支持度分析,不能只给类案列表,必须说明支持点和差异点。"
         }
-        TaskType::VerifyMyDraft => {
-            "- 当前入口偏向草稿核校,优先指出风险条款、引用瑕疵和建议改法。"
-        }
+        TaskType::VerifyMyDraft => "- 当前入口偏向草稿核校,优先指出风险条款、引用瑕疵和建议改法。",
         TaskType::SimulateOpposition => {
             "- 当前入口偏向攻防推演,每个争点都要同时写对方主张和我方回应。"
         }
@@ -347,6 +345,8 @@ mod tests {
             route_input,
         );
         assert!(plan.allowed_tools.contains(&"search_local_kb".to_string()));
-        assert!(plan.allowed_tools.contains(&"semantic_search_local_kb".to_string()));
+        assert!(plan
+            .allowed_tools
+            .contains(&"semantic_search_local_kb".to_string()));
     }
 }

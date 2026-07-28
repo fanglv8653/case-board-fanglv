@@ -44,7 +44,8 @@ impl Tool for SearchCasesNormal {
         if let Some(r) = try_kb_hit(ctx, "rh_ptal_search", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::search_ptal(api_key, qw, top_k).await?;
         Ok(save_and_wrap(
             ctx,
@@ -84,7 +85,8 @@ impl Tool for SearchCasesAuthority {
         if let Some(r) = try_kb_hit(ctx, "rh_qwal_search", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::search_qwal(api_key, qw, top_k).await?;
         Ok(save_and_wrap(
             ctx,
@@ -134,7 +136,8 @@ impl Tool for GetCaseDetail {
         if let Some(r) = try_kb_hit(ctx, "rh_case_details", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         // 临时实现:用对应库的 search 把 case_no 当 qw,top_k=1 拿到最匹配的文书。
         // 取详情是**尽力而为**:某些案号(尤其外地/冷门库)元典会返回 404/无结果。
         // 这不是致命错误 —— LLM 手上已有 search 列表里的摘要,应据此继续,不该让整个
@@ -195,7 +198,8 @@ impl Tool for CaseVectorSearch {
         if let Some(r) = try_kb_hit(ctx, "case_vector_search", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let params = yuandian::CaseVectorSearchParams {
             query: query.to_string(),
             wenshu_filter: None,

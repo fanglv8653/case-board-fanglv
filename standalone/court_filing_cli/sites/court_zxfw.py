@@ -88,11 +88,7 @@ class CourtZxfwService:  # pragma: no cover
         self._debug_dir = debug_dir
 
         # 依赖注入：Cookie 服务
-        if cookie_service is None:
-            from court_filing_cli.cookie_service import CookieService
-            self._cookie_service: CookieServiceProtocol = CookieService()
-        else:
-            self._cookie_service = cookie_service
+        self._cookie_service: CookieServiceProtocol | None = cookie_service
 
         # 依赖注入：验证码识别器
         if captcha_recognizer is None:
@@ -144,7 +140,7 @@ class CourtZxfwService:  # pragma: no cover
                     token = self._extract_token_from_body(response_body)
                     if token:
                         captured_token["value"] = token
-                        logger.info("捕获到 Token: %s... (长度: %d)", token[:30], len(token))
+                        logger.info("登录响应包含 Token（长度: %d，值不记录）", len(token))
                     else:
                         logger.warning("未能从登录响应中提取 Token，响应结构: %s", list(response_body.keys()))
                 except Exception as e:
@@ -244,8 +240,7 @@ class CourtZxfwService:  # pragma: no cover
         password_input.wait_for(state="visible", timeout=10000)
         password_input.fill(password)
         self._random_wait(0.5, 1)
-        if save_debug:
-            self._save_screenshot("03_credentials_filled")
+        # 凭据填入后禁止截图，避免账号/密码进入调试文件。
 
     def _is_network_error(self, exc: Exception) -> bool:
         """判断是否为网络相关异常。"""
@@ -388,16 +383,15 @@ class CourtZxfwService:  # pragma: no cover
                 logger.warning("登录失败（网络异常）: %s", e)
             else:
                 logger.error("登录失败: %s", e, exc_info=True)
-            if save_debug:
-                self._save_screenshot("error_login_failed")
             if self._is_network_error(e):
                 raise ConnectionError(f"登录失败: 网络连接异常（{e}）") from e
             raise ValueError(f"登录失败: {e}") from e
 
     def _get_cookie_path(self, account: str) -> str:
-        """获取 Cookie 存储路径"""
-        safe_account = account.replace("@", "_at_").replace("/", "_")
-        return f"cookies/{self.site_name}/{safe_account}.json"
+        """仅生成不可逆账号指纹的二进制封套路径，不把账号写入文件名。"""
+        import hashlib
+        account_id = hashlib.sha256(account.encode("utf-8")).hexdigest()[:24]
+        return f"cookies/{self.site_name}/{account_id}.bin"
 
     def _save_cookies(self, account: str) -> None:
         """保存当前浏览器上下文的 Cookie"""
@@ -405,7 +399,7 @@ class CourtZxfwService:  # pragma: no cover
             return
         cookie_path = self._get_cookie_path(account)
         self._cookie_service.save(self.context, cookie_path)
-        logger.info("Cookie 已保存, account=%s, path=%s", account, cookie_path)
+        logger.info("Cookie 加密封套已保存")
 
     def _try_captcha_login(
         self,
@@ -445,8 +439,6 @@ class CourtZxfwService:  # pragma: no cover
                 captcha_input.fill(captcha_text)
                 self._random_wait(0.5, 1)
 
-                if save_debug:
-                    self._save_screenshot(f"04_captcha_filled_attempt_{attempt}")
 
                 login_button = self.page.locator(f"xpath={login_button_xpath}")
                 login_button.wait_for(state="visible", timeout=10000)
@@ -465,8 +457,6 @@ class CourtZxfwService:  # pragma: no cover
                     self.is_logged_in = True
                     return True
 
-                if save_debug:
-                    self._save_screenshot(f"05_after_login_attempt_{attempt}")
 
                 if self._check_login_success():
                     logger.info("登录成功")

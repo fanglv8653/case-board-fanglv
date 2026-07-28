@@ -112,10 +112,7 @@ fn parse_builtin_scene_configs() -> Result<LoadedScenes, String> {
     }
 
     if scenes.is_empty() {
-        return Err(format!(
-            "方律场景配置全部不可用: {}",
-            warnings.join(" | ")
-        ));
+        return Err(format!("方律场景配置全部不可用: {}", warnings.join(" | ")));
     }
 
     scenes.sort_by(|left, right| {
@@ -173,7 +170,10 @@ mod tests {
             parse_task_type_strict("compile_legal_basis"),
             Some(TaskType::CompileLegalBasis)
         );
-        assert_eq!(parse_task_type_strict("free_chat"), Some(TaskType::FreeChat));
+        assert_eq!(
+            parse_task_type_strict("free_chat"),
+            Some(TaskType::FreeChat)
+        );
         assert_eq!(parse_task_type_strict("unknown"), None);
     }
 }

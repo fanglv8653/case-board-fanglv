@@ -6,7 +6,7 @@
 - 自动化只到「预览页」，不自动提交（人工核对后手动提交）
 
 用法:
-    python -m court_filing_cli --account X --password Y \\
+    python -m court_filing_cli --credentials-stdin \\
         --filing-type civil --case-data case.json --materials mats.json \\
         --output-dir /tmp/job1
 """

@@ -1,6 +1,6 @@
 [package]
 name = "caseboard"
-version = "0.7.7"
+version = "0.8.0"
 description = "方律案件看板 · Fanglv CaseBoard"
 authors = ["Fanglv", "CaseBoard Contributors"]
 edition = "2021"
@@ -80,4 +80,4 @@ async-trait = "0.1"
 # 飞书 App Secret 与 OAuth token 仅保存到 Windows Credential Manager，不进入
 # settings.json、SQLite 或诊断日志。关闭默认跨平台后端，避免非 Windows 构建引入
 # 无关的 Secret Service / Keychain 系统依赖。
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Storage_FileSystem"] }

@@ -48,7 +48,8 @@ impl Tool for SearchLaws {
             return Ok(r);
         }
 
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let params = yuandian::FtSearchParams {
             keyword: keyword.to_string(),
             fgmc: None,
@@ -128,7 +129,8 @@ impl Tool for GetLawArticle {
         if let Some(r) = try_kb_hit(ctx, "rh_ft_detail", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let params = yuandian::FtDetailParams {
             id,
             fgmc,
@@ -169,9 +171,10 @@ async fn try_fulltext_article(
         Some(j) => (j, true),
         None => {
             // 2) 未命中 → 按 fgid 拉整部法规全文(版本正确),顺手缓存供后续 0 积分命中
-            let Ok(api_key) = yuandian_key(ctx) else {
+            let Ok(api_key_secret) = yuandian_key(ctx) else {
                 return Ok(None); // 无 key → 降级单条
             };
+            let api_key = api_key_secret.expose();
             let params = yuandian::FgDetailParams {
                 id: Some(fgid.to_string()),
                 fgmc: None,
@@ -273,7 +276,8 @@ impl Tool for SearchRegulations {
             return Ok(r);
         }
 
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let params = yuandian::FgSearchParams {
             keyword: keyword.clone(),
             fgmc: fgmc.clone(),
@@ -338,7 +342,8 @@ impl Tool for GetRegulationDetail {
             }
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let params = yuandian::FgDetailParams {
             id,
             fgmc,
@@ -428,7 +433,8 @@ impl Tool for LawVectorSearch {
         if let Some(r) = try_kb_hit(ctx, "law_vector_search", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let params = yuandian::LawVectorSearchParams {
             query: query.to_string(),
             effect_level,

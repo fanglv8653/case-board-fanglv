@@ -275,7 +275,7 @@ pub async fn get_document_by_id(
 }
 
 /// 把文档抽取状态重置为 `pending`(并清 `last_error`),用于强制重抽。
-/// run_extraction 只处理 pending,故重置后再 spawn_extraction 即会重抽该文档。返回受影响行数。
+/// 重置并保存“识别”决策后，材料队列只会领取 pending 文档。返回受影响行数。
 pub async fn reset_for_reextract(pool: &SqlitePool, id: &str) -> Result<u64, sqlx::Error> {
     let res = sqlx::query(
         "UPDATE documents SET extraction_status = 'pending', last_error = NULL \

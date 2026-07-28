@@ -32,6 +32,7 @@ import {
   verifyDeepSeekKey,
   verifyYuandianKey,
   seedDemoCaseIfEmpty,
+  setCredential,
 } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 
@@ -204,10 +205,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
       .then((s) => {
         setSettings(s);
         if (s.user_display_name) setDisplayName(s.user_display_name);
-        if (s.mineru_api_key) setMinerKey(s.mineru_api_key);
-        if (s.cloud_llm_api_key) setDsKey(s.cloud_llm_api_key);
         if (s.cloud_llm_endpoint) setDsEndpoint(s.cloud_llm_endpoint);
-        if (s.yuandian_api_key) setYuandianKey(s.yuandian_api_key);
       })
       .catch(console.error);
   }, [open]);
@@ -215,13 +213,34 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
   if (!open) return null;
 
   // DeepSeek key 是核心,必填才能「开始使用」;MinerU / 元典 推荐填但可「稍后」。
-  const canFinish = dsKey.trim().length > 0;
+  const configured = (locator: string) =>
+    settings?.credential_statuses?.some(
+      (status) => status.locator === locator && status.configured,
+    ) ?? false;
+  const canFinish = dsKey.trim().length > 0 || configured("provider/deepseek/api-key");
 
   async function handleVerifyMineru() {
     setMineruStatus("verifying");
     setMineruMsg("");
     try {
-      const r = await verifyMinerUKey(minerKey);
+      if (minerKey.trim()) {
+        const status = await setCredential("provider/mineru/api-key", minerKey.trim());
+        setMinerKey("");
+        setSettings((current) =>
+          current
+            ? {
+                ...current,
+                credential_statuses: [
+                  ...(current.credential_statuses ?? []).filter(
+                    (item) => item.locator !== status.locator,
+                  ),
+                  status,
+                ],
+              }
+            : current,
+        );
+      }
+      const r = await verifyMinerUKey();
       setMineruStatus(r.ok ? "ok" : "fail");
       setMineruMsg(r.message);
     } catch (e) {
@@ -234,7 +253,24 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
     setDeepseekStatus("verifying");
     setDeepseekMsg("");
     try {
-      const r = await verifyDeepSeekKey(dsKey, dsEndpoint);
+      if (dsKey.trim()) {
+        const status = await setCredential("provider/deepseek/api-key", dsKey.trim());
+        setDsKey("");
+        setSettings((current) =>
+          current
+            ? {
+                ...current,
+                credential_statuses: [
+                  ...(current.credential_statuses ?? []).filter(
+                    (item) => item.locator !== status.locator,
+                  ),
+                  status,
+                ],
+              }
+            : current,
+        );
+      }
+      const r = await verifyDeepSeekKey(dsEndpoint);
       setDeepseekStatus(r.ok ? "ok" : "fail");
       setDeepseekMsg(r.message);
     } catch (e) {
@@ -247,7 +283,24 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
     setYuandianStatus("verifying");
     setYuandianMsg("");
     try {
-      const r = await verifyYuandianKey(yuandianKey);
+      if (yuandianKey.trim()) {
+        const status = await setCredential("provider/yuandian/api-key", yuandianKey.trim());
+        setYuandianKey("");
+        setSettings((current) =>
+          current
+            ? {
+                ...current,
+                credential_statuses: [
+                  ...(current.credential_statuses ?? []).filter(
+                    (item) => item.locator !== status.locator,
+                  ),
+                  status,
+                ],
+              }
+            : current,
+        );
+      }
+      const r = await verifyYuandianKey();
       setYuandianStatus(r.ok ? "ok" : "fail");
       setYuandianMsg(r.message);
     } catch (e) {
@@ -260,6 +313,18 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
     if (!settings) return;
     setSaving(true);
     try {
+      if (minerKey.trim()) {
+        await setCredential("provider/mineru/api-key", minerKey.trim());
+        setMinerKey("");
+      }
+      if (dsKey.trim()) {
+        await setCredential("provider/deepseek/api-key", dsKey.trim());
+        setDsKey("");
+      }
+      if (yuandianKey.trim()) {
+        await setCredential("provider/yuandian/api-key", yuandianKey.trim());
+        setYuandianKey("");
+      }
       await saveSettings({
         ...settings,
         user_display_name: displayName.trim() || null,
@@ -268,10 +333,7 @@ export function OnboardingWizard({ open, onComplete }: OnboardingWizardProps) {
         ocr_provider: "cloud",
         llm_provider: "cloud",
         cloud_enabled: true,
-        mineru_api_key: minerKey.trim() || null,
-        cloud_llm_api_key: dsKey.trim() || null,
         cloud_llm_endpoint: dsEndpoint.trim() || null,
-        yuandian_api_key: yuandianKey.trim() || null,
         mineru_verified_at:
           mineruStatus === "ok" ? new Date().toISOString() : null,
         deepseek_verified_at:

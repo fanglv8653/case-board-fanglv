@@ -2158,23 +2158,45 @@ mod tests {
 
     #[tokio::test]
     async fn manual_profile_save_tracks_changes_and_explicit_null_in_one_revision() {
-        let pool = crate::db::init_pool(":memory:").await.expect("migrate database");
+        let pool = crate::db::init_pool(":memory:")
+            .await
+            .expect("migrate database");
         let case_id = test_case(&pool).await;
         let original_overrides = r#"{"fields":{"legacy_key":{"value":"keep"}},"unknown":"keep"}"#;
-        upsert_criminal_case_profile(&pool, UpsertCriminalCaseProfileInput {
-            case_id: case_id.clone(), current_stage: Some("侦查".into()), suspected_charge: Some("盗窃罪".into()),
-            user_overrides_json: Some(original_overrides.into()), ..Default::default()
-        }).await.unwrap();
-        let saved = upsert_criminal_case_profile_manual(&pool, UpsertCriminalCaseProfileInput {
-            case_id, current_stage: None, suspected_charge: Some("诈骗罪".into()),
-            user_overrides_json: Some(original_overrides.into()), ..Default::default()
-        }).await.unwrap();
+        upsert_criminal_case_profile(
+            &pool,
+            UpsertCriminalCaseProfileInput {
+                case_id: case_id.clone(),
+                current_stage: Some("侦查".into()),
+                suspected_charge: Some("盗窃罪".into()),
+                user_overrides_json: Some(original_overrides.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let saved = upsert_criminal_case_profile_manual(
+            &pool,
+            UpsertCriminalCaseProfileInput {
+                case_id,
+                current_stage: None,
+                suspected_charge: Some("诈骗罪".into()),
+                user_overrides_json: Some(original_overrides.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(saved.profile_revision, 1);
         assert!(saved.current_stage.is_none());
-        let overrides: serde_json::Value = serde_json::from_str(saved.user_overrides_json.as_deref().unwrap()).unwrap();
+        let overrides: serde_json::Value =
+            serde_json::from_str(saved.user_overrides_json.as_deref().unwrap()).unwrap();
         assert_eq!(overrides["unknown"], "keep");
         assert!(overrides["fields"].get("legacy_key").is_some());
-        assert_eq!(overrides["fields"]["current_stage"]["value"], serde_json::Value::Null);
+        assert_eq!(
+            overrides["fields"]["current_stage"]["value"],
+            serde_json::Value::Null
+        );
         assert_eq!(overrides["fields"]["suspected_charge"]["value"], "诈骗罪");
     }
 

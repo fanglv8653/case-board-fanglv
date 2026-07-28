@@ -23,6 +23,11 @@ import { cn, docDisplayName } from "@/lib/utils";
 
 import { type GroupKey } from "../lib/groupByStage";
 import {
+  CRIMINAL_STAGE_ORDER,
+  groupCriminalDocuments,
+  type CriminalStageGroups,
+} from "../lib/criminalStage";
+import {
   buildFileTree,
   collectDocs,
   countFiles,
@@ -64,6 +69,7 @@ export function SourceFilesSection({
   groups,
   documents,
   sourceFolder,
+  domain,
   markMap,
   onMarkImportance,
   onMarkPartySide,
@@ -88,6 +94,8 @@ export function SourceFilesSection({
   documents: Document[];
   /** 案件源文件夹绝对路径,派生原结构相对路径用 */
   sourceFolder: string;
+  /** 民刑分流；刑事使用独立程序阶段，民事维持既有 STAGE_ORDER。 */
+  domain: "civil" | "criminal";
   /** Phase 3:每个文档的标记(重要/忽略 + 原被告 + 分类) */
   markMap: DocMarkMap;
   onMarkImportance: (docIds: string[], value: Importance | null) => void;
@@ -124,6 +132,10 @@ export function SourceFilesSection({
   );
   const tree = useMemo(
     () => buildFileTree(sourceDocs, sourceFolder),
+    [sourceDocs, sourceFolder],
+  );
+  const criminalGroups = useMemo(
+    () => groupCriminalDocuments(sourceDocs, sourceFolder),
     [sourceDocs, sourceFolder],
   );
   const marks: MarkHandlers = {
@@ -210,8 +222,10 @@ export function SourceFilesSection({
             total={total}
             aiArtifacts={aiArtifacts.length}
             groups={groups}
+            criminalGroups={criminalGroups}
             sourceDocs={sourceDocs}
             markMap={markMap}
+            domain={domain}
           />
 
           {/* 视图切换 */}
@@ -250,33 +264,61 @@ export function SourceFilesSection({
 
           {viewMode === "stage" && (
             <>
-              {STAGE_ORDER.map((stage) =>
-                groups[stage].length > 0 ? (
-                  <StageSection
-                    key={stage}
-                    title={stage}
-                    count={groups[stage].length}
-                    docs={groups[stage]}
-                    marks={marks}
-                    onOpenDoc={onOpenDoc}
-                    onRevealDoc={onRevealDoc}
-                    onReextract={onReextract}
-                    onReextractDewatermark={onReextractDewatermark}
-                  />
-                ) : null,
-              )}
-              {groups.其他.length > 0 && (
-                <StageSection
-                  title="其他"
-                  count={groups.其他.length}
-                  docs={groups.其他}
-                  dim
-                  marks={marks}
-                  onOpenDoc={onOpenDoc}
-                  onRevealDoc={onRevealDoc}
-                  onReextract={onReextract}
-                  onReextractDewatermark={onReextractDewatermark}
-                />
+              {domain === "criminal" ? (
+                <>
+                  {CRIMINAL_STAGE_ORDER.map((stage) =>
+                    criminalGroups[stage].length > 0 ? (
+                      <StageSection
+                        key={stage}
+                        title={stage}
+                        count={criminalGroups[stage].length}
+                        docs={criminalGroups[stage]}
+                        marks={marks}
+                        onOpenDoc={onOpenDoc}
+                        onRevealDoc={onRevealDoc}
+                        onReextract={onReextract}
+                        onReextractDewatermark={onReextractDewatermark}
+                      />
+                    ) : null,
+                  )}
+                  {criminalGroups.未分类.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      另有 {criminalGroups.未分类.length} 份材料无法可靠判断程序阶段，仅计入总文档。
+                      可在“原文件夹结构”中查看。
+                    </p>
+                  )}
+                </>
+              ) : (
+                <>
+                  {STAGE_ORDER.map((stage) =>
+                    groups[stage].length > 0 ? (
+                      <StageSection
+                        key={stage}
+                        title={stage}
+                        count={groups[stage].length}
+                        docs={groups[stage]}
+                        marks={marks}
+                        onOpenDoc={onOpenDoc}
+                        onRevealDoc={onRevealDoc}
+                        onReextract={onReextract}
+                        onReextractDewatermark={onReextractDewatermark}
+                      />
+                    ) : null,
+                  )}
+                  {groups.其他.length > 0 && (
+                    <StageSection
+                      title="其他"
+                      count={groups.其他.length}
+                      docs={groups.其他}
+                      dim
+                      marks={marks}
+                      onOpenDoc={onOpenDoc}
+                      onRevealDoc={onRevealDoc}
+                      onReextract={onReextract}
+                      onReextractDewatermark={onReextractDewatermark}
+                    />
+                  )}
+                </>
               )}
             </>
           )}
@@ -300,14 +342,18 @@ function OverviewCard({
   total,
   aiArtifacts,
   groups,
+  criminalGroups,
   sourceDocs,
   markMap,
+  domain,
 }: {
   total: number;
   aiArtifacts: number;
   groups: Record<GroupKey, Document[]>;
+  criminalGroups: CriminalStageGroups<Document>;
   sourceDocs: Document[];
   markMap: DocMarkMap;
+  domain: "civil" | "criminal";
 }) {
   // 是否已有标记(AI 整理 / 人工标记过任意 importance 或 category)
   const hasMarks = sourceDocs.some((d) => {
@@ -316,7 +362,13 @@ function OverviewCard({
   });
 
   let stats: { label: string; count: number; dim?: boolean }[];
-  if (hasMarks) {
+  if (domain === "criminal") {
+    stats = CRIMINAL_STAGE_ORDER.map((stage) => ({
+      label: stage,
+      count: criminalGroups[stage].length,
+      dim: criminalGroups[stage].length === 0,
+    }));
+  } else if (hasMarks) {
     // 整理过 → 顶部统计改成反映标记:重要/忽略 + 各归类(只显示有内容的)
     const important = sourceDocs.filter(
       (d) => markMap.get(d.id)?.importance === "重要",
@@ -347,7 +399,11 @@ function OverviewCard({
   return (
     <section className="rounded-lg border border-border bg-card px-5 py-4">
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-6">
-        <Stat label="总文档" count={total} primary />
+        <Stat
+          label="总文档"
+          count={domain === "criminal" ? sourceDocs.length : total}
+          primary
+        />
         {stats.map((s) => (
           <Stat key={s.label} label={s.label} count={s.count} dim={s.dim} />
         ))}

@@ -39,13 +39,12 @@ import {
   getCaseWithDocs,
   getSettings,
   globalExtractCase,
-  importCaseFolder,
-  planImportFolder,
-  commitImportFolder,
+  commitMaterialPreflight,
   listCases,
   findFeishuCasePath,
   openInDefaultApp,
-  refreshCaseFiles,
+  previewMaterialImport,
+  previewMaterialRefresh,
   revealInFinder,
   setDocumentDisplayName,
 } from "@/lib/api";
@@ -53,20 +52,23 @@ import {
   type Case,
   type DocOcrStatusEvent,
   type Document,
-  type ImportPlan,
+  type MaterialDecisionInput,
+  type MaterialPreflight,
   type ProgressEvent,
   type Settings,
   type UpdateInfo,
 } from "@/lib/types";
-import { SplitImportDialog } from "@/components/SplitImportDialog";
+import { MaterialPreflightDialog } from "@/components/MaterialPreflightDialog";
 
 type ImportKeyIssue = { label: string; reason: "missing" | "unverified" };
 
 function collectImportKeyIssues(s: Settings): ImportKeyIssue[] {
   const issues: ImportKeyIssue[] = [];
+  const configured = (locator: string) =>
+    s.credential_statuses?.find((status) => status.locator === locator)?.configured ?? false;
 
   {
-    const filled = !!s.mineru_api_key?.trim();
+    const filled = configured("provider/mineru/api-key");
     const verified = !!s.mineru_verified_at;
     if (!filled) {
       issues.push({ label: "MinerU API Token(云端 OCR)", reason: "missing" });
@@ -78,14 +80,6 @@ function collectImportKeyIssues(s: Settings): ImportKeyIssue[] {
     const backend = s.cloud_llm_backend ?? "deepseek";
     const isMinimax = backend === "minimax";
     const isCompat = ["glm", "mimo", "custom"].includes(backend);
-    const compatKey =
-      backend === "glm"
-        ? s.glm_llm_api_key || s.compat_llm_api_key
-        : backend === "mimo"
-          ? s.mimo_llm_api_key || s.compat_llm_api_key
-          : backend === "custom"
-            ? s.custom_llm_api_key || s.compat_llm_api_key
-            : s.compat_llm_api_key;
     const compatVerifiedAt =
       backend === "glm"
         ? s.glm_llm_verified_at || s.compat_llm_verified_at
@@ -94,11 +88,11 @@ function collectImportKeyIssues(s: Settings): ImportKeyIssue[] {
           : backend === "custom"
             ? s.custom_llm_verified_at || s.compat_llm_verified_at
             : s.compat_llm_verified_at;
-    const filled = isMinimax
-      ? !!s.minimax_api_key?.trim()
-      : isCompat
-        ? !!compatKey?.trim()
-        : !!s.cloud_llm_api_key?.trim();
+      const filled = isMinimax
+        ? configured("provider/minimax/api-key")
+        : isCompat
+          ? configured(`provider/${backend}/api-key`)
+          : configured("provider/deepseek/api-key");
     const verified = isMinimax
       ? !!s.minimax_verified_at
       : isCompat
@@ -140,8 +134,9 @@ function App() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 多案件拆分预案(检测到一个文件夹含多个案件时弹确认弹窗)
-  const [splitPlan, setSplitPlan] = useState<ImportPlan | null>(null);
+  const [materialPreflight, setMaterialPreflight] = useState<MaterialPreflight | null>(
+    null,
+  );
   /** 当前打开的文档预览(点击 AI 产物或可读文档时弹) */
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
   /** 源文件看板 Phase 1:当前在板内查看器抽屉打开的源文件(MD/原件双视图) */
@@ -246,7 +241,10 @@ function App() {
         //      用户也可能临时切回 cloud 跑生成任务
         // 老板 2026-05-27 反馈:同事配了 key 但 chip 不显示,核心问题是判定太严格。
         const hasDeepSeekKey =
-          !!s.cloud_llm_api_key && s.cloud_llm_api_key.trim().length > 0;
+          s.credential_statuses?.some(
+            (status) =>
+              status.locator === "provider/deepseek/api-key" && status.configured,
+          ) ?? false;
         setShowDeepSeekChip(hasDeepSeekKey);
         setHomeStatusWarnings(buildHomeStatusWarnings(s));
       })
@@ -369,7 +367,10 @@ function App() {
       .then((s) => {
         setUserDisplayName(s.user_display_name);
         const hasDeepSeekKey =
-          !!s.cloud_llm_api_key && s.cloud_llm_api_key.trim().length > 0;
+          s.credential_statuses?.some(
+            (status) =>
+              status.locator === "provider/deepseek/api-key" && status.configured,
+          ) ?? false;
         setShowDeepSeekChip(hasDeepSeekKey);
         setHomeStatusWarnings(buildHomeStatusWarnings(s));
       })
@@ -485,131 +486,36 @@ function App() {
     };
   }, [selectedId]);
 
-  // 防呆:导入前先检查云端档 API key 是否齐全且验证通过。返回 true=可导入。
-  // 2026-05-26 V0.1.11 补强:之前只查 key 非空,导致老用户从旧版升级后 key 填了"1"
-  // 没验证通过却仍能导入(然后批量失败)。现在加 verified_at 检查,**未验证一律拦下**。
-  // V0.3:本地模型已隐藏 → 只走云端,这里恒按云端校验(与后端 effective_*=cloud 一致,
-  // 同时消化老用户 ocr/llm_provider="local" 残留,避免前端漏检→后端却走云端而失败的错位)。
-  const validateImportKeys = useCallback(async (): Promise<boolean> => {
-    const s = await getSettings();
-    const issues = collectImportKeyIssues(s);
-    setHomeStatusWarnings(buildHomeStatusWarnings(s));
-
-    if (issues.length > 0) {
-      const lines = issues.map(
-        (i) =>
-          `${i.label}${i.reason === "missing" ? "(还未填写)" : "(已填写但未通过验证)"}`,
-      );
-      // toast(z-200 在设置面板之上,不会被盖住)+ 自动打开设置面板引导补填
-      toast(
-        `无法导入:${lines.join(";")}。已为你打开设置,填好并验证后再导入。`,
-        "error",
-        7000,
-      );
-      // 缺的是云端 LLM key(a92ae91 校验),深链到「大脑」tab 直接补填
-      openSettingsTab("brain");
-      return false;
-    }
-    return true;
-  }, [openSettingsTab]);
-
-  // 单个文件夹 → 单个案件导入(保底路径,或拆分确认后的「合并成 1 个」)。失败给 toast。
+  // 预检只读文件元数据；用户确认后才建案、同步文档和创建识别队列。
   const importSingle = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await importCaseFolder(path);
-      const all = await listCases();
-      setCases(all);
-      setSelectedId(result.case.id);
-      setView("detail");
-      // F2:刑事案件文件夹导入 → 切到刑事 tab(否则被 civilCases 过滤掉、在诉讼 tab 看不见)。
-      // 记下 id,抽取完成回调再判一次(导入瞬间罪名等字段可能还没抽出);名字含「刑」/罪名时此处即可判。
-      justImportedCaseRef.current = result.case.id;
-      if (isCriminalCase(result.case)) {
-        justImportedCaseRef.current = null;
-        void setActiveModuleSafe("criminal");
-      }
-      toast(
-        result.is_existing
-          ? `已重新扫描 · 共 ${result.docs.length} 份文档`
-          : `已导入 · 共 ${result.docs.length} 份文档`,
-        "success",
+      setMaterialPreflight(
+        await previewMaterialImport(
+          path,
+          activeModule === "criminal" ? "criminal" : "civil",
+        ),
       );
     } catch (e) {
       setError(String(e));
-      toast(`导入失败:${e}`, "error", 7000);
+      toast(`材料预检失败：${e}`, "error", 7000);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeModule]);
 
-  // 拖拽 / 选目录后的入口:先做多案件检测,检测到多案就弹拆分确认,否则单案导入。
+  // 所有拖拽/选择目录入口统一先进入材料预检，避免旧入口绕过三态确认。
   const doImport = useCallback(
     async (path: string) => {
       setError(null);
-      try {
-        const plan = await planImportFolder(path);
-        if (plan.multi && plan.cases.length >= 2) {
-          setSplitPlan(plan); // 弹拆分确认弹窗,后续走 confirmSplit / mergeAll
-          return;
-        }
-      } catch (e) {
-        // 检测失败不阻断:退回单案导入(保底)
-        console.warn("plan_import_folder 失败,退回单案导入", e);
-      }
       await importSingle(path);
-    },
-    [importSingle],
-  );
-
-  // 拆分确认:按用户勾选的案件批量建案,跳到第一个案件。
-  const confirmSplit = useCallback(
-    async (
-      root: string,
-      cases: { dir: string; name: string }[],
-      sharedDirs: string[],
-    ) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const results = await commitImportFolder(root, cases, sharedDirs);
-        const all = await listCases();
-        setCases(all);
-        if (results[0]) {
-          setSelectedId(results[0].case.id);
-          setView("detail");
-          // F2:拆分导入后,若首个案件已可判为刑事则切刑事 tab;否则记 id 等抽取完成再判。
-          justImportedCaseRef.current = results[0].case.id;
-          if (isCriminalCase(results[0].case)) {
-            justImportedCaseRef.current = null;
-            void setActiveModuleSafe("criminal");
-          }
-        }
-        setSplitPlan(null);
-        toast(`已拆成 ${results.length} 个案件导入`, "success");
-      } catch (e) {
-        setError(String(e));
-        toast(`拆分导入失败:${e}`, "error", 7000);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
-
-  // 拆分弹窗里选「合并成 1 个案件」:走保底单案导入。
-  const mergeAllAsSingle = useCallback(
-    async (root: string) => {
-      setSplitPlan(null);
-      await importSingle(root);
     },
     [importSingle],
   );
 
   // 点「导入案件」按钮:校验 key → 弹系统选目录器 → 导入。
   const handleImport = useCallback(async () => {
-    if (!(await validateImportKeys())) return;
     const selected = await open({
       directory: true,
       multiple: false,
@@ -617,13 +523,12 @@ function App() {
     });
     if (typeof selected !== "string") return;
     await doImport(selected);
-  }, [validateImportKeys, doImport]);
+  }, [doImport]);
 
   // 点飞书日历事件后导入对应文件夹:先按事件标题反查飞书案件池里的本地路径,
   // 反查不到再弹文件夹选择器。(整合外部贡献 PR #9,gcheng-001)
   const handleCalendarImport = useCallback(
     async (eventTitle: string) => {
-      if (!(await validateImportKeys())) return;
       try {
         const localPath = await findFeishuCasePath(eventTitle);
         if (localPath) {
@@ -642,16 +547,15 @@ function App() {
         await doImport(selected);
       }
     },
-    [validateImportKeys, doImport],
+    [doImport],
   );
 
   // 首页拖拽文件夹进来:校验 key → 直接导入拖入的路径(走和按钮同一条管线)。
   const handleDropImport = useCallback(
     async (path: string) => {
-      if (!(await validateImportKeys())) return;
       await doImport(path);
     },
-    [validateImportKeys, doImport],
+    [doImport],
   );
 
   /**
@@ -851,45 +755,61 @@ function App() {
   /** 是否正在跑刷新源文件(disable 按钮防重复点) */
   const [refreshingFiles, setRefreshingFiles] = useState(false);
 
-  /**
-   * 2026-05-25 V0.1.5 「🔄 刷新源文件」处理函数。
-   *
-   * 后端做 diff sync(scan_folder → sync_documents_for_case),立即返回 SyncStats;
-   * 如果有 added/updated/deleted,后端会自动 spawn_extraction,前端通过现有的
-   * `extraction_progress` 事件订阅看进度 + 完成后自动 reload(跟初次导入复用同一通道)。
-   */
+  /** 刷新也先做只读预检；新增文件保持待确认，不能隐式进入 OCR/LLM。 */
   const handleRefreshFiles = useCallback(async () => {
     if (!selectedCase || refreshingFiles) return;
     setRefreshingFiles(true);
     try {
-      const stats = await refreshCaseFiles(selectedCase.id);
-      const hasChange =
-        stats.added > 0 || stats.updated > 0 || stats.deleted > 0;
-      if (!hasChange) {
-        toast(`源文件夹无变化(${stats.unchanged} 份均最新)`, "info");
-      } else {
-        const parts: string[] = [];
-        if (stats.added > 0) parts.push(`新增 ${stats.added}`);
-        if (stats.updated > 0) parts.push(`更新 ${stats.updated}`);
-        if (stats.deleted > 0) parts.push(`移除 ${stats.deleted}`);
-        toast(`${parts.join(" · ")} · 后台抽取中`, "success");
-        // 立刻刷一次文档列表,让前端看到 deleted_at / pending 状态变化
-        if (selectedId) {
-          try {
-            const r = await getCaseWithDocs(selectedId);
-            setSelectedCase(r.case);
-            setDocuments(r.documents);
-          } catch {
-            /* 不阻塞 */
-          }
-        }
-      }
+      setMaterialPreflight(await previewMaterialRefresh(selectedCase.id));
     } catch (e) {
       setError(`刷新源文件失败: ${e}`);
     } finally {
       setRefreshingFiles(false);
     }
-  }, [selectedCase, selectedId, refreshingFiles]);
+  }, [selectedCase, refreshingFiles]);
+
+  const confirmMaterialPreflight = useCallback(
+    async (decisions: MaterialDecisionInput[], startProcessing: boolean) => {
+      if (!materialPreflight || loading) return;
+      setLoading(true);
+      try {
+        const result = await commitMaterialPreflight({
+          mode: materialPreflight.mode,
+          caseId: materialPreflight.caseId,
+          rootPath: materialPreflight.rootPath,
+          legalDomain: materialPreflight.legalDomain,
+          decisions,
+          startProcessing,
+        });
+        setMaterialPreflight(null);
+        const all = await listCases();
+        setCases(all);
+        setSelectedId(result.case.id);
+        setSelectedCase(result.case);
+        setDocuments(result.documents);
+        setView("detail");
+        justImportedCaseRef.current = result.case.id;
+        if (isCriminalCase(result.case)) {
+          justImportedCaseRef.current = null;
+          void setActiveModuleSafe("criminal");
+        }
+        const recognized = decisions.filter(
+          (decision) => decision.disposition === "recognize",
+        ).length;
+        toast(
+          startProcessing && recognized
+            ? `材料决策已保存，${recognized} 份已进入识别队列`
+            : "材料决策已保存",
+          "success",
+        );
+      } catch (e) {
+        toast(`提交材料预检失败：${e}`, "error", 7000);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loading, materialPreflight],
+  );
 
   /**
    * 2026-05-27 V0.1.13+ chat artifact 完成后的轻量 reload。
@@ -1359,13 +1279,12 @@ function App() {
           }}
         />
       )}
-      {splitPlan && (
-        <SplitImportDialog
-          plan={splitPlan}
+      {materialPreflight && (
+        <MaterialPreflightDialog
+          preflight={materialPreflight}
           busy={loading}
-          onConfirm={(cs, sd) => confirmSplit(splitPlan.root, cs, sd)}
-          onMergeAll={() => mergeAllAsSingle(splitPlan.root)}
-          onCancel={() => setSplitPlan(null)}
+          onConfirm={confirmMaterialPreflight}
+          onCancel={() => setMaterialPreflight(null)}
         />
       )}
 

@@ -35,7 +35,8 @@ impl Tool for VerifyLegalCitations {
 
     async fn execute(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<ToolResult, ToolError> {
         let text = require_str(args, "text")?;
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         // **不缓存** — 校验需要实时数据
         let resp = yuandian::hall_detect(api_key, text).await?;
         Ok(ToolResult {

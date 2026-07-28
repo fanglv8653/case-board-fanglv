@@ -51,18 +51,17 @@ impl Tool for SemanticSearchLocalKb {
         };
 
         // 没配 embedding key → 优雅提示改用关键词工具(不报错)
-        let key = ctx
-            .settings
-            .embedding_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let Some(key) = key else {
+        let key_secret =
+            crate::credentials::resolve_static(crate::credentials::StaticCredential::Embedding)
+                .ok()
+                .flatten();
+        let Some(key_secret) = key_secret else {
             return Ok(ToolResult::plain(
                 "本地知识库未配置语义检索(embedding 未设置)。请改用 `search_local_kb`(关键词检索),\
                  或提示用户在设置页配置 embedding(硅基流动 bge-m3 免费)。不要反复调用本工具。",
             ));
         };
+        let key = key_secret.expose();
         let endpoint = ctx.settings.embedding_endpoint.as_deref().unwrap_or("");
         let model = ctx.settings.embedding_model.as_deref().unwrap_or("");
 

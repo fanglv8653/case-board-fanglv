@@ -49,7 +49,8 @@ pub async fn insert(
     .bind(&j.case_id)
     .bind(&j.filing_type)
     .bind(&j.court_name)
-    .bind(&j.cookie_account)
+    // 账号属于凭据，不得写 SQLite；字段仅为旧表兼容，始终落 NULL。
+    .bind(Option::<String>::None)
     .bind(&j.output_dir)
     .execute(pool)
     .await?;
@@ -157,4 +158,82 @@ pub async fn set_error(pool: &SqlitePool, id: &str, error: &str) -> Result<(), s
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn account_is_never_persisted_or_returned_from_job_table() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        sqlx::query(
+            "INSERT INTO cases(id,name,case_type,source_folder) \
+             VALUES ('case-court','测试案件','诉讼','C:/court')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let secret_account = "13800138000";
+        let job = insert(
+            &pool,
+            &NewCourtFilingJob {
+                case_id: "case-court".into(),
+                filing_type: "civil".into(),
+                court_name: "测试法院".into(),
+                cookie_account: Some(secret_account.into()),
+                output_dir: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(job.cookie_account.is_none());
+        let persisted: Option<String> =
+            sqlx::query_scalar("SELECT cookie_account FROM court_filing_jobs WHERE id=?1")
+                .bind(job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn historical_account_scrub_migration_removes_plaintext_only() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE court_filing_jobs(\
+             id TEXT PRIMARY KEY, cookie_account TEXT, status TEXT, court_name TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO court_filing_jobs(id,cookie_account,status,court_name) \
+             VALUES('legacy-job','legacy-plaintext-account','completed','测试法院')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0054_scrub_court_filing_credentials.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row: (Option<String>, String, String) = sqlx::query_as(
+            "SELECT cookie_account,status,court_name FROM court_filing_jobs WHERE id='legacy-job'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(row.0.is_none());
+        assert_eq!(row.1, "completed");
+        assert_eq!(row.2, "测试法院");
+    }
 }

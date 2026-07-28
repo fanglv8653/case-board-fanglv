@@ -167,20 +167,24 @@ pub struct BackendStat {
 pub struct SettingsSnapshot {
     pub setup_completed: bool,
     pub user_display_name_set: bool,
-    pub mineru_api_key: String,
+    #[serde(alias = "mineru_api_key")]
+    pub mineru_credential_state: String,
     pub mineru_endpoint: Option<String>,
     pub mineru_verified: bool,
     /// 2026-06-12:PaddleOCR VL key 状态 + 云端 OCR 主力选择(老快照缺字段 → serde 默认)
     #[serde(default)]
-    pub paddle_vl_api_key: String,
+    #[serde(alias = "paddle_vl_api_key")]
+    pub paddle_vl_credential_state: String,
     #[serde(default)]
     pub paddle_vl_verified: bool,
     #[serde(default)]
     pub ocr_cloud_primary: String,
-    pub deepseek_api_key: String,
+    #[serde(alias = "deepseek_api_key")]
+    pub deepseek_credential_state: String,
     pub deepseek_endpoint: Option<String>,
     pub deepseek_verified: bool,
-    pub yuandian_api_key: String,
+    #[serde(alias = "yuandian_api_key")]
+    pub yuandian_credential_state: String,
     pub yuandian_verified: bool,
     pub local_model_dir: Option<String>,
     pub local_server_endpoint: Option<String>,
@@ -264,9 +268,9 @@ fn strip_endpoint_auth(url: &str) -> String {
     trimmed.to_string()
 }
 
-fn key_status(opt: &Option<String>) -> String {
-    match opt.as_deref() {
-        Some(s) if !s.trim().is_empty() => "[SET]".into(),
+fn credential_status(slot: crate::credentials::StaticCredential) -> String {
+    match crate::credentials::resolve_static(slot) {
+        Ok(Some(_)) => "[SET]".into(),
         _ => "[EMPTY]".into(),
     }
 }
@@ -296,16 +300,22 @@ fn build_settings_snapshot(s: &crate::settings::Settings) -> SettingsSnapshot {
             .as_deref()
             .map(|x| !x.trim().is_empty())
             .unwrap_or(false),
-        mineru_api_key: key_status(&s.mineru_api_key),
+        mineru_credential_state: credential_status(crate::credentials::StaticCredential::Mineru),
         mineru_endpoint: s.mineru_endpoint.as_deref().map(strip_endpoint_auth),
         mineru_verified: s.mineru_verified_at.is_some(),
-        paddle_vl_api_key: key_status(&s.paddle_vl_api_key),
+        paddle_vl_credential_state: credential_status(
+            crate::credentials::StaticCredential::PaddleVl,
+        ),
         paddle_vl_verified: s.paddle_vl_verified_at.is_some(),
         ocr_cloud_primary: s.effective_ocr_cloud_primary().to_string(),
-        deepseek_api_key: key_status(&s.cloud_llm_api_key),
+        deepseek_credential_state: credential_status(
+            crate::credentials::StaticCredential::Deepseek,
+        ),
         deepseek_endpoint: s.cloud_llm_endpoint.as_deref().map(strip_endpoint_auth),
         deepseek_verified: s.deepseek_verified_at.is_some(),
-        yuandian_api_key: key_status(&s.yuandian_api_key),
+        yuandian_credential_state: credential_status(
+            crate::credentials::StaticCredential::Yuandian,
+        ),
         yuandian_verified: s.yuandian_verified_at.is_some(),
         local_model_dir: s.local_model_dir.clone(),
         local_server_endpoint: s.ollama_endpoint.as_deref().map(strip_endpoint_auth),
@@ -546,7 +556,7 @@ pub async fn collect(
     let console_errors = console_errors
         .into_iter()
         .map(|mut item| {
-            item.message = sanitize_paths(&item.message);
+            item.message = crate::security::redaction::redact(&sanitize_paths(&item.message));
             item
         })
         .collect();
@@ -1172,7 +1182,7 @@ fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
             ));
             // 失败原因(sanitize 后),帮作者快速判断是哪类问题(限流 / token / 大小 / 网络...)
             if let Some(err) = &f.last_error {
-                let safe = sanitize_paths(err);
+                let safe = crate::security::redaction::redact(&sanitize_paths(err));
                 md.push_str(&format!("  - 错误:`{}`\n", safe));
             }
         }
@@ -1198,12 +1208,12 @@ fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
     //   方便作者拿到反馈 MD 第一眼就能识别"朋友 key 没验证"这种盲区
     md.push_str(&format!(
         "- MinerU key:{} · endpoint:{}\n",
-        key_state_display(&s.mineru_api_key, s.mineru_verified),
+        key_state_display(&s.mineru_credential_state, s.mineru_verified),
         s.mineru_endpoint.as_deref().unwrap_or("(默认)"),
     ));
     md.push_str(&format!(
         "- PaddleOCR key:{} · 云端 OCR 主力:{}\n",
-        key_state_display(&s.paddle_vl_api_key, s.paddle_vl_verified),
+        key_state_display(&s.paddle_vl_credential_state, s.paddle_vl_verified),
         if s.ocr_cloud_primary.is_empty() {
             "mineru"
         } else {
@@ -1212,12 +1222,12 @@ fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
     ));
     md.push_str(&format!(
         "- DeepSeek key:{} · endpoint:{}\n",
-        key_state_display(&s.deepseek_api_key, s.deepseek_verified),
+        key_state_display(&s.deepseek_credential_state, s.deepseek_verified),
         s.deepseek_endpoint.as_deref().unwrap_or("(默认)"),
     ));
     md.push_str(&format!(
         "- 元典 key:{}\n",
-        key_state_display(&s.yuandian_api_key, s.yuandian_verified),
+        key_state_display(&s.yuandian_credential_state, s.yuandian_verified),
     ));
     md.push_str(&format!(
         "- 本机模型目录:{}\n",
@@ -1390,7 +1400,7 @@ fn render_md(info: &DiagnosticInfo, user_description: &str) -> String {
     md.push_str("> 请先预览这个 MD 文件，再自行决定是否发送给项目维护者。\n");
 
     // 安全网:整份 MD 再过一次 sanitize_paths,兜底 stderr/console 里可能漏的路径
-    sanitize_paths(&md)
+    crate::security::redaction::redact(&sanitize_paths(&md))
 }
 
 /// 反馈 MD 里 key 状态的统一文案。三态:
@@ -1521,7 +1531,10 @@ mod privacy_tests {
 
     #[test]
     fn feedback_filename_summary_keeps_only_safe_extension() {
-        assert_eq!(deidentified_file_summary("张三诉李四起诉状.PDF"), "<document>.pdf");
+        assert_eq!(
+            deidentified_file_summary("张三诉李四起诉状.PDF"),
+            "<document>.pdf"
+        );
         assert_eq!(deidentified_file_summary("当事人身份证"), "<document>");
         assert!(!deidentified_file_summary("王某案卷.docx").contains("王某"));
     }

@@ -6,7 +6,7 @@
 //! - 纯本地模式下走**本机 MiniCPM-V vision**(:8899 多模态 chat completions)
 //!
 //! 2026-05-25 V0.1.8 作者拍板:云端模式**全走精准 API**,不再用 flash-extract。
-//! - 用户既然填了 token(Settings 里 mineru_api_key 必填),就让 token 发挥作用
+//! - 用户配置 token 后由凭据解析器按需取用
 //! - 精准 API 免费额度 1000 份/天,文件上限 200MB / 600 页(flash 只有 10MB / 20 页)
 //! - 精准 API 限流比 flash 宽松,配合 pipeline 三轮动态降级足够稳
 //!
@@ -38,6 +38,31 @@ const PRIMARY_TIMEOUT_WITH_FALLBACK_SEC: u64 = 300;
 
 /// PaddleOCR VL-1.6 单次调用超时(秒),作为最后一棒时使用(同 MinerU 语义)。
 const PADDLE_VL_TIMEOUT_SEC: u64 = 900;
+
+fn cloud_backend_order<'a>(
+    mineru_token: Option<&'a str>,
+    paddle_token: Option<&'a str>,
+    cloud_primary: &str,
+    is_office: bool,
+) -> Result<Vec<(&'static str, &'a str)>, &'static str> {
+    let mineru_entry = mineru_token.map(|token| ("mineru-precision", token));
+    let paddle_entry = paddle_token.map(|token| ("paddle-vl", token));
+    if is_office {
+        return mineru_entry
+            .map(|entry| vec![entry])
+            .ok_or("Office documents require a configured MinerU credential");
+    }
+    let order: Vec<(&'static str, &'a str)> = if cloud_primary == "paddle-vl" {
+        [paddle_entry, mineru_entry].into_iter().flatten().collect()
+    } else {
+        [mineru_entry, paddle_entry].into_iter().flatten().collect()
+    };
+    if order.is_empty() {
+        Err("cloud OCR requires a configured MinerU or PaddleOCR credential")
+    } else {
+        Ok(order)
+    }
+}
 
 /// MinerU 精准模型版本选择(官网推荐)
 ///
@@ -109,9 +134,9 @@ pub struct OcrContext {
     /// - `true` → 走云端 OCR(需至少一个 token)
     /// - `false` → 走本机 MiniCPM-V vision(慢一点,但 0 上传)
     pub cloud_enabled: bool,
-    /// MinerU API token(Settings.mineru_api_key)
+    /// MinerU API token（由凭据解析器提供）
     pub mineru_token: Option<String>,
-    /// PaddleOCR VL-1.6 token(Settings.paddle_vl_api_key,2026-06-12)
+    /// PaddleOCR VL-1.6 token（由凭据解析器提供，2026-06-12）
     pub paddle_vl_token: Option<String>,
     /// 云端 OCR 主力:`"mineru"`(默认)/ `"paddle-vl"`(Settings.effective_ocr_cloud_primary)。
     /// 主力失败 / 超时 / 额度用完时,若另一家 token 已填则自动切换(动态主备)。
@@ -269,6 +294,10 @@ pub async fn extract_with_ocr(path: &Path, ctx: &OcrContext) -> OcrResult {
             };
         }
 
+        // The preference is non-sensitive; actual availability is determined only
+        // from the resolver-populated tokens above.
+        let order = cloud_backend_order(mineru_token, paddle_token, &ctx.cloud_primary, is_office)
+            .expect("legacy validation above guarantees a non-empty OCR order");
         let total = order.len();
         let mut attempted: Vec<&'static str> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
@@ -528,4 +557,36 @@ fn ocr_image_via_local_vision(image_bytes: &[u8], mime: &str) -> Result<String, 
         .trim()
         .to_string();
     Ok(text)
+}
+
+#[cfg(test)]
+mod credential_order_tests {
+    use super::cloud_backend_order;
+
+    #[test]
+    fn paddle_preference_puts_resolver_token_first() {
+        let order = cloud_backend_order(
+            Some("resolved-mineru"),
+            Some("resolved-paddle"),
+            "paddle-vl",
+            false,
+        )
+        .expect("order");
+
+        assert_eq!(order[0], ("paddle-vl", "resolved-paddle"));
+        assert_eq!(order[1], ("mineru-precision", "resolved-mineru"));
+    }
+
+    #[test]
+    fn paddle_preference_without_paddle_token_falls_back_to_mineru() {
+        let order =
+            cloud_backend_order(Some("resolved-mineru"), None, "paddle-vl", false).expect("order");
+
+        assert_eq!(order, vec![("mineru-precision", "resolved-mineru")]);
+    }
+
+    #[test]
+    fn paddle_preference_without_any_token_fails_closed() {
+        assert!(cloud_backend_order(None, None, "paddle-vl", false).is_err());
+    }
 }

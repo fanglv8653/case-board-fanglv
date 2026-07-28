@@ -228,11 +228,9 @@ impl McpClient {
     /// 建立连接 + 完成 initialize 握手。失败返回可读原因(http 鉴权失败透传真实状态码)。
     pub async fn connect(cfg: &McpServerConfig) -> Result<Self, String> {
         let inner = match &cfg.transport {
-            McpTransport::Stdio { command, args, env } => {
-                ClientInner::Stdio(Box::new(Mutex::new(
-                    connect_stdio(command, args, env).await?,
-                )))
-            }
+            McpTransport::Stdio { command, args, env } => ClientInner::Stdio(Box::new(Mutex::new(
+                connect_stdio(command, args, env).await?,
+            ))),
             McpTransport::Http { url, headers } => {
                 ClientInner::Http(HttpConn::connect(url, headers).await?)
             }
@@ -289,6 +287,7 @@ async fn connect_stdio(
     args: &[String],
     env: &BTreeMap<String, String>,
 ) -> Result<McpIo, String> {
+    validate_stdio_spawn_args(args)?;
     let mut cmd = Command::new(command);
     cmd.args(args)
         .envs(env)
@@ -317,6 +316,11 @@ async fn connect_stdio(
     // initialized 通知(spec 要求;缺它部分 server 拒 tools/list)
     rpc_notify(&mut io, "notifications/initialized").await?;
     Ok(io)
+}
+
+fn validate_stdio_spawn_args(args: &[String]) -> Result<(), String> {
+    crate::chat::mcp_credentials::reject_secret_valued_stdio_args(args)
+        .map_err(|error| error.code().to_string())
 }
 
 impl HttpConn {
@@ -651,4 +655,90 @@ pub async fn connect_mcp_servers(configs: &[McpServerConfig]) -> Vec<Box<dyn Too
     // 确定性顺序 → 前缀缓存稳定(prefix_cache 观测 tools 指纹漂移)
     tools.sort_by(|a, b| a.name().cmp(b.name()));
     tools
+}
+
+/// Resolve UUID-owned MCP credentials only inside the Rust runtime and expose
+/// discovered tools without ever hydrating secrets into Settings/WebView.
+/// A server with an incomplete credential set fails closed and is skipped.
+pub async fn connect_stored_mcp_servers(
+    configs: &[crate::chat::mcp_credentials::McpStoredServer],
+) -> Vec<Box<dyn Tool>> {
+    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+    let mut backend = crate::credentials::SystemCredentialBackend;
+    for stored in configs.iter().filter(|config| config.enabled) {
+        let resolved = match crate::chat::mcp_credentials::resolve_server_with(&mut backend, stored)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                crate::dlog!(
+                    "MCP server「{}」凭据不可用,已关闭该连接: {}",
+                    stored.name,
+                    error.code()
+                );
+                continue;
+            }
+        };
+        let cfg = resolved.config();
+        let client = match McpClient::connect(cfg).await {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                crate::dlog!(
+                    "MCP server「{}」连接失败,已关闭该连接: {}",
+                    stored.name,
+                    resolved.redact_error(&error)
+                );
+                continue;
+            }
+        };
+        let discovered = match client.list_tools().await {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                crate::dlog!(
+                    "MCP server「{}」列工具失败,已关闭该连接: {}",
+                    stored.name,
+                    resolved.redact_error(&error)
+                );
+                continue;
+            }
+        };
+        crate::dlog!(
+            "MCP server「{}」已连,发现 {} 个工具",
+            stored.name,
+            discovered.len()
+        );
+        for discovered_tool in discovered {
+            let parameters = if discovered_tool.input_schema.is_null() {
+                json!({ "type": "object", "properties": {} })
+            } else {
+                discovered_tool.input_schema.clone()
+            };
+            tools.push(Box::new(McpForwardingTool {
+                full_name: discovered_tool.namespaced_name(&cfg.name),
+                description: discovered_tool.description.clone(),
+                parameters,
+                remote_name: discovered_tool.name.clone(),
+                client: client.clone(),
+            }));
+        }
+    }
+    tools.sort_by(|a, b| a.name().cmp(b.name()));
+    tools
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::validate_stdio_spawn_args;
+
+    #[test]
+    fn command_boundary_rejects_secret_valued_argv() {
+        let args = vec!["server.js".to_string(), "--token=secret-marker".to_string()];
+
+        assert_eq!(
+            validate_stdio_spawn_args(&args).unwrap_err(),
+            "MCP_STDIO_SECRET_ARG_FORBIDDEN_USE_SECRET_ENV"
+        );
+        assert!(
+            validate_stdio_spawn_args(&["server.js".to_string(), "--stdio".to_string()]).is_ok()
+        );
+    }
 }
