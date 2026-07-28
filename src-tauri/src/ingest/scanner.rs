@@ -33,6 +33,13 @@ pub struct ScannedDoc {
 /// 这些**文件名**直接忽略(macOS/Windows 噪音)
 const IGNORED_FILES: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini", ".gitkeep"];
 
+fn is_ignored_file(filename: &str) -> bool {
+    IGNORED_FILES.contains(&filename)
+        || filename.starts_with('.')
+        // Word / WPS 打开文档时生成的临时所有者锁文件，不是可抽取的 OOXML。
+        || filename.starts_with("~$")
+}
+
 /// 这些**目录名**整个跳过(归档、依赖、版本控制)
 const IGNORED_DIRS: &[&str] = &[
     "_archive",
@@ -340,11 +347,7 @@ pub fn scan_folder(root: &Path) -> Vec<ScannedDoc> {
             continue;
         }
         let filename = entry.file_name().to_string_lossy().to_string();
-        if IGNORED_FILES.contains(&filename.as_str()) {
-            continue;
-        }
-        // 隐藏文件也跳过(以 . 开头)
-        if filename.starts_with('.') {
+        if is_ignored_file(&filename) {
             continue;
         }
 
@@ -373,3 +376,33 @@ pub fn scan_folder(root: &Path) -> Vec<ScannedDoc> {
 // ============================================================================
 // 单元测试 —— 用通用/虚构的文件名,不暴露任何真实当事人/案件信息
 // ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_word_and_wps_owner_lock_files() {
+        assert!(is_ignored_file("~$示例法律意见书.docx"));
+        assert!(is_ignored_file(".DS_Store"));
+        assert!(!is_ignored_file("示例法律意见书.docx"));
+    }
+
+    #[test]
+    fn owner_lock_files_never_enter_scan_results() {
+        let temp_dir = tempfile::tempdir().expect("应能创建隔离临时目录");
+        std::fs::write(temp_dir.path().join("~$示例答辩状.docx"), b"owner lock")
+            .expect("应能写入锁文件样例");
+        std::fs::write(temp_dir.path().join("示例答辩状.docx"), b"document")
+            .expect("应能写入普通文档样例");
+
+        let docs = scan_folder(temp_dir.path());
+
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].filename, "示例答辩状.docx");
+        assert!(
+            docs.iter().all(|doc| !doc.filename.starts_with("~$")),
+            "锁文件不得进入扫描结果，后续也就不会创建抽取任务"
+        );
+    }
+}
