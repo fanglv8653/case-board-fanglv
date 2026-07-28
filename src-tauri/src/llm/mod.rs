@@ -369,7 +369,12 @@ impl LlmConfig {
                 return Self {
                     endpoint,
                     model,
-                    api_key: settings.minimax_api_key.clone(),
+                    api_key: crate::credentials::resolve_static(
+                        crate::credentials::StaticCredential::Minimax,
+                    )
+                    .ok()
+                    .flatten()
+                    .map(crate::credentials::SecretValue::into_string),
                     timeout_secs: 120, // M 系列思考慢,给足
                     temperature: 0.3,
                 };
@@ -377,8 +382,8 @@ impl LlmConfig {
             // 2026-06-16:通用 OpenAI 兼容后端(glm / mimo / custom)。走标准 /v1/chat/completions,
             // 模型名用户显式填(不套 DeepSeek 档位)。endpoint/model 空时回落预设默认。
             if settings.cloud_llm_is_compat() {
-                let preset =
-                    crate::llm::providers::compat_preset(settings.effective_cloud_llm_backend());
+                let backend = settings.effective_cloud_llm_backend();
+                let preset = crate::llm::providers::compat_preset(backend);
                 // 走 effective_*(当前后端专属字段优先、旧 compat_llm_* 兜底),
                 // 否则 GLM/MiMo/自定义的独立配置在运行时不生效(整合 PR#15 时漏接的 P0)。
                 let raw_endpoint = settings
@@ -398,7 +403,14 @@ impl LlmConfig {
                 return Self {
                     endpoint,
                     model,
-                    api_key: settings.effective_compat_llm_api_key(),
+                    api_key: crate::credentials::resolve_static(match backend {
+                        "glm" => crate::credentials::StaticCredential::Glm,
+                        "mimo" => crate::credentials::StaticCredential::Mimo,
+                        _ => crate::credentials::StaticCredential::Custom,
+                    })
+                    .ok()
+                    .flatten()
+                    .map(crate::credentials::SecretValue::into_string),
                     timeout_secs: 90,
                     temperature: 0.3, // 兼容档可能是推理型,0.0 易死循环 → 同 MiniMax 取 0.3
                 };
@@ -426,7 +438,12 @@ impl LlmConfig {
             Self {
                 endpoint,
                 model: base_model,
-                api_key: settings.cloud_llm_api_key.clone(),
+                api_key: crate::credentials::resolve_static(
+                    crate::credentials::StaticCredential::Deepseek,
+                )
+                .ok()
+                .flatten()
+                .map(crate::credentials::SecretValue::into_string),
                 timeout_secs: 60, // 云端比本机快,60s 足够;本机要 180s
                 temperature: 0.0,
             }
@@ -593,10 +610,7 @@ fn normalize_extracted_fields_value(value: &mut serde_json::Value) {
     let Some(root) = value.as_object_mut() else {
         return;
     };
-    if !matches!(
-        root.get("criminal"),
-        Some(serde_json::Value::Object(_))
-    ) {
+    if !matches!(root.get("criminal"), Some(serde_json::Value::Object(_))) {
         return;
     }
 

@@ -19,6 +19,7 @@ use crate::db::metrics::MetricEntry;
 use crate::docx_extract;
 use crate::ingest::ocr::{self, OcrContext};
 use crate::llm::{self, ExtractedFields};
+use sqlx::SqlitePool;
 
 /// PDF 文本抽取后字数低于这个阈值,认为是扫描件,转 OCR 兜底
 const PDF_TEXT_MIN_CHARS: usize = 200;
@@ -148,6 +149,38 @@ pub enum ExtractResult {
         error: String,
         metrics: Vec<MetricEntry>,
     },
+}
+
+/// 持久队列领取权。只由 Rust 后台执行器构造，不通过 Tauri 暴露 token。
+#[derive(Clone)]
+pub struct ExtractionExecutionGuard {
+    pool: SqlitePool,
+    item_id: String,
+    claim_token: String,
+}
+
+impl ExtractionExecutionGuard {
+    pub fn new(pool: SqlitePool, item_id: String, claim_token: String) -> Self {
+        Self {
+            pool,
+            item_id,
+            claim_token,
+        }
+    }
+
+    async fn ensure_allowed(&self) -> Result<(), String> {
+        match crate::db::material_queue::execution_allowed(
+            &self.pool,
+            &self.item_id,
+            &self.claim_token,
+        )
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("识别任务已暂停、取消或失去执行权".to_string()),
+            Err(error) => Err(format!("校验识别任务执行权失败: {error}")),
+        }
+    }
 }
 
 /// 只抽文本、不跑 LLM 字段 —— 给「低价值/证据类」被 skip 的文档用,让它们仍可被
@@ -390,6 +423,7 @@ pub async fn extract_one(
     path: &Path,
     filename: &str,
     category: Option<&str>,
+    execution_guard: Option<&ExtractionExecutionGuard>,
 ) -> ExtractResult {
     let kind = text_extraction_kind(filename);
 
@@ -436,6 +470,11 @@ pub async fn extract_one(
             t
         }
         Err(e) if e == "__NEEDS_OCR__" => {
+            if let Some(guard) = execution_guard {
+                if let Err(error) = guard.ensure_allowed().await {
+                    return ExtractResult::Failed { error, metrics };
+                }
+            }
             // text_extract 阶段没抽出来 → 走 OCR(也记一条 OCR metric)
             // 失败时的 backend 标签:云端写主力名(实际可能主备都试过,error_short 里有全程)
             let ocr_backend = if ocr_ctx.force_backend.as_deref() == Some("ppocrv6") {
@@ -530,32 +569,67 @@ pub async fn extract_one(
     let mut successful = Vec::new();
     let mut failures = Vec::new();
     for (index, chunk) in chunks.into_iter().enumerate() {
+        if let Some(guard) = execution_guard {
+            if let Err(error) = guard.ensure_allowed().await {
+                return ExtractResult::Failed { error, metrics };
+            }
+        }
         let t_llm = Instant::now();
-        match llm::extract_case_fields_with_hint(llm_config, &chunk, Some(filename), category).await {
+        match llm::extract_case_fields_with_hint(llm_config, &chunk, Some(filename), category).await
+        {
             Ok(fields) => {
                 successful.push(fields);
                 metrics.push(MetricEntry {
-                    filename: filename.into(), ext: ext.clone(), file_size_bytes,
-                    stage: "llm_extract".into(), backend: llm_backend.clone(), outcome: "ok".into(),
-                    elapsed_ms: t_llm.elapsed().as_millis() as i64, text_chars: Some(chunk.chars().count() as i64), error_short: None,
+                    filename: filename.into(),
+                    ext: ext.clone(),
+                    file_size_bytes,
+                    stage: "llm_extract".into(),
+                    backend: llm_backend.clone(),
+                    outcome: "ok".into(),
+                    elapsed_ms: t_llm.elapsed().as_millis() as i64,
+                    text_chars: Some(chunk.chars().count() as i64),
+                    error_short: None,
                 });
             }
             Err(e) => {
-                let short = crate::feedback::sanitize_paths(&e.to_string()).chars().take(160).collect::<String>();
+                let short = crate::feedback::sanitize_paths(&e.to_string())
+                    .chars()
+                    .take(160)
+                    .collect::<String>();
                 failures.push(format!("第{}片: {}", index + 1, short));
                 metrics.push(MetricEntry {
-                    filename: filename.into(), ext: ext.clone(), file_size_bytes,
-                    stage: "llm_extract".into(), backend: llm_backend.clone(), outcome: "failed".into(),
-                    elapsed_ms: t_llm.elapsed().as_millis() as i64, text_chars: Some(chunk.chars().count() as i64), error_short: Some(short),
+                    filename: filename.into(),
+                    ext: ext.clone(),
+                    file_size_bytes,
+                    stage: "llm_extract".into(),
+                    backend: llm_backend.clone(),
+                    outcome: "failed".into(),
+                    elapsed_ms: t_llm.elapsed().as_millis() as i64,
+                    text_chars: Some(chunk.chars().count() as i64),
+                    error_short: Some(short),
                 });
             }
         }
     }
     if successful.is_empty() {
-        ExtractResult::Failed { error: format!("LLM 抽取全部失败（0/{} 片）: {}", total_chunks, failures.join("；")), metrics }
+        ExtractResult::Failed {
+            error: format!(
+                "LLM 抽取全部失败（0/{} 片）: {}",
+                total_chunks,
+                failures.join("；")
+            ),
+            metrics,
+        }
     } else {
         let fields = crate::ingest::reliability::merge_extracted_fields(successful);
-        let partial_error = (!failures.is_empty()).then(|| format!("LLM 分片部分失败（{}/{} 片失败）: {}", failures.len(), total_chunks, failures.join("；")));
+        let partial_error = (!failures.is_empty()).then(|| {
+            format!(
+                "LLM 分片部分失败（{}/{} 片失败）: {}",
+                failures.len(),
+                total_chunks,
+                failures.join("；")
+            )
+        });
         if partial_error.is_some() {
             metrics.push(MetricEntry {
                 filename: filename.into(),
@@ -563,10 +637,18 @@ pub async fn extract_one(
                 file_size_bytes,
                 stage: "llm_extract".into(),
                 backend: llm_backend.clone(),
-                outcome: "partial".into(), elapsed_ms: 0, text_chars: None, error_short: partial_error.clone(),
+                outcome: "partial".into(),
+                elapsed_ms: 0,
+                text_chars: None,
+                error_short: partial_error.clone(),
             });
         }
-        ExtractResult::Extracted { fields, text_md: text, partial_error, metrics }
+        ExtractResult::Extracted {
+            fields,
+            text_md: text,
+            partial_error,
+            metrics,
+        }
     }
 }
 
@@ -605,6 +687,7 @@ pub async fn extract_cached_text(
     text: String,
     filename: &str,
     category: Option<&str>,
+    execution_guard: Option<&ExtractionExecutionGuard>,
 ) -> ExtractResult {
     const MAX_CHARS: usize = 10000;
     let chunks = crate::ingest::reliability::chunk_text(&text, MAX_CHARS);
@@ -612,15 +695,43 @@ pub async fn extract_cached_text(
     let mut successful = Vec::new();
     let mut failures = Vec::new();
     for (index, chunk) in chunks.into_iter().enumerate() {
-        match llm::extract_case_fields_with_hint(llm_config, &chunk, Some(filename), category).await {
+        if let Some(guard) = execution_guard {
+            if let Err(error) = guard.ensure_allowed().await {
+                return ExtractResult::Failed {
+                    error,
+                    metrics: Vec::new(),
+                };
+            }
+        }
+        match llm::extract_case_fields_with_hint(llm_config, &chunk, Some(filename), category).await
+        {
             Ok(fields) => successful.push(fields),
             Err(e) => failures.push(format!("第{}片: {}", index + 1, e)),
         }
     }
     if successful.is_empty() {
-        ExtractResult::Failed { error: format!("缓存文本 LLM 抽取全部失败（0/{} 片）: {}", total_chunks, failures.join("；")), metrics: Vec::new() }
+        ExtractResult::Failed {
+            error: format!(
+                "缓存文本 LLM 抽取全部失败（0/{} 片）: {}",
+                total_chunks,
+                failures.join("；")
+            ),
+            metrics: Vec::new(),
+        }
     } else {
-        let partial_error = (!failures.is_empty()).then(|| format!("缓存文本 LLM 分片部分失败（{}/{} 片失败）: {}", failures.len(), total_chunks, failures.join("；")));
-        ExtractResult::Extracted { fields: crate::ingest::reliability::merge_extracted_fields(successful), text_md: text, partial_error, metrics: Vec::new() }
+        let partial_error = (!failures.is_empty()).then(|| {
+            format!(
+                "缓存文本 LLM 分片部分失败（{}/{} 片失败）: {}",
+                failures.len(),
+                total_chunks,
+                failures.join("；")
+            )
+        });
+        ExtractResult::Extracted {
+            fields: crate::ingest::reliability::merge_extracted_fields(successful),
+            text_md: text,
+            partial_error,
+            metrics: Vec::new(),
+        }
     }
 }

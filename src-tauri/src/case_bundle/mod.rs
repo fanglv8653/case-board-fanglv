@@ -291,18 +291,7 @@ pub async fn merge_case_bundle(
         .join("merged");
     let report = merge_into(pool, zip_path, target_case_id, &merged_root).await?;
 
-    // 新材料排队抽取(让合并后的材料集重新生成案件画像)。
-    if report.added > 0 {
-        if let Ok(docs) = docs_db::list_documents_by_case(pool, &report.target_case_id).await {
-            crate::ingest::pipeline::spawn_extraction(
-                app.clone(),
-                pool.clone(),
-                report.target_case_id.clone(),
-                docs,
-                true,
-            );
-        }
-    }
+    // 新材料仅写入 documents；没有三态决策时保持待确认，不隐式调用 OCR/LLM。
     Ok(report)
 }
 

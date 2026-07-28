@@ -15,11 +15,11 @@ use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use super::credentials::{persist_identity, read_runtime_identity, replace_pairing_code};
 use super::store;
 use super::{
     hmac_hex, Roster, RosterMember, SignedRoster, SnapshotEnvelope, TeamEdit, TeamIdentity,
 };
-use crate::settings::{read_settings, write_settings};
 
 pub const SERVICE_TYPE: &str = "_caseboard-team._tcp.local.";
 const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -108,7 +108,7 @@ impl TeamNet {
 
 /// 启动团队网络(监听 + 广播 + 周期同步)。调用前提:settings.team 已配置。
 pub async fn start(pool: SqlitePool) -> Result<TeamNet, String> {
-    let identity = read_settings()?.team.ok_or("未加入团队,无法启动团队网络")?;
+    let identity = read_runtime_identity()?.ok_or("未加入团队,无法启动团队网络")?;
 
     // 1) 监听随机端口(0.0.0.0,局域网可达)
     let listener = TcpListener::bind(("0.0.0.0", 0))
@@ -297,10 +297,10 @@ async fn route(req: &HttpReq, pool: &SqlitePool) -> (u16, String, Option<String>
 
 /// 接力互换:验身 → 合并对方快照/roster → 回我们的全集。
 async fn handle_exchange(req: &HttpReq, pool: &SqlitePool) -> (u16, String, Option<String>) {
-    let Ok(settings) = read_settings() else {
+    let Ok(identity) = read_runtime_identity() else {
         return (403, "{\"error\":\"no settings\"}".into(), None);
     };
-    let Some(identity) = settings.team else {
+    let Some(identity) = identity else {
         return (403, "{\"error\":\"not in team\"}".into(), None);
     };
     // 验 HMAC(防隔壁团队)
@@ -329,10 +329,10 @@ async fn handle_exchange(req: &HttpReq, pool: &SqlitePool) -> (u16, String, Opti
 
 /// 入队:只有团队长能批(配对码只在他机器上)。
 async fn handle_join(req: &HttpReq, pool: &SqlitePool) -> (u16, String, Option<String>) {
-    let Ok(settings) = read_settings() else {
+    let Ok(identity) = read_runtime_identity() else {
         return (403, "{\"error\":\"no settings\"}".into(), None);
     };
-    let Some(identity) = settings.team.clone() else {
+    let Some(identity) = identity else {
         return (403, "{\"error\":\"not in team\"}".into(), None);
     };
     if !identity.is_leader() {
@@ -375,13 +375,9 @@ async fn handle_join(req: &HttpReq, pool: &SqlitePool) -> (u16, String, Option<S
     };
     // 配对码一次性(老板拍板):用过即作废自动换新 —— 防码扩散后被外人入队。
     // 下一位加入需团队长念新码(管理区实时可见)。
-    if let Ok(mut s) = read_settings() {
-        if let Some(t) = s.team.as_mut() {
-            t.pairing_code = Some(super::gen_pairing_code());
-            if let Err(e) = write_settings(&s) {
-                crate::dlog!("入队后轮换配对码失败: {e}");
-            }
-        }
+    let next_code = super::gen_pairing_code();
+    if let Err(e) = replace_pairing_code(&identity.team_id, &next_code) {
+        crate::dlog!("入队后轮换配对码失败: {e}");
     }
     let resp = JoinResponse {
         team_secret: identity.team_secret.clone(),
@@ -534,7 +530,7 @@ async fn browse_peers(timeout_ms: u64) -> Result<Vec<PeerAddr>, String> {
 
 /// 一轮接力同步:重建本人快照 → 找在场队友 → 逐个互换合并。
 pub async fn sync_round(pool: &SqlitePool) -> Result<SyncReport, String> {
-    let identity = read_settings()?.team.ok_or("未加入团队")?;
+    let identity = read_runtime_identity()?.ok_or("未加入团队")?;
     store::rebuild_own_snapshot(pool, &identity).await?;
 
     let peers: Vec<PeerAddr> = browse_peers(2500)
@@ -682,11 +678,22 @@ pub async fn join_team(
         role: "member".into(),
         pairing_code: None,
     };
-    // 落库 + 落 settings
-    store::save_signed_roster(pool, &jr.roster).await?;
-    let mut settings = read_settings()?;
-    settings.team = Some(identity.clone());
-    write_settings(&settings)?;
-    store::rebuild_own_snapshot(pool, &identity).await?;
+    // 凭据/settings 成功后才落 roster；凭据失败时数据库保持未入团状态。
+    persist_identity(&identity)?;
+    let database_result = async {
+        store::save_signed_roster(pool, &jr.roster).await?;
+        store::rebuild_own_snapshot(pool, &identity).await
+    }
+    .await;
+    if let Err(error) = database_result {
+        let data_rolled_back = store::clear_team_data(pool).await.is_ok();
+        let credentials_rolled_back =
+            super::credentials::clear_persisted_identity(&identity.team_id).is_ok();
+        return Err(if data_rolled_back && credentials_rolled_back {
+            error
+        } else {
+            "TEAM_JOIN_ROLLBACK_FAILED".into()
+        });
+    }
     Ok(identity)
 }

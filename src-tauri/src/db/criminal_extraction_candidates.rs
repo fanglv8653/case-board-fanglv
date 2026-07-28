@@ -307,10 +307,9 @@ pub async fn confirm_candidate_batch(
         let candidate = by_key
             .get(decision.field_key.as_str())
             .ok_or_else(|| format!("批次中不存在字段 {}", decision.field_key))?;
-        let same_direction_replay =
-            (decision.decision == "accept"
-                && matches!(candidate.review_status.as_str(), "accepted" | "protected"))
-                || (decision.decision == "reject" && candidate.review_status == "rejected");
+        let same_direction_replay = (decision.decision == "accept"
+            && matches!(candidate.review_status.as_str(), "accepted" | "protected"))
+            || (decision.decision == "reject" && candidate.review_status == "rejected");
         if candidate.review_status != "pending" && !same_direction_replay {
             return Err(format!(
                 "字段 {} 已决定为 {}，不可改为 {}",
@@ -848,7 +847,9 @@ mod tests {
                     evidence: Some("涉嫌诈骗罪".into()),
                 },
                 current_stage: CriminalExtractValue {
-                    value: Some("审查起诉".into()), confidence: Some(0.7), evidence: Some("审查起诉阶段".into()),
+                    value: Some("审查起诉".into()),
+                    confidence: Some(0.7),
+                    evidence: Some("审查起诉阶段".into()),
                 },
                 ..Default::default()
             }),
@@ -892,23 +893,55 @@ mod tests {
         );
     }
 
-    async fn create_candidate(pool: &SqlitePool, case_id: &str, doc_id: &str) -> CriminalExtractionCandidateDetail {
-        persist_extraction_candidate(pool, case_id, doc_id, "起诉书.pdf", "test", "source", &extraction("诈骗罪"), None).await.unwrap()
+    async fn create_candidate(
+        pool: &SqlitePool,
+        case_id: &str,
+        doc_id: &str,
+    ) -> CriminalExtractionCandidateDetail {
+        persist_extraction_candidate(
+            pool,
+            case_id,
+            doc_id,
+            "起诉书.pdf",
+            "test",
+            "source",
+            &extraction("诈骗罪"),
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
     async fn partial_confirmation_applies_accepted_and_records_meta() {
         let (pool, case_id, doc_id) = fixture().await;
         let detail = create_candidate(&pool, &case_id, &doc_id).await;
-        let result = confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id, expected_profile_revision: 0,
-            decisions: vec![
-                CandidateDecision { field_key: "suspected_charge".into(), decision: "accept".into(), note: None },
-                CandidateDecision { field_key: "current_stage".into(), decision: "reject".into(), note: None },
-            ],
-        }).await.unwrap();
+        let result = confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id,
+                expected_profile_revision: 0,
+                decisions: vec![
+                    CandidateDecision {
+                        field_key: "suspected_charge".into(),
+                        decision: "accept".into(),
+                        note: None,
+                    },
+                    CandidateDecision {
+                        field_key: "current_stage".into(),
+                        decision: "reject".into(),
+                        note: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(result.profile_revision, 1);
-        let profile = crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id).await.unwrap().unwrap();
+        let profile = crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(profile.suspected_charge.as_deref(), Some("诈骗罪"));
         assert!(profile.current_stage.is_none());
         assert!(profile.extraction_meta_json.unwrap().contains(&doc_id));
@@ -918,30 +951,81 @@ mod tests {
     async fn decided_fields_reject_opposite_replay_without_mutation() {
         let (pool, case_id, doc_id) = fixture().await;
         let detail = create_candidate(&pool, &case_id, &doc_id).await;
-        confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id.clone(), expected_profile_revision: 0,
-            decisions: vec![
-                CandidateDecision { field_key: "suspected_charge".into(), decision: "accept".into(), note: None },
-                CandidateDecision { field_key: "current_stage".into(), decision: "reject".into(), note: None },
-            ],
-        }).await.unwrap();
+        confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id.clone(),
+                expected_profile_revision: 0,
+                decisions: vec![
+                    CandidateDecision {
+                        field_key: "suspected_charge".into(),
+                        decision: "accept".into(),
+                        note: None,
+                    },
+                    CandidateDecision {
+                        field_key: "current_stage".into(),
+                        decision: "reject".into(),
+                        note: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
 
-        let accepted_to_reject = confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id.clone(), expected_profile_revision: 1,
-            decisions: vec![CandidateDecision { field_key: "suspected_charge".into(), decision: "reject".into(), note: None }],
-        }).await.unwrap_err();
+        let accepted_to_reject = confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id.clone(),
+                expected_profile_revision: 1,
+                decisions: vec![CandidateDecision {
+                    field_key: "suspected_charge".into(),
+                    decision: "reject".into(),
+                    note: None,
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
         assert!(accepted_to_reject.contains("不可改为 reject"));
 
-        let rejected_to_accept = confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id.clone(), expected_profile_revision: 1,
-            decisions: vec![CandidateDecision { field_key: "current_stage".into(), decision: "accept".into(), note: None }],
-        }).await.unwrap_err();
+        let rejected_to_accept = confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id.clone(),
+                expected_profile_revision: 1,
+                decisions: vec![CandidateDecision {
+                    field_key: "current_stage".into(),
+                    decision: "accept".into(),
+                    note: None,
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
         assert!(rejected_to_accept.contains("不可改为 accept"));
 
         let fields = list_batch_fields(&pool, &detail.batch.id).await.unwrap();
-        assert_eq!(fields.iter().find(|field| field.field_key == "suspected_charge").unwrap().review_status, "accepted");
-        assert_eq!(fields.iter().find(|field| field.field_key == "current_stage").unwrap().review_status, "rejected");
-        let profile = crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id).await.unwrap().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .find(|field| field.field_key == "suspected_charge")
+                .unwrap()
+                .review_status,
+            "accepted"
+        );
+        assert_eq!(
+            fields
+                .iter()
+                .find(|field| field.field_key == "current_stage")
+                .unwrap()
+                .review_status,
+            "rejected"
+        );
+        let profile = crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(profile.profile_revision, 1);
         assert_eq!(profile.suspected_charge.as_deref(), Some("诈骗罪"));
         assert!(profile.current_stage.is_none());
@@ -955,15 +1039,35 @@ mod tests {
             .bind(&case_id).bind("人工罪名")
             .bind(r#"{"fields":{"suspected_charge":{"value":"人工罪名"},"current_stage":{"value":null}}}"#)
             .execute(&pool).await.unwrap();
-        let result = confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id, expected_profile_revision: 0,
-            decisions: vec![
-                CandidateDecision { field_key: "suspected_charge".into(), decision: "accept".into(), note: None },
-                CandidateDecision { field_key: "current_stage".into(), decision: "accept".into(), note: None },
-            ],
-        }).await.unwrap();
-        assert_eq!(result.protected_fields, vec!["suspected_charge", "current_stage"]);
-        let profile = crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id).await.unwrap().unwrap();
+        let result = confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id,
+                expected_profile_revision: 0,
+                decisions: vec![
+                    CandidateDecision {
+                        field_key: "suspected_charge".into(),
+                        decision: "accept".into(),
+                        note: None,
+                    },
+                    CandidateDecision {
+                        field_key: "current_stage".into(),
+                        decision: "accept".into(),
+                        note: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.protected_fields,
+            vec!["suspected_charge", "current_stage"]
+        );
+        let profile = crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(profile.suspected_charge.as_deref(), Some("人工罪名"));
         assert_eq!(profile.profile_revision, 0);
     }
@@ -974,15 +1078,34 @@ mod tests {
         let detail = create_candidate(&pool, &case_id, &doc_id).await;
         sqlx::query("UPDATE criminal_extraction_candidate_fields SET value_json='123' WHERE batch_id=? AND field_key='current_stage'")
             .bind(&detail.batch.id).execute(&pool).await.unwrap();
-        let error = confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id.clone(), expected_profile_revision: 0,
-            decisions: vec![
-                CandidateDecision { field_key: "suspected_charge".into(), decision: "accept".into(), note: None },
-                CandidateDecision { field_key: "current_stage".into(), decision: "accept".into(), note: None },
-            ],
-        }).await.unwrap_err();
+        let error = confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id.clone(),
+                expected_profile_revision: 0,
+                decisions: vec![
+                    CandidateDecision {
+                        field_key: "suspected_charge".into(),
+                        decision: "accept".into(),
+                        note: None,
+                    },
+                    CandidateDecision {
+                        field_key: "current_stage".into(),
+                        decision: "accept".into(),
+                        note: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("必须是字符串"));
-        assert!(crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id).await.unwrap().is_none());
+        assert!(
+            crate::db::criminal_cases::get_criminal_case_profile(&pool, &case_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let fields = list_batch_fields(&pool, &detail.batch.id).await.unwrap();
         assert!(fields.iter().all(|field| field.review_status == "pending"));
     }
@@ -992,11 +1115,24 @@ mod tests {
         let (pool, case_id, doc_id) = fixture().await;
         let detail = create_candidate(&pool, &case_id, &doc_id).await;
         sqlx::query("INSERT INTO criminal_case_profiles(case_id,profile_revision) VALUES(?,2)")
-            .bind(&case_id).execute(&pool).await.unwrap();
-        let error = confirm_candidate_batch(&pool, ConfirmCandidateBatchInput {
-            batch_id: detail.batch.id.clone(), expected_profile_revision: 1,
-            decisions: vec![CandidateDecision { field_key: "suspected_charge".into(), decision: "accept".into(), note: None }],
-        }).await.unwrap_err();
+            .bind(&case_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = confirm_candidate_batch(
+            &pool,
+            ConfirmCandidateBatchInput {
+                batch_id: detail.batch.id.clone(),
+                expected_profile_revision: 1,
+                decisions: vec![CandidateDecision {
+                    field_key: "suspected_charge".into(),
+                    decision: "accept".into(),
+                    note: None,
+                }],
+            },
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("revision=2"));
         let fields = list_batch_fields(&pool, &detail.batch.id).await.unwrap();
         assert!(fields.iter().all(|field| field.review_status == "pending"));

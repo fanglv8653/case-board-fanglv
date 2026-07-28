@@ -43,8 +43,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::SqlitePool;
-use thiserror::Error;
 use std::collections::HashSet;
+use thiserror::Error;
 
 use crate::local_kb::cache::LocalKb;
 use crate::settings::Settings;
@@ -306,15 +306,13 @@ fn should_keep_tool(name: &str, allowed: &HashSet<String>, blocked: &HashSet<Str
 }
 
 /// 拿元典 API key,空串 / 缺失返回 `NoYuandianKey`。
-pub(crate) fn yuandian_key<'a>(ctx: &'a ToolContext<'_>) -> Result<&'a str, ToolError> {
-    let k = ctx
-        .settings
-        .yuandian_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or(ToolError::NoYuandianKey)?;
-    Ok(k)
+pub(crate) fn yuandian_key(
+    _ctx: &ToolContext<'_>,
+) -> Result<crate::credentials::SecretValue, ToolError> {
+    crate::credentials::resolve_static(crate::credentials::StaticCredential::Yuandian)
+        .ok()
+        .flatten()
+        .ok_or(ToolError::NoYuandianKey)
 }
 
 // =============================================================================

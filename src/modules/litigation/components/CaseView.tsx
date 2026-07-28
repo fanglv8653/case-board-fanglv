@@ -48,6 +48,7 @@ import {
 } from "./editor/DocumentWritingPane";
 import { ErrorState, LoadingState, NoDocsHint } from "./StatusViews";
 import { SourceFilesSection } from "./SourceFilesSection";
+import { MaterialQueueControl } from "./MaterialQueueControl";
 
 /* ------------------------------------------------------------------ */
 /* 案件视图                                                            */
@@ -562,12 +563,14 @@ export function CaseView({
                   />
 
                   {/* 原文件(默认折叠) */}
+                  <MaterialQueueControl caseId={selectedCase.id} />
                   <SourceFilesSection
                     total={documents.length}
                     aiArtifacts={aiArtifacts}
                     groups={groups}
                     documents={documents}
                     sourceFolder={selectedCase?.source_folder ?? ""}
+                    domain={domain ?? "civil"}
                     markMap={markMap}
                     onMarkImportance={onMarkImportance}
                     onMarkPartySide={onMarkPartySide}

@@ -11,8 +11,14 @@
 //! 带完成状态,**不碰** 案件待办(case_todos)/ 首页日历(calendar_events)。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
+
+use crate::credentials::{
+    replace_verified_with, CredentialBackend, CredentialError, CredentialLocator, SecretValue,
+    SystemCredentialBackend,
+};
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -54,16 +60,33 @@ impl Default for TickTickConfig {
 
 /// 鉴权令牌。API 口令模型下只用 `access_token` 存用户粘贴的口令(长期有效、
 /// 不过期、无刷新);`refresh_token`/`expires_at_ms` 保留为兼容字段,恒为 None/0。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TickTickTokens {
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub access_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub refresh_token: Option<String>,
     /// 兼容字段:API 口令不过期,恒为 0。
     #[serde(default)]
     pub expires_at_ms: i64,
+}
+
+impl std::fmt::Debug for TickTickTokens {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TickTickTokens")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
 }
 
 /// 镜像列表里的一条待办。本地 uuid 为主键,`ticktick_id` 是远端对应任务 id。
@@ -132,22 +155,216 @@ pub fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("ticktick_sync.json"))
 }
 
-pub fn load(app: &AppHandle) -> Result<TickTickState, String> {
-    let p = state_path(app)?;
-    if !p.exists() {
+fn access_token_locator() -> CredentialLocator {
+    CredentialLocator::new("integration", "ticktick", "access-token")
+        .expect("static TickTick access-token locator")
+}
+
+fn refresh_token_locator() -> CredentialLocator {
+    CredentialLocator::new("integration", "ticktick", "refresh-token")
+        .expect("static TickTick refresh-token locator")
+}
+
+fn restore_token_snapshot<B: CredentialBackend>(
+    backend: &mut B,
+    snapshot: &[(CredentialLocator, Option<SecretValue>)],
+) -> bool {
+    let mut complete = true;
+    for (locator, value) in snapshot {
+        complete &= match value {
+            Some(value) => backend.set(locator, value).is_ok(),
+            None => backend.delete(locator).is_ok(),
+        };
+    }
+    complete
+}
+
+fn atomic_write_state(path: &Path, state: &TickTickState) -> Result<(), String> {
+    let parent = path.parent().ok_or("TICKTICK_STATE_PATH_INVALID")?;
+    std::fs::create_dir_all(parent).map_err(|_| "TICKTICK_STATE_DIR_FAILED")?;
+    let bytes = serde_json::to_vec_pretty(state).map_err(|_| "TICKTICK_STATE_SERIALIZE_FAILED")?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).map_err(|_| "TICKTICK_STATE_TEMP_FAILED")?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|_| temporary.flush())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|_| "TICKTICK_STATE_TEMP_WRITE_FAILED")?;
+    temporary
+        .persist(path)
+        .map_err(|_| "TICKTICK_STATE_REPLACE_FAILED")?;
+    Ok(())
+}
+
+fn save_with_backend<B: CredentialBackend>(
+    path: &Path,
+    state: &TickTickState,
+    backend: &mut B,
+) -> Result<(), String> {
+    let updates = [
+        (access_token_locator(), state.tokens.access_token.as_ref()),
+        (refresh_token_locator(), state.tokens.refresh_token.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(locator, value)| {
+        value
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (locator, value))
+    })
+    .collect::<Vec<_>>();
+    let mut snapshot = Vec::with_capacity(updates.len());
+    for (locator, _) in &updates {
+        snapshot.push((
+            locator.clone(),
+            backend
+                .get(locator)
+                .map_err(|error| error.code().to_string())?,
+        ));
+    }
+    for (locator, value) in &updates {
+        let secret =
+            SecretValue::new((*value).clone()).map_err(|error| error.code().to_string())?;
+        if let Err(error) = replace_verified_with(backend, locator, &secret) {
+            let restored = restore_token_snapshot(backend, &snapshot);
+            return Err(if restored {
+                error.code().to_string()
+            } else {
+                CredentialError::RollbackFailed.code().to_string()
+            });
+        }
+    }
+    let mut sanitized = state.clone();
+    sanitized.tokens = TickTickTokens {
+        access_token: None,
+        refresh_token: None,
+        expires_at_ms: state.tokens.expires_at_ms,
+    };
+    if let Err(error) = atomic_write_state(path, &sanitized) {
+        if !restore_token_snapshot(backend, &snapshot) {
+            return Err(CredentialError::RollbackFailed.code().to_string());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn load_with_backend<B: CredentialBackend>(
+    path: &Path,
+    backend: &mut B,
+) -> Result<TickTickState, String> {
+    if !path.exists() {
         return Ok(TickTickState::default());
     }
-    let raw = std::fs::read_to_string(&p).map_err(|e| format!("读取同步状态失败:{e}"))?;
+    let raw = std::fs::read_to_string(path).map_err(|_| "TICKTICK_STATE_READ_FAILED")?;
     if raw.trim().is_empty() {
         return Ok(TickTickState::default());
     }
-    serde_json::from_str(&raw).map_err(|e| format!("解析同步状态失败:{e}"))
+    let mut state: TickTickState =
+        serde_json::from_str(&raw).map_err(|_| "TICKTICK_STATE_PARSE_FAILED")?;
+    let had_legacy_tokens =
+        state.tokens.access_token.is_some() || state.tokens.refresh_token.is_some();
+    if had_legacy_tokens {
+        save_with_backend(path, &state, backend)?;
+    }
+    state.tokens.access_token = backend
+        .get(&access_token_locator())
+        .map_err(|error| error.code().to_string())?
+        .map(SecretValue::into_string);
+    state.tokens.refresh_token = backend
+        .get(&refresh_token_locator())
+        .map_err(|error| error.code().to_string())?
+        .map(SecretValue::into_string);
+    Ok(state)
+}
+
+pub fn load(app: &AppHandle) -> Result<TickTickState, String> {
+    let p = state_path(app)?;
+    load_with_backend(&p, &mut SystemCredentialBackend)
 }
 
 pub fn save(app: &AppHandle, st: &TickTickState) -> Result<(), String> {
     let p = state_path(app)?;
-    let raw = serde_json::to_string_pretty(st).map_err(|e| format!("序列化同步状态失败:{e}"))?;
-    std::fs::write(&p, raw).map_err(|e| format!("写入同步状态失败:{e}"))
+    save_with_backend(&p, st, &mut SystemCredentialBackend)
+}
+
+pub fn delete_tokens() -> Result<(), String> {
+    let mut backend = SystemCredentialBackend;
+    delete_tokens_with_backend(&mut backend)
+}
+
+/// Commit disconnect as one recoverable operation: credential deletion is
+/// verified first, then the sanitized state is atomically persisted. If state
+/// persistence fails, both token locators are restored from the snapshot.
+pub fn disconnect(app: &AppHandle, state: &TickTickState) -> Result<(), String> {
+    let path = state_path(app)?;
+    disconnect_with_backend_and_writer(state, &mut SystemCredentialBackend, |sanitized| {
+        atomic_write_state(&path, sanitized)
+    })
+}
+
+fn disconnect_with_backend_and_writer<B, F>(
+    state: &TickTickState,
+    backend: &mut B,
+    write: F,
+) -> Result<(), String>
+where
+    B: CredentialBackend,
+    F: FnOnce(&TickTickState) -> Result<(), String>,
+{
+    let locators = [access_token_locator(), refresh_token_locator()];
+    let mut snapshot = Vec::with_capacity(locators.len());
+    for locator in &locators {
+        snapshot.push((
+            locator.clone(),
+            backend
+                .get(locator)
+                .map_err(|error| error.code().to_string())?,
+        ));
+    }
+    for locator in &locators {
+        if let Err(error) = crate::credentials::delete_verified_with(backend, locator) {
+            let restored = restore_token_snapshot(backend, &snapshot);
+            return Err(if restored {
+                error.code().to_string()
+            } else {
+                CredentialError::RollbackFailed.code().to_string()
+            });
+        }
+    }
+    let mut sanitized = state.clone();
+    sanitized.tokens.access_token = None;
+    sanitized.tokens.refresh_token = None;
+    if let Err(error) = write(&sanitized) {
+        if !restore_token_snapshot(backend, &snapshot) {
+            return Err(CredentialError::RollbackFailed.code().to_string());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn delete_tokens_with_backend<B: CredentialBackend>(backend: &mut B) -> Result<(), String> {
+    let locators = [access_token_locator(), refresh_token_locator()];
+    let mut snapshot = Vec::with_capacity(locators.len());
+    for locator in &locators {
+        snapshot.push((
+            locator.clone(),
+            backend
+                .get(locator)
+                .map_err(|error| error.code().to_string())?,
+        ));
+    }
+    for locator in &locators {
+        if let Err(error) = crate::credentials::delete_verified_with(backend, locator) {
+            let restored = restore_token_snapshot(backend, &snapshot);
+            return Err(if restored {
+                error.code().to_string()
+            } else {
+                CredentialError::RollbackFailed.code().to_string()
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 解析滴答返回的时间(如 `2026-06-15T10:00:00.000+0000`)→ 毫秒。
@@ -162,4 +379,204 @@ pub fn parse_iso_ms(s: &str) -> Option<i64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MemoryBackend {
+        values: HashMap<String, String>,
+        corrupt_readback: bool,
+        has_written: bool,
+    }
+
+    impl CredentialBackend for MemoryBackend {
+        fn set(
+            &mut self,
+            locator: &CredentialLocator,
+            secret: &SecretValue,
+        ) -> Result<(), CredentialError> {
+            self.values
+                .insert(locator.id().to_string(), secret.expose().to_string());
+            self.has_written = true;
+            Ok(())
+        }
+
+        fn get(
+            &mut self,
+            locator: &CredentialLocator,
+        ) -> Result<Option<SecretValue>, CredentialError> {
+            self.values
+                .get(locator.id())
+                .cloned()
+                .map(|value| {
+                    if self.corrupt_readback && self.has_written {
+                        SecretValue::new(format!("{value}-corrupt"))
+                    } else {
+                        SecretValue::new(value)
+                    }
+                })
+                .transpose()
+        }
+
+        fn delete(&mut self, locator: &CredentialLocator) -> Result<(), CredentialError> {
+            self.values.remove(locator.id());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn legacy_tokens_migrate_and_are_removed_from_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ticktick_sync.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "tokens": {
+                    "accessToken": "legacy-access-marker",
+                    "refreshToken": "legacy-refresh-marker",
+                    "expiresAtMs": 42
+                },
+                "syncEnabledAtMs": 1
+            }))
+            .expect("json"),
+        )
+        .expect("write");
+        let mut backend = MemoryBackend::default();
+
+        let state = load_with_backend(&path, &mut backend).expect("migrate");
+
+        assert_eq!(
+            state.tokens.access_token.as_deref(),
+            Some("legacy-access-marker")
+        );
+        assert_eq!(
+            state.tokens.refresh_token.as_deref(),
+            Some("legacy-refresh-marker")
+        );
+        assert!(state.connected());
+        let disk = std::fs::read_to_string(path).expect("state");
+        assert!(!disk.contains("legacy-access-marker"));
+        assert!(!disk.contains("legacy-refresh-marker"));
+        assert!(!disk.contains("accessToken"));
+        assert!(!disk.contains("refreshToken"));
+    }
+
+    #[test]
+    fn credential_verification_failure_keeps_existing_value_and_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("ticktick_sync.json");
+        std::fs::write(&path, "{\"syncEnabledAtMs\":7}").expect("write");
+        let original = std::fs::read(&path).expect("original");
+        let mut backend = MemoryBackend::default();
+        backend.values.insert(
+            access_token_locator().id().to_string(),
+            "old-access".to_string(),
+        );
+        backend.corrupt_readback = true;
+        let state = TickTickState {
+            tokens: TickTickTokens {
+                access_token: Some("new-access".to_string()),
+                refresh_token: None,
+                expires_at_ms: 0,
+            },
+            ..TickTickState::default()
+        };
+
+        assert_eq!(
+            save_with_backend(&path, &state, &mut backend),
+            Err(CredentialError::VerificationFailed.code().to_string())
+        );
+        assert_eq!(std::fs::read(path).expect("file"), original);
+        assert_eq!(
+            backend
+                .values
+                .get(access_token_locator().id())
+                .map(String::as_str),
+            Some("old-access")
+        );
+    }
+
+    #[test]
+    fn serialized_state_never_contains_tokens() {
+        let state = TickTickState {
+            tokens: TickTickTokens {
+                access_token: Some("access-marker".to_string()),
+                refresh_token: Some("refresh-marker".to_string()),
+                expires_at_ms: 12,
+            },
+            ..TickTickState::default()
+        };
+
+        let json = serde_json::to_string(&state).expect("serialize");
+
+        assert!(!json.contains("access-marker"));
+        assert!(!json.contains("refresh-marker"));
+        assert!(!json.contains("accessToken"));
+        assert!(!json.contains("refreshToken"));
+        let debug = format!("{state:?}");
+        assert!(!debug.contains("access-marker"));
+        assert!(!debug.contains("refresh-marker"));
+    }
+
+    #[test]
+    fn disconnect_deletes_access_and_refresh_credentials() {
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &access_token_locator(),
+                &SecretValue::new("access".into()).expect("secret"),
+            )
+            .expect("seed");
+        backend
+            .set(
+                &refresh_token_locator(),
+                &SecretValue::new("refresh".into()).expect("secret"),
+            )
+            .expect("seed");
+
+        delete_tokens_with_backend(&mut backend).expect("delete");
+
+        assert!(backend.values.is_empty());
+    }
+
+    #[test]
+    fn disconnect_state_failure_restores_both_token_snapshots() {
+        let mut backend = MemoryBackend::default();
+        backend
+            .set(
+                &access_token_locator(),
+                &SecretValue::new("access-snapshot".into()).expect("secret"),
+            )
+            .expect("seed");
+        backend
+            .set(
+                &refresh_token_locator(),
+                &SecretValue::new("refresh-snapshot".into()).expect("secret"),
+            )
+            .expect("seed");
+        let before = backend.values.clone();
+        let state = TickTickState {
+            tokens: TickTickTokens {
+                access_token: Some("access-snapshot".to_string()),
+                refresh_token: Some("refresh-snapshot".to_string()),
+                expires_at_ms: 7,
+            },
+            sync_enabled_at_ms: 1,
+            ..TickTickState::default()
+        };
+
+        let result = disconnect_with_backend_and_writer(&state, &mut backend, |sanitized| {
+            assert!(sanitized.tokens.access_token.is_none());
+            assert!(sanitized.tokens.refresh_token.is_none());
+            Err("TICKTICK_STATE_REPLACE_FAILED".to_string())
+        });
+
+        assert_eq!(result, Err("TICKTICK_STATE_REPLACE_FAILED".to_string()));
+        assert_eq!(backend.values, before);
+    }
 }

@@ -1,60 +1,71 @@
-"""Cookie 持久化服务（纯 pathlib，不依赖 Django/apps.core.utils.path）。
+"""Cookie 加密封套接口。
 
-修正了源 apps/.../core/cookie_service.py 的 bug：
-原 save() 未接收 context.cookies() 返回值、写入空 payload，导致 Cookie 实际未保存。
+CLI 不拥有持久密钥，默认严格禁用持久化。只有宿主注入经过审核的 envelope codec
+时才允许写二进制密文；明文 JSON 和解密失败一律闭锁。
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 logger = logging.getLogger("court_filing_cli")
 
 
+class CookiePersistenceDisabled(RuntimeError):
+    pass
+
+
+class CookieEnvelopeCodec(Protocol):
+    def seal(self, plaintext: bytes) -> bytes: ...
+    def open(self, envelope: bytes) -> bytes: ...
+
+
 class CookieService:
-    """浏览器上下文 Cookie 的 JSON 文件持久化。
-
-    storage_path 可在构造时传，也可在 load/save 时覆盖。
-    文件格式: {"cookies": [ <playwright Cookie 对象>, ... ]}
-    """
-
-    def __init__(self, storage_path: str | None = None) -> None:
+    def __init__(
+        self,
+        storage_path: str | None = None,
+        codec: CookieEnvelopeCodec | None = None,
+    ) -> None:
         self.storage_path = storage_path
+        self.codec = codec
 
     def load(self, context: Any, storage_path: str | None = None) -> bool:
-        """加载 Cookie 到浏览器上下文，返回是否成功加载到有效 Cookie。"""
         path = storage_path or self.storage_path
-        if not path:
+        if not path or self.codec is None:
             return False
         p = Path(path)
         if not p.exists():
             return False
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("读取 Cookie 文件失败 %s: %s", path, e)
-            return False
-        cookies = data.get("cookies") if isinstance(data, dict) else None
-        if not cookies:
-            return False
-        try:
+            envelope = p.read_bytes()
+            if not envelope or envelope.lstrip().startswith((b"{", b"[")):
+                raise ValueError("拒绝加载明文 Cookie")
+            plaintext = self.codec.open(envelope)
+            data = json.loads(plaintext.decode("utf-8"))
+            cookies = data.get("cookies") if isinstance(data, dict) else None
+            if not isinstance(cookies, list) or not cookies:
+                return False
             context.add_cookies(cookies)
-        except Exception as e:
-            logger.warning("注入 Cookie 失败 %s: %s", path, e)
+            return True
+        except Exception:
+            logger.warning("Cookie 封套不可用，已闭锁本次会话恢复")
             return False
-        logger.info("已加载 Cookie: %s (%d 条)", path, len(cookies))
-        return True
 
     def save(self, context: Any, storage_path: str | None = None) -> str:
-        """保存浏览器上下文的 Cookie，返回存储路径。"""
         path = storage_path or self.storage_path
-        if not path:
-            raise ValueError("storage_path is required")
+        if not path or self.codec is None:
+            raise CookiePersistenceDisabled("未提供受控加密封套，禁止持久化 Cookie")
+        cookies = context.cookies()
+        plaintext = json.dumps({"cookies": cookies}, ensure_ascii=False).encode("utf-8")
+        envelope = self.codec.seal(plaintext)
+        if not envelope or envelope.lstrip().startswith((b"{", b"[")):
+            raise CookiePersistenceDisabled("加密封套返回明文，拒绝落盘")
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        cookies = context.cookies()  # 修正：接收返回值
-        payload = {"cookies": cookies}
-        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("Cookie 已保存: %s (%d 条)", path, len(cookies))
+        temporary = p.with_suffix(p.suffix + ".tmp")
+        temporary.write_bytes(envelope)
+        temporary.replace(p)
         return str(p)

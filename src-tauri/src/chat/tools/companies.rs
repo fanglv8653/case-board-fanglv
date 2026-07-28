@@ -60,7 +60,8 @@ impl Tool for EnterpriseSearch {
         if let Some(r) = try_kb_hit(ctx, "rh_enterpriseSearch", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         // yuandian::enterprise_search 现签名只接 name(top_k 在底层硬编码 10),
         // V0.2 当前先用,后续若需要可扩 Params struct
         let resp = yuandian::enterprise_search(api_key, name).await?;
@@ -101,7 +102,8 @@ impl Tool for EnterpriseAggregationSummary {
         if let Some(r) = try_kb_hit(ctx, "rh_enterpriseAggregationSummary", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::enterprise_aggregation_summary(api_key, &eid).await?;
         // 聚合 5 积分
         Ok(save_and_wrap(
@@ -141,7 +143,8 @@ impl Tool for EnterpriseBaseInfo {
         if let Some(r) = try_kb_hit(ctx, "rh_enterpriseBaseInfo", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::enterprise_base_info(api_key, &eid).await?;
         Ok(save_and_wrap(
             ctx,
@@ -182,7 +185,8 @@ impl Tool for EnterpriseChangeInfo {
         if let Some(r) = try_kb_hit(ctx, "rh_enterpriseChangeInfo", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::enterprise_change_info(api_key, &eid, page).await?;
         Ok(save_and_wrap(
             ctx,
@@ -223,7 +227,8 @@ impl Tool for EnterpriseWritList {
         if let Some(r) = try_kb_hit(ctx, "rh_enterpriseWritList", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::enterprise_writ_list(api_key, &eid, page).await?;
         Ok(save_and_wrap(
             ctx,
@@ -266,7 +271,8 @@ impl Tool for EnterpriseAnnualReport {
         if let Some(r) = try_kb_hit(ctx, "rh_enterpriseAnnualReport", &cache_params) {
             return Ok(r);
         }
-        let api_key = yuandian_key(ctx)?;
+        let api_key_secret = yuandian_key(ctx)?;
+        let api_key = api_key_secret.expose();
         let resp = yuandian::enterprise_annual_report(api_key, &eid, year).await?;
         Ok(save_and_wrap(
             ctx,

@@ -2,6 +2,7 @@ pub mod chat;
 pub mod contract_draft;
 pub mod contract_review;
 pub mod court_filing_env;
+pub mod court_filing_secure;
 pub mod court_sms;
 pub mod db;
 pub mod deepseek;
@@ -24,7 +25,9 @@ pub mod lpr;
 pub mod proc_util;
 // 私人专属功能 Rust 侧(双轨发布模型)。开源仓此文件为桩(命令返回 Err),照样编译。
 pub mod case_bundle;
+pub mod credentials;
 pub mod private;
+pub mod security;
 pub mod settings;
 pub mod team;
 pub mod telemetry;
@@ -42,9 +45,8 @@ use tauri::{path::BaseDirectory, Emitter, Manager};
 
 use crate::db::cases::{self as cases_db, Case};
 use crate::db::documents::{self as documents_db, Document};
-use crate::ingest::case_split;
 use crate::ingest::pipeline;
-use crate::ingest::scanner::{scan_folder, ScannedDoc};
+use crate::ingest::scanner::{scan_folder, scan_folder_for_domain, ScannedDoc};
 
 // ============================================================================
 // 公共类型
@@ -56,15 +58,6 @@ pub struct DbHealth {
     pub table_count: i64,
     pub case_count: i64,
     pub db_path: String,
-}
-
-/// 导入一个案件文件夹后返回的完整结果:案件 + 扫描出的文档清单。
-#[derive(Debug, Serialize)]
-pub struct ImportResult {
-    pub case: Case,
-    pub docs: Vec<ScannedDoc>,
-    /// 是否是 upsert 命中已存在的案件(true = 之前导入过,这次只刷新)
-    pub is_existing: bool,
 }
 
 /// 案件 + 它的文档列表(用于详情页)。
@@ -268,195 +261,6 @@ fn scan_case_folder(path: String) -> Result<Vec<ScannedDoc>, String> {
     Ok(scan_folder(p))
 }
 
-/// 导入一个案件文件夹:扫描 + upsert 案件 + 替换文档列表 + 后台 spawn 字段抽取。
-///
-/// 入库后重启 App,这个案件依然在,这是 V0.1 端到端的核心动作。
-/// 字段抽取在后台 tokio task 跑,前端订阅 "extraction_progress" 事件看进度。
-#[tauri::command]
-async fn import_case_folder(
-    app: tauri::AppHandle,
-    pool: tauri::State<'_, SqlitePool>,
-    path: String,
-) -> Result<ImportResult, String> {
-    let p = Path::new(&path);
-    if !p.exists() {
-        return Err(format!("路径不存在: {}", path));
-    }
-    if !p.is_dir() {
-        return Err(format!("不是文件夹: {}", path));
-    }
-
-    // 1) 用文件夹最后一段做默认案件名
-    let default_name = p
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "未命名案件".to_string());
-
-    // 2) 先看是不是已经导入过(判断 is_existing 标记)
-    let pre_existing = cases_db::find_case_by_folder(pool.inner(), &path)
-        .await
-        .map_err(db_err)?;
-    let is_existing = pre_existing.is_some();
-
-    // 3) Upsert 案件
-    let case = cases_db::upsert_case_for_folder(pool.inner(), &path, &default_name, "诉讼")
-        .await
-        .map_err(db_err)?;
-
-    // 4) 扫描文件夹(这里是同步,scanner 很快)
-    let scanned = scan_folder(p);
-
-    // 5) 替换文档列表
-    documents_db::replace_documents_for_case(pool.inner(), &case.id, &scanned)
-        .await
-        .map_err(db_err)?;
-
-    // 6) 后台启动字段抽取(立即返回,前端通过事件订阅进度)
-    let docs_for_extraction = documents_db::list_documents_by_case(pool.inner(), &case.id)
-        .await
-        .map_err(db_err)?;
-    pipeline::spawn_extraction(
-        app.clone(),
-        pool.inner().clone(),
-        case.id.clone(),
-        docs_for_extraction,
-        true, // 导入新案件:全部文档抽完后跑一次全案分析
-    );
-
-    Ok(ImportResult {
-        case,
-        docs: scanned,
-        is_existing,
-    })
-}
-
-/// 多案件检测:对一个文件夹做「拆分预案」(只读,不写库)。前端据此决定是否弹拆分预览。
-/// `multi=false` 时按现状走 `import_case_folder` 单案导入即可。
-/// 详见 `docs/提案-多案件文件夹识别-2026-06-04.md`。
-#[tauri::command]
-async fn plan_import_folder(
-    pool: tauri::State<'_, SqlitePool>,
-    path: String,
-) -> Result<case_split::ImportPlan, String> {
-    let p = Path::new(&path);
-    if !p.is_dir() {
-        return Err(format!("不是文件夹: {}", path));
-    }
-    let mut plan = case_split::plan_folder(p);
-    // 根文件夹此前是否已作为「单个案件」导入过(拆分会与旧案重复 → 前端告警)
-    plan.root_already_imported = cases_db::find_case_by_folder(pool.inner(), &path)
-        .await
-        .map_err(db_err)?
-        .is_some();
-    Ok(plan)
-}
-
-/// 确认后的一个待建案件(前端可改名)。
-#[derive(Debug, serde::Deserialize)]
-pub struct CommitCase {
-    pub dir: String,
-    pub name: String,
-}
-
-/// 拆分批量建案的**写库部分**(不含后台抽取,便于真库集成测试)。
-///
-/// - `root`:被拖入的上层文件夹。若它此前已作为**单个案件**导入过(且不在本次要建的子案件里),
-///   先把那个旧的整体案件删掉 —— 否则它的文档行占着 `source_path`,子案件 INSERT 会撞唯一约束。
-///   删旧案 = 用拆分结果替换它。
-/// - 每个案件 = upsert(子目录) + 扫描 + 替换文档。
-/// - 共用材料(Phase 2,migration 0019 后)挂到**每个**案件:`(case_id, source_path)` 复合唯一,
-///   同一文件在各案各一行。各案件子目录互不相交、共用目录是独立兄弟,故同一案内不会出现重复 source_path。
-async fn build_split_cases(
-    pool: &SqlitePool,
-    root: &str,
-    cases: &[CommitCase],
-    shared_dirs: &[String],
-) -> Result<Vec<ImportResult>, String> {
-    if cases.is_empty() {
-        return Err("没有要导入的案件".to_string());
-    }
-    // 旧的「整体作单案」记录 → 删掉,释放其文档占用的 source_path
-    if !root.is_empty() && !cases.iter().any(|c| c.dir == root) {
-        if let Some(old) = cases_db::find_case_by_folder(pool, root)
-            .await
-            .map_err(db_err)?
-        {
-            cases_db::delete_case(pool, &old.id).await.map_err(db_err)?;
-        }
-    }
-
-    let mut results = Vec::with_capacity(cases.len());
-    for c in cases.iter() {
-        let dir = Path::new(&c.dir);
-        if !dir.is_dir() {
-            return Err(format!("案件目录不存在: {}", c.dir));
-        }
-        let name = if c.name.trim().is_empty() {
-            dir.file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "未命名案件".to_string())
-        } else {
-            c.name.trim().to_string()
-        };
-        let is_existing = cases_db::find_case_by_folder(pool, &c.dir)
-            .await
-            .map_err(db_err)?
-            .is_some();
-        let case = cases_db::upsert_case_for_folder(pool, &c.dir, &name, "诉讼")
-            .await
-            .map_err(db_err)?;
-        let mut scanned = scan_folder(dir);
-        // 共用材料挂到**每个**案件(migration 0019 后 (case_id, source_path) 复合唯一,可多挂)
-        for sd in shared_dirs {
-            let sp = Path::new(sd);
-            if sp.is_dir() {
-                scanned.extend(scan_folder(sp));
-            }
-        }
-        documents_db::replace_documents_for_case(pool, &case.id, &scanned)
-            .await
-            .map_err(db_err)?;
-        results.push(ImportResult {
-            case,
-            docs: scanned,
-            is_existing,
-        });
-    }
-    Ok(results)
-}
-
-/// 按确认后的拆分预案**批量建案**(写库 + 每案后台抽取)。前端拆分弹窗点确认后调用。
-#[tauri::command]
-async fn commit_import_folder(
-    app: tauri::AppHandle,
-    pool: tauri::State<'_, SqlitePool>,
-    root: String,
-    cases: Vec<CommitCase>,
-    shared_dirs: Vec<String>,
-) -> Result<Vec<ImportResult>, String> {
-    // 2026-06-16 防呆(反馈 ea761d3d):一次最多导入 3 个案件,保护后面 OCR 不被批量打爆限流。
-    // 前端 SplitImportDialog 也会在选 >3 时禁用「拆成 N 个」按钮;这里是后端兜底。
-    // (「合并成 1 个案件」走 import_case_folder 单案路径,不经这里,不受 3 案上限影响。)
-    if cases.len() > 3 {
-        return Err(format!(
-            "一次最多导入 3 个案件(本次选了 {} 个)。免费 OCR 批量识别容易被限流卡死,请减少勾选、分批导入。",
-            cases.len()
-        ));
-    }
-    let results = build_split_cases(pool.inner(), &root, &cases, &shared_dirs).await?;
-    // 2026-06-16:多案件按顺序排队抽取(单后台任务逐案 await),不再每案各起一个并发 pipeline
-    // → 避免 N×8 并发 OCR 打爆 MinerU 限流(详见 pipeline::spawn_extraction_batch)。
-    let mut jobs = Vec::with_capacity(results.len());
-    for r in &results {
-        let docs = documents_db::list_documents_by_case(pool.inner(), &r.case.id)
-            .await
-            .map_err(db_err)?;
-        jobs.push((r.case.id.clone(), docs));
-    }
-    pipeline::spawn_extraction_batch(app, pool.inner().clone(), jobs, true);
-    Ok(results)
-}
-
 /// 列出所有已导入的案件(用于"最近案件" / 案件列表页)。
 #[tauri::command]
 async fn list_cases(pool: tauri::State<'_, SqlitePool>) -> Result<Vec<Case>, String> {
@@ -493,8 +297,40 @@ async fn get_case_with_docs(
 ///
 /// 自动补上默认 endpoint(MinerU / Ollama),但 api_key 不补默认值。
 #[tauri::command]
-fn get_settings() -> Result<settings::Settings, String> {
-    settings::read_settings().map(|s| s.with_defaults_for_display())
+fn get_settings() -> Result<settings::PublicSettings, String> {
+    settings::read_settings().map(settings::PublicSettings::from_settings)
+}
+
+#[tauri::command]
+fn list_credential_statuses() -> Vec<credentials::CredentialStatus> {
+    credentials::static_statuses()
+}
+
+#[tauri::command]
+fn set_credential(locator: String, value: String) -> Result<credentials::CredentialStatus, String> {
+    let slot = credentials::StaticCredential::from_locator_id(&locator).ok_or_else(|| {
+        credentials::CredentialError::InvalidLocator
+            .code()
+            .to_string()
+    })?;
+    let locator = slot.locator();
+    let secret = credentials::SecretValue::new(value).map_err(|error| error.code().to_string())?;
+    credentials::replace_verified(&locator, &secret).map_err(|error| error.code().to_string())?;
+    let mut backend = credentials::SystemCredentialBackend;
+    Ok(credentials::status_with(&mut backend, &locator))
+}
+
+#[tauri::command]
+fn delete_credential(locator: String) -> Result<credentials::CredentialStatus, String> {
+    let slot = credentials::StaticCredential::from_locator_id(&locator).ok_or_else(|| {
+        credentials::CredentialError::InvalidLocator
+            .code()
+            .to_string()
+    })?;
+    let locator = slot.locator();
+    credentials::delete_verified(&locator).map_err(|error| error.code().to_string())?;
+    let mut backend = credentials::SystemCredentialBackend;
+    Ok(credentials::status_with(&mut backend, &locator))
 }
 
 /// 2026-05-25 V0.1.6 · 若 cases 表为空,seed 一个示例案件「张三 诉 李四 民间借贷」。
@@ -508,42 +344,73 @@ async fn seed_demo_case_if_empty(pool: tauri::State<'_, SqlitePool>) -> Result<b
 
 /// 2026-05-25 V0.1.6 · 验证 MinerU API token,前端「验证」按钮触发。
 #[tauri::command]
-async fn verify_mineru_key(token: String) -> verify::VerifyResult {
-    verify::verify_mineru_key(&token).await
+async fn verify_mineru_key() -> verify::VerifyResult {
+    match credentials::resolve_static(credentials::StaticCredential::Mineru) {
+        Ok(Some(secret)) => verify::verify_mineru_key(secret.expose()).await,
+        _ => verify::VerifyResult::fail("MinerU 凭据尚未安全保存"),
+    }
 }
 
 /// 2026-06-12 · 验证 PaddleOCR VL(AI Studio)访问令牌,前端「验证」按钮触发。
 #[tauri::command]
-async fn verify_paddle_vl_key(token: String) -> verify::VerifyResult {
-    verify::verify_paddle_vl_key(&token).await
+async fn verify_paddle_vl_key() -> verify::VerifyResult {
+    match credentials::resolve_static(credentials::StaticCredential::PaddleVl) {
+        Ok(Some(secret)) => verify::verify_paddle_vl_key(secret.expose()).await,
+        _ => verify::VerifyResult::fail("PaddleOCR 凭据尚未安全保存"),
+    }
 }
 
 /// 2026-05-25 V0.1.6 · 验证 DeepSeek API key,前端「验证」按钮触发。
 #[tauri::command]
-async fn verify_deepseek_key(api_key: String, endpoint: Option<String>) -> verify::VerifyResult {
-    verify::verify_deepseek_key(&api_key, endpoint.as_deref()).await
+async fn verify_deepseek_key(endpoint: Option<String>) -> verify::VerifyResult {
+    match credentials::resolve_static(credentials::StaticCredential::Deepseek) {
+        Ok(Some(secret)) => verify::verify_deepseek_key(secret.expose(), endpoint.as_deref()).await,
+        _ => verify::VerifyResult::fail("DeepSeek 凭据尚未安全保存"),
+    }
 }
 
 /// 2026-05-25 V0.1.8 · 验证元典(open.chineselaw.com)API key,前端「验证」按钮触发。
 #[tauri::command]
-async fn verify_yuandian_key(api_key: String) -> verify::VerifyResult {
-    verify::verify_yuandian_key(&api_key).await
+async fn verify_yuandian_key() -> verify::VerifyResult {
+    match credentials::resolve_static(credentials::StaticCredential::Yuandian) {
+        Ok(Some(secret)) => verify::verify_yuandian_key(secret.expose()).await,
+        _ => verify::VerifyResult::fail("元典凭据尚未安全保存"),
+    }
 }
 
 /// 2026-06-15 · 验证 MiniMax API key,前端「验证」按钮触发。
 #[tauri::command]
-async fn verify_minimax_key(api_key: String, endpoint: Option<String>) -> verify::VerifyResult {
-    verify::verify_minimax_key(&api_key, endpoint.as_deref()).await
+async fn verify_minimax_key(endpoint: Option<String>) -> verify::VerifyResult {
+    match credentials::resolve_static(credentials::StaticCredential::Minimax) {
+        Ok(Some(secret)) => verify::verify_minimax_key(secret.expose(), endpoint.as_deref()).await,
+        _ => verify::VerifyResult::fail("MiniMax 凭据尚未安全保存"),
+    }
 }
 
 /// 2026-06-16 · 验证「通用 OpenAI 兼容」后端(GLM / MiMo / 自定义)key + 接口地址 + 模型名。
 #[tauri::command]
 async fn verify_openai_compat_key(
-    api_key: String,
+    locator: String,
     endpoint: String,
     model: String,
 ) -> verify::VerifyResult {
-    verify::verify_openai_compat_key(&api_key, &endpoint, &model).await
+    let Some(slot) = credentials::StaticCredential::from_locator_id(&locator) else {
+        return verify::VerifyResult::fail("凭据定位符无效");
+    };
+    if !matches!(
+        slot,
+        credentials::StaticCredential::Glm
+            | credentials::StaticCredential::Mimo
+            | credentials::StaticCredential::Custom
+    ) {
+        return verify::VerifyResult::fail("凭据定位符不属于兼容模型");
+    }
+    match credentials::resolve_static(slot) {
+        Ok(Some(secret)) => {
+            verify::verify_openai_compat_key(secret.expose(), &endpoint, &model).await
+        }
+        _ => verify::VerifyResult::fail("模型凭据尚未安全保存"),
+    }
 }
 
 /// 2026-05-25 V0.1.8 · 检测版本更新。
@@ -1488,9 +1355,16 @@ async fn pull_feishu_sync_preview(
             .await
             .map_err(feishu_oauth_error)?;
         let records =
-            feishu::fetch_active_case_management_records(token.expose(), app_token, table_id).await?;
-        db::feishu_sync::complete_pull_with_entities(pool.inner(), &run_id, app_token, table_id, records)
-            .await
+            feishu::fetch_active_case_management_records(token.expose(), app_token, table_id)
+                .await?;
+        db::feishu_sync::complete_pull_with_entities(
+            pool.inner(),
+            &run_id,
+            app_token,
+            table_id,
+            records,
+        )
+        .await
     }
     .await;
     if let Err(error) = &result {
@@ -2784,12 +2658,12 @@ fn infer_court_region(court_name: &str) -> CourtRegion {
 /// 使用 MinerU batch API 上传 PDF → OCR → 解析文本。
 async fn extract_agents_from_pdf(
     pdf_path: &str,
-    settings: &crate::settings::Settings,
+    _settings: &crate::settings::Settings,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let api_key = settings
-        .mineru_api_key
-        .clone()
+    let api_key = credentials::resolve_static(credentials::StaticCredential::Mineru)
+        .map_err(|error| error.code().to_string())?
         .ok_or_else(|| "未配置 MinerU API Key".to_string())?;
+    let api_key = api_key.expose();
 
     let client = reqwest::Client::new();
     let file_name = std::path::Path::new(pdf_path)
@@ -3004,18 +2878,23 @@ async fn start_court_filing(
 
     // 4. 读设置
     let settings = crate::settings::read_settings().unwrap_or_default();
-    let account = settings
-        .court_filing_account
-        .clone()
-        .ok_or_else(|| "未配置一张网账号（法律工具→辅助在线立案）".to_string())?;
-    let password = settings
-        .court_filing_password
-        .clone()
-        .ok_or_else(|| "未配置一张网密码（法律工具→辅助在线立案）".to_string())?;
+    let account = crate::credentials::resolve_static(
+        crate::credentials::StaticCredential::CourtFilingAccount,
+    )
+    .map_err(|error| error.code().to_string())?
+    .ok_or_else(|| "未配置一张网账号（法律工具→辅助在线立案）".to_string())?;
+    let password = crate::credentials::resolve_static(
+        crate::credentials::StaticCredential::CourtFilingPassword,
+    )
+    .map_err(|error| error.code().to_string())?
+    .ok_or_else(|| "未配置一张网密码（法律工具→辅助在线立案）".to_string())?;
+    let filing_credentials = crate::court_filing_secure::FilingCredentials::new(
+        account.into_string(),
+        password.into_string(),
+    )?;
     let cli_path = resolve_court_filing_cli_path(&app, settings.court_filing_cli_path.clone());
     // 解释器:用户配置 > 我们装的 venv > 平台默认(口径与环境检测/安装一致)。
     let python = court_filing_env::resolve_python(settings.court_filing_python.as_deref());
-    let cookie_dir = settings.court_filing_cookie_dir.clone();
 
     // 5. 组装 case_data.json
     // user_overrides_json 优先（用户手动编辑的字段），fallback 到 agg_court
@@ -3300,7 +3179,7 @@ async fn start_court_filing(
             case_id: case_id.clone(),
             filing_type: filing_type.clone(),
             court_name: court_name.to_string(),
-            cookie_account: Some(account.clone()),
+            cookie_account: None,
             output_dir: None, // 后面更新
         },
     )
@@ -3360,7 +3239,6 @@ async fn start_court_filing(
 
     tauri::async_runtime::spawn(async move {
         use tokio::io::AsyncBufReadExt;
-        use tokio::process::Command;
 
         let output_dir_path = std::path::PathBuf::from(&output_dir_clone);
         let progress_log_path = output_dir_path.join("progress_events.jsonl");
@@ -3455,13 +3333,7 @@ async fn start_court_filing(
         let case_data_path_str = case_data_path.to_string_lossy().to_string();
         let materials_path_str = materials_path.to_string_lossy().to_string();
 
-        let mut args = vec![
-            "-m".to_string(),
-            "court_filing_cli".to_string(),
-            "--account".to_string(),
-            account.clone(),
-            "--password".to_string(),
-            password.clone(),
+        let args = vec![
             "--filing-type".to_string(),
             filing_type.clone(),
             "--case-data".to_string(),
@@ -3473,30 +3345,23 @@ async fn start_court_filing(
             "--log-level".to_string(),
             "INFO".to_string(),
         ];
-        if let Some(ref cd) = cookie_dir {
-            args.extend(["--cookie-dir".to_string(), cd.clone()]);
-        }
 
         // 从 cli_path 的父目录运行，这样 python -m court_filing_cli 能找到包
         let cli_parent = std::path::Path::new(&cli_path_clone)
             .parent()
             .unwrap_or(std::path::Path::new(&cli_path_clone));
-        let mut filing_cmd = Command::new(&python);
-        filing_cmd
-            .current_dir(cli_parent)
-            .args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        // Windows 下隐藏 python 控制台窗口(否则发起立案时会闪黑框;Playwright 的浏览器
-        // 是独立 GUI 子进程,不受影响,仍正常可见)。
-        crate::proc_util::hide_console_window(&mut filing_cmd);
-        let spawn_result = filing_cmd.spawn();
+        let spawn_result = crate::court_filing_secure::spawn_with_stdin_credentials(
+            &python,
+            cli_parent,
+            &args,
+            filing_credentials,
+        )
+        .await;
 
-        let mut child = match spawn_result {
-            Ok(c) => c,
-            Err(e) => {
-                let err_msg = format!("启动 CLI 失败（确认 python3 + 依赖已装）: {}", e);
+        let (mut child, redactor) = match spawn_result {
+            Ok(result) => result,
+            Err(error) => {
+                let err_msg = format!("启动 CLI 失败（确认 Python 与依赖已安装）：{error}");
                 let _ = db::court_filing::update_status(
                     &pool_clone,
                     &job_id,
@@ -3541,12 +3406,14 @@ async fn start_court_filing(
         // 逐行读 stderr，避免子进程错误输出过多导致管道阻塞；同时落盘供失败诊断。
         let stderr_task = child.stderr.take().map(|stderr| {
             let stderr_log_path = stderr_log_path.clone();
+            let stderr_redactor = redactor.clone();
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
                 let reader = tokio::io::BufReader::new(stderr);
                 let mut lines = reader.lines();
                 let mut excerpt: Vec<String> = Vec::new();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    let line = stderr_redactor.redact(&line);
                     if let Ok(mut file) = tokio::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -3575,6 +3442,7 @@ async fn start_court_filing(
         let mut last_detail: Option<String> = None;
 
         while let Ok(Some(line)) = lines.next_line().await {
+            let line = redactor.redact(&line);
             let ev: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(_) => continue, // 非 JSON 行跳过
@@ -4044,12 +3912,14 @@ async fn yuandian_deep_dive(
     case_id: String,
 ) -> Result<yuandian::deep_dive::DeepDiveReport, String> {
     let settings = settings::read_settings().unwrap_or_default();
-    let api_key = settings
-        .yuandian_api_key
-        .as_deref()
+    let api_key = credentials::resolve_static(credentials::StaticCredential::Yuandian)
+        .map_err(|error| error.code().to_string())?
         .ok_or_else(|| "元典 API key 未配置 — 请到 Settings 里填".to_string())?;
     let llm_config = llm::LlmConfig::from_settings(&settings);
-    Ok(yuandian::deep_dive::run_deep_dive(pool.inner(), &case_id, api_key, &llm_config).await)
+    Ok(
+        yuandian::deep_dive::run_deep_dive(pool.inner(), &case_id, api_key.expose(), &llm_config)
+            .await,
+    )
 }
 
 #[tauri::command]
@@ -4058,13 +3928,13 @@ async fn yuandian_basic_query(
     case_id: String,
 ) -> Result<YuandianP1Response, String> {
     let settings = settings::read_settings().unwrap_or_default();
-    let api_key = settings
-        .yuandian_api_key
-        .as_deref()
+    let api_key = credentials::resolve_static(credentials::StaticCredential::Yuandian)
+        .map_err(|error| error.code().to_string())?
         .ok_or_else(|| "元典 API key 未配置 — 请到 Settings 里填".to_string())?;
 
     // P1.1 跑元典 16 端点
-    let orch = yuandian::orchestrator::basic_query(pool.inner(), &case_id, api_key).await?;
+    let orch =
+        yuandian::orchestrator::basic_query(pool.inner(), &case_id, api_key.expose()).await?;
 
     // P1.2 LLM 写风险报告
     let llm_config = llm::LlmConfig::from_settings(&settings);
@@ -4389,11 +4259,10 @@ async fn get_deepseek_balance(
     refresh: bool,
 ) -> Result<Option<deepseek::DeepSeekBalance>, String> {
     if refresh {
-        let settings = settings::read_settings().unwrap_or_default();
-        let Some(api_key) = settings.cloud_llm_api_key.as_deref() else {
-            return Err("尚未配置 DeepSeek API key".into());
-        };
-        let bal = deepseek::fetch_balance_and_persist(pool.inner(), api_key)
+        let api_key = credentials::resolve_static(credentials::StaticCredential::Deepseek)
+            .map_err(|error| error.code().to_string())?
+            .ok_or_else(|| "尚未配置 DeepSeek API key".to_string())?;
+        let bal = deepseek::fetch_balance_and_persist(pool.inner(), api_key.expose())
             .await
             .map_err(|e| e.to_string())?;
         Ok(Some(bal))
@@ -4502,78 +4371,6 @@ async fn recompute_case_extraction(
     );
 
     Ok(reset_count)
-}
-
-/// 2026-05-25 V0.1.5 「🔄 刷新源文件」按钮触发。
-///
-/// 增量逻辑:
-///   1. 找到案件,定位 `source_folder`
-///   2. `scan_folder` 重扫一遍
-///   3. `sync_documents_for_case` 做 diff:
-///      - 全新文件 → INSERT,status=pending
-///      - mtime+size 变了 → UPDATE,清抽取产物,status=pending
-///      - 完全没变 → 不动
-///      - 磁盘消失 → 标 `deleted_at`(软删,LLM corpus 不再带它,但 DB 留痕)
-///   4. 如果有任何变化(added/updated/deleted),后台 spawn_extraction 跑 pending +
-///      自动重跑 global_extract 生成新画像 + 新报告
-///   5. 返回 `SyncStats` 给前端 toast 显示
-///
-/// 用户体验:点按钮 → 立即弹 toast「新增 X / 更新 Y / 移除 Z」→ 后台慢慢跑抽取,
-/// 完成后前端通过 `extraction_progress` 事件自动刷新卡片和报告。
-#[tauri::command]
-async fn refresh_case_files(
-    app: tauri::AppHandle,
-    pool: tauri::State<'_, SqlitePool>,
-    case_id: String,
-) -> Result<documents_db::SyncStats, String> {
-    // 1) 拿案件 + source_folder
-    let case = cases_db::get_case(pool.inner(), &case_id)
-        .await
-        .map_err(db_err)?
-        .ok_or_else(|| format!("案件不存在: {}", case_id))?;
-
-    let folder = Path::new(&case.source_folder);
-    if !folder.exists() {
-        return Err(format!("案件源文件夹已不存在: {}", case.source_folder));
-    }
-    if !folder.is_dir() {
-        return Err(format!("案件源路径不是文件夹: {}", case.source_folder));
-    }
-
-    // 2) 扫文件夹(scanner 很快,同步即可)
-    let scanned = scan_folder(folder);
-
-    // 3) diff sync,拿统计
-    let stats = documents_db::sync_documents_for_case(pool.inner(), &case_id, &scanned)
-        .await
-        .map_err(db_err)?;
-
-    // 4) 有任何变化 或 DB 里还有 pending 文档 → 后台跑抽取(pipeline 自带重跑 global_extract)
-    //
-    // 2026-05-25 V0.1.8 加 pending 检测:这样老板手工把 failed 重置成 pending 后,
-    // 点一下「刷新源文件」就能触发重抽,不用加新按钮。
-    let pending_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM documents \
-         WHERE case_id = ? AND deleted_at IS NULL AND extraction_status = 'pending'",
-    )
-    .bind(&case_id)
-    .fetch_one(pool.inner())
-    .await
-    .unwrap_or(0);
-    if stats.added > 0 || stats.updated > 0 || stats.deleted > 0 || pending_count > 0 {
-        let documents = documents_db::list_documents_by_case(pool.inner(), &case_id)
-            .await
-            .map_err(db_err)?;
-        pipeline::spawn_extraction(
-            app.clone(),
-            pool.inner().clone(),
-            case_id.clone(),
-            documents,
-            true,
-        );
-    }
-
-    Ok(stats)
 }
 
 // ─────────────────────────── 法院短信处理(V0.3) ───────────────────────────
@@ -4811,7 +4608,7 @@ async fn preview_court_sms(
 /// 导入:重新拉新鲜文书列表(wjlj 有时效)→ 下载进案件 source_folder → 复用刷新管线抽取。
 #[tauri::command]
 async fn ingest_court_sms(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     pool: tauri::State<'_, SqlitePool>,
     case_id: String,
     link: court_sms::ZxfwLink,
@@ -4845,21 +4642,12 @@ async fn ingest_court_sms(
             }
         }
     }
-    // 复用「刷新源文件」:扫描 → diff → 新 PDF 进 documents(pending)→ 后台抽取 + 重跑画像/看板
-    let scanned = scan_folder(folder);
+    // 只同步为 pending 文档。没有材料三态决策时不得隐式进入 OCR/LLM；
+    // 下次“刷新源文件”预检会把这些文件标成“新增待确认”。
+    let scanned = scan_folder_for_domain(folder, &case.legal_domain);
     let sync = documents_db::sync_documents_for_case(pool.inner(), &case_id, &scanned)
         .await
         .map_err(db_err)?;
-    let documents = documents_db::list_documents_by_case(pool.inner(), &case_id)
-        .await
-        .map_err(db_err)?;
-    pipeline::spawn_extraction(
-        app.clone(),
-        pool.inner().clone(),
-        case_id.clone(),
-        documents,
-        true,
-    );
     Ok(CourtSmsIngestResult {
         downloaded,
         skipped,
@@ -4869,10 +4657,15 @@ async fn ingest_court_sms(
 
 /// 快递100 凭证(每次读不缓存,改了实时生效)。
 fn kuaidi100_creds() -> (String, String) {
-    let s = settings::read_settings().unwrap_or_default();
     (
-        s.kuaidi100_customer.unwrap_or_default(),
-        s.kuaidi100_key.unwrap_or_default(),
+        credentials::resolve_static_string(credentials::StaticCredential::KuaidiCustomer)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        credentials::resolve_static_string(credentials::StaticCredential::KuaidiKey)
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
     )
 }
 
@@ -4985,11 +4778,93 @@ async fn clear_chat_history(
 // MCP 数据源接入(智能粘贴识别 + 连接测试)
 // ============================================================================
 
-/// 智能粘贴:把平台「接入指南」复制来的配置文本解析成 MCP server 列表。
-/// 纯本地确定性解析(JSON / claude mcp add 命令行),不联网、不调 LLM。
+#[derive(serde::Serialize)]
+struct McpImportReport {
+    servers: Vec<chat::mcp_credentials::McpStoredServer>,
+    warnings: Vec<String>,
+}
+
+/// 智能粘贴在 Rust 内短暂解析明文，随后立即迁入通用凭据存储；
+/// 返回 WebView 的只有 UUID、定位符和 configured 状态。
 #[tauri::command]
-fn parse_mcp_paste(text: String) -> Result<chat::mcp_paste::ParsedPaste, String> {
-    chat::mcp_paste::parse_pasted_config(&text)
+fn parse_mcp_paste(text: String) -> Result<McpImportReport, String> {
+    let parsed = chat::mcp_paste::parse_pasted_config(&text)?;
+    let mut settings = settings::read_settings()?;
+    let mut warnings = parsed.warnings;
+    let mut fresh = Vec::new();
+    for server in parsed.servers {
+        if settings
+            .mcp_servers
+            .iter()
+            .any(|existing| existing.name == server.name)
+        {
+            warnings.push(format!("「{}」已存在，本次未重复导入。", server.name));
+        } else {
+            fresh.push(server);
+        }
+    }
+    if !fresh.is_empty() {
+        let ids = vec![None; fresh.len()];
+        let mut backend = crate::credentials::SystemCredentialBackend;
+        chat::mcp_credentials::migrate_legacy_servers_with(
+            &mut backend,
+            &fresh,
+            &ids,
+            |backend, stored| {
+                settings.mcp_servers.extend_from_slice(stored);
+                settings::write_settings_using_backend(&settings, backend).map_err(|_| ())
+            },
+        )
+        .map_err(|error| error.code().to_string())?;
+    }
+    Ok(McpImportReport {
+        servers: settings.mcp_servers,
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn update_mcp_server_metadata(
+    server_id: String,
+    name: String,
+    enabled: bool,
+) -> Result<Vec<chat::mcp_credentials::McpStoredServer>, String> {
+    let server_id =
+        uuid::Uuid::parse_str(&server_id).map_err(|_| "MCP_SERVER_ID_INVALID".to_string())?;
+    let mut settings = settings::read_settings()?;
+    let server = settings
+        .mcp_servers
+        .iter_mut()
+        .find(|server| server.server_id == server_id)
+        .ok_or_else(|| "MCP_SERVER_NOT_FOUND".to_string())?;
+    server
+        .rename(name)
+        .map_err(|error| error.code().to_string())?;
+    server.enabled = enabled;
+    settings::write_settings(&settings)?;
+    Ok(settings.mcp_servers)
+}
+
+#[tauri::command]
+fn delete_mcp_server(
+    server_id: String,
+) -> Result<Vec<chat::mcp_credentials::McpStoredServer>, String> {
+    let server_id =
+        uuid::Uuid::parse_str(&server_id).map_err(|_| "MCP_SERVER_ID_INVALID".to_string())?;
+    let mut settings = settings::read_settings()?;
+    let index = settings
+        .mcp_servers
+        .iter()
+        .position(|server| server.server_id == server_id)
+        .ok_or_else(|| "MCP_SERVER_NOT_FOUND".to_string())?;
+    let stored = settings.mcp_servers[index].clone();
+    settings.mcp_servers.remove(index);
+    let mut backend = crate::credentials::SystemCredentialBackend;
+    chat::mcp_credentials::delete_server_transaction_with(&mut backend, &stored, |backend| {
+        settings::write_settings_using_backend(&settings, backend).map_err(|_| ())
+    })
+    .map_err(|error| error.code().to_string())?;
+    Ok(settings.mcp_servers)
 }
 
 /// MCP 连接测试结果(给设置页「测试连接」按钮)。
@@ -5003,12 +4878,25 @@ struct McpTestReport {
 /// 连接测试:真连一次 server(initialize 握手 + tools/list),返回工具清单。
 /// 失败透传真实原因(401=令牌不对/过期、403=服务未购买等,已知坑 #8)。
 #[tauri::command]
-async fn test_mcp_server(
-    config: chat::mcp_bridge::McpServerConfig,
-) -> Result<McpTestReport, String> {
-    config.validate()?;
-    let client = chat::mcp_bridge::McpClient::connect(&config).await?;
-    let tools = client.list_tools().await?;
+async fn test_mcp_server(server_id: String) -> Result<McpTestReport, String> {
+    let server_id =
+        uuid::Uuid::parse_str(&server_id).map_err(|_| "MCP_SERVER_ID_INVALID".to_string())?;
+    let settings = settings::read_settings()?;
+    let stored = settings
+        .mcp_servers
+        .iter()
+        .find(|server| server.server_id == server_id)
+        .ok_or_else(|| "MCP_SERVER_NOT_FOUND".to_string())?;
+    let mut backend = crate::credentials::SystemCredentialBackend;
+    let resolved = chat::mcp_credentials::resolve_server_with(&mut backend, stored)
+        .map_err(|error| error.code().to_string())?;
+    let client = chat::mcp_bridge::McpClient::connect(resolved.config())
+        .await
+        .map_err(|error| resolved.redact_error(&error))?;
+    let tools = client
+        .list_tools()
+        .await
+        .map_err(|error| resolved.redact_error(&error))?;
     Ok(McpTestReport {
         tool_count: tools.len(),
         tool_names: tools.iter().take(8).map(|t| t.name.clone()).collect(),
@@ -5047,11 +4935,64 @@ async fn team_clear_local(pool: &SqlitePool, state: &TeamNetState) -> Result<(),
         old.shutdown();
     }
     drop(guard);
+    if let Some(identity) = settings::read_settings()?.team {
+        team::credentials::clear_persisted_identity(&identity.team_id)?;
+    }
     team::store::clear_team_data(pool).await?;
-    let mut s = settings::read_settings()?;
-    s.team = None;
-    settings::write_settings(&s)?;
     Ok(())
+}
+
+async fn team_rollback_setup(
+    pool: &SqlitePool,
+    state: &TeamNetState,
+    team_id: &str,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().await;
+    if let Some(old) = guard.take() {
+        old.shutdown();
+    }
+    drop(guard);
+    let credentials_cleared = team::credentials::clear_persisted_identity(team_id).is_ok();
+    let data_cleared = team::store::clear_team_data(pool).await.is_ok();
+    if credentials_cleared && data_cleared {
+        Ok(())
+    } else {
+        Err("TEAM_SETUP_ROLLBACK_FAILED".into())
+    }
+}
+
+async fn commit_team_setup<P, S, SF, B, BF, N, NF, R, RF>(
+    persist_credentials: P,
+    save_roster: S,
+    build_snapshot: B,
+    restart_network: N,
+    rollback: R,
+) -> Result<(), String>
+where
+    P: FnOnce() -> Result<(), String>,
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Result<(), String>>,
+    B: FnOnce() -> BF,
+    BF: std::future::Future<Output = Result<(), String>>,
+    N: FnOnce() -> NF,
+    NF: std::future::Future<Output = Result<(), String>>,
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = Result<(), String>>,
+{
+    let setup = async {
+        persist_credentials()?;
+        save_roster().await?;
+        build_snapshot().await?;
+        restart_network().await
+    }
+    .await;
+    match setup {
+        Ok(()) => Ok(()),
+        Err(error) => match rollback().await {
+            Ok(()) => Err(error),
+            Err(_) => Err("TEAM_SETUP_ROLLBACK_FAILED".into()),
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -5059,8 +5000,106 @@ struct TeamStatusDto {
     in_team: bool,
     /// 被踢出的团队名(一次性提示;返回即已自动清理本机团队配置)。
     kicked_from: Option<String>,
-    identity: Option<team::TeamIdentity>,
+    identity: Option<team::credentials::TeamPublicIdentity>,
     roster: Option<team::Roster>,
+}
+
+#[derive(Serialize)]
+struct TeamCreateDto {
+    status: TeamStatusDto,
+    /// 仅本次创建响应返回；不会进入 settings、常规状态 DTO 或日志。
+    pairing_code: String,
+}
+
+#[cfg(test)]
+#[test]
+fn team_status_and_create_responses_never_expose_team_secret() {
+    let identity = team::TeamIdentity {
+        team_id: "team-1".into(),
+        team_name: "Test Team".into(),
+        team_secret: "team-secret-marker".into(),
+        member_id: "member-1".into(),
+        my_name: "Alice".into(),
+        role: "leader".into(),
+        pairing_code: Some("123456".into()),
+    };
+    let status = TeamStatusDto {
+        in_team: true,
+        kicked_from: None,
+        identity: Some((&identity).into()),
+        roster: None,
+    };
+    let status_json = serde_json::to_string(&status).expect("status");
+    assert!(!status_json.contains("team-secret-marker"));
+    assert!(!status_json.contains("123456"));
+    assert!(!status_json.contains("team_secret"));
+    assert!(!status_json.contains("pairing_code"));
+
+    let create = TeamCreateDto {
+        status,
+        pairing_code: "123456".into(),
+    };
+    let create_json = serde_json::to_string(&create).expect("create");
+    assert!(!create_json.contains("team-secret-marker"));
+    assert!(create_json.contains("123456"));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn team_setup_failure_at_each_stage_runs_compensating_rollback() {
+    use std::sync::{Arc, Mutex};
+
+    for fail_at in 0..4 {
+        let state = Arc::new(Mutex::new([false; 4]));
+        let credential_state = Arc::clone(&state);
+        let roster_state = Arc::clone(&state);
+        let snapshot_state = Arc::clone(&state);
+        let network_state = Arc::clone(&state);
+        let rollback_state = Arc::clone(&state);
+
+        let result = commit_team_setup(
+            move || {
+                credential_state.lock().expect("state")[0] = true;
+                if fail_at == 0 {
+                    Err("CREDENTIAL_FAILED".into())
+                } else {
+                    Ok(())
+                }
+            },
+            move || async move {
+                roster_state.lock().expect("state")[1] = true;
+                if fail_at == 1 {
+                    Err("ROSTER_FAILED".into())
+                } else {
+                    Ok(())
+                }
+            },
+            move || async move {
+                snapshot_state.lock().expect("state")[2] = true;
+                if fail_at == 2 {
+                    Err("SNAPSHOT_FAILED".into())
+                } else {
+                    Ok(())
+                }
+            },
+            move || async move {
+                network_state.lock().expect("state")[3] = true;
+                if fail_at == 3 {
+                    Err("NETWORK_FAILED".into())
+                } else {
+                    Ok(())
+                }
+            },
+            move || async move {
+                *rollback_state.lock().expect("state") = [false; 4];
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*state.lock().expect("state"), [false; 4]);
+    }
 }
 
 /// 团队状态(设置页团队卡数据源)。顺带处理「被踢」:发现自己不在名单 → 自动清理并告知。
@@ -5069,7 +5108,7 @@ async fn team_status(
     pool: tauri::State<'_, SqlitePool>,
     state: tauri::State<'_, TeamNetState>,
 ) -> Result<TeamStatusDto, String> {
-    let Some(identity) = settings::read_settings()?.team else {
+    let Some(identity) = team::credentials::read_runtime_identity()? else {
         return Ok(TeamStatusDto {
             in_team: false,
             kicked_from: None,
@@ -5099,7 +5138,7 @@ async fn team_status(
     Ok(TeamStatusDto {
         in_team: true,
         kicked_from: None,
-        identity: Some(identity),
+        identity: Some((&identity).into()),
         roster,
     })
 }
@@ -5111,16 +5150,17 @@ async fn team_create(
     state: tauri::State<'_, TeamNetState>,
     team_name: String,
     my_name: String,
-) -> Result<TeamStatusDto, String> {
+) -> Result<TeamCreateDto, String> {
     let team_name = team_name.trim().to_string();
     let my_name = my_name.trim().to_string();
     if team_name.is_empty() || my_name.is_empty() {
         return Err("团队名和你的姓名都不能为空".into());
     }
-    let mut settings = settings::read_settings()?;
+    let settings = settings::read_settings()?;
     if settings.team.is_some() {
         return Err("已在团队中,请先退出当前团队".into());
     }
+    let pairing_code = team::gen_pairing_code();
     let identity = team::TeamIdentity {
         team_id: uuid::Uuid::new_v4().to_string(),
         team_name: team_name.clone(),
@@ -5128,7 +5168,7 @@ async fn team_create(
         member_id: uuid::Uuid::new_v4().to_string(),
         my_name: my_name.clone(),
         role: "leader".into(),
-        pairing_code: Some(team::gen_pairing_code()),
+        pairing_code: Some(pairing_code.clone()),
     };
     let roster = team::Roster {
         team_id: identity.team_id.clone(),
@@ -5144,16 +5184,26 @@ async fn team_create(
         updated_at: chrono::Local::now().to_rfc3339(),
     };
     let signed = team::SignedRoster::sign(&roster, &identity.team_secret)?;
-    team::store::save_signed_roster(pool.inner(), &signed).await?;
-    settings.team = Some(identity.clone());
-    settings::write_settings(&settings)?;
-    team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
-    team_net_restart(pool.inner(), state.inner()).await?;
-    Ok(TeamStatusDto {
-        in_team: true,
-        kicked_from: None,
-        identity: Some(identity),
-        roster: Some(roster),
+    commit_team_setup(
+        || team::credentials::persist_identity(&identity).map(|_| ()),
+        || team::store::save_signed_roster(pool.inner(), &signed),
+        || async {
+            team::store::rebuild_own_snapshot(pool.inner(), &identity)
+                .await
+                .map(|_| ())
+        },
+        || team_net_restart(pool.inner(), state.inner()),
+        || team_rollback_setup(pool.inner(), state.inner(), &identity.team_id),
+    )
+    .await?;
+    Ok(TeamCreateDto {
+        status: TeamStatusDto {
+            in_team: true,
+            kicked_from: None,
+            identity: Some((&identity).into()),
+            roster: Some(roster),
+        },
+        pairing_code,
     })
 }
 
@@ -5178,8 +5228,13 @@ async fn team_join(
     if settings::read_settings()?.team.is_some() {
         return Err("已在团队中,请先退出当前团队".into());
     }
-    team::net::join_team(pool.inner(), &team_id, &code, &my_name).await?;
-    team_net_restart(pool.inner(), state.inner()).await?;
+    let identity = team::net::join_team(pool.inner(), &team_id, &code, &my_name).await?;
+    if let Err(error) = team_net_restart(pool.inner(), state.inner()).await {
+        return match team_rollback_setup(pool.inner(), state.inner(), &identity.team_id).await {
+            Ok(()) => Err(error),
+            Err(error) => Err(error),
+        };
+    }
     // 入队后立即拉一轮(拿到全队现状);失败不拦断,周期同步会补
     let _ = team::net::sync_round(pool.inner()).await;
     team_status(pool, state).await
@@ -5194,7 +5249,7 @@ async fn team_leave(
     pool: tauri::State<'_, SqlitePool>,
     state: tauri::State<'_, TeamNetState>,
 ) -> Result<(), String> {
-    if let Some(identity) = settings::read_settings()?.team {
+    if let Some(identity) = team::credentials::read_runtime_identity()? {
         if identity.is_leader() {
             let ok = team::net::mutate_roster(pool.inner(), &identity, |r| {
                 r.members.clear();
@@ -5216,7 +5271,7 @@ async fn team_kick(
     pool: tauri::State<'_, SqlitePool>,
     member_id: String,
 ) -> Result<team::Roster, String> {
-    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    let identity = team::credentials::read_runtime_identity()?.ok_or("未加入团队")?;
     if member_id == identity.member_id {
         return Err("不能移出自己(要散伙请用「退出团队」)".into());
     }
@@ -5240,7 +5295,7 @@ async fn team_set_permissions(
     view: Option<Vec<String>>,
     edit: Vec<String>,
 ) -> Result<team::Roster, String> {
-    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    let identity = team::credentials::read_runtime_identity()?.ok_or("未加入团队")?;
     let signed = team::net::mutate_roster(pool.inner(), &identity, |r| {
         if let Some(m) = r.members.iter_mut().find(|m| m.member_id == member_id) {
             m.view = view;
@@ -5258,16 +5313,12 @@ async fn team_set_permissions(
 /// 团队长刷新配对码(旧码立即作废)。
 #[tauri::command]
 fn team_refresh_code() -> Result<String, String> {
-    let mut settings = settings::read_settings()?;
-    let Some(identity) = settings.team.as_mut() else {
-        return Err("未加入团队".into());
-    };
+    let identity = team::credentials::read_runtime_identity()?.ok_or("未加入团队")?;
     if !identity.is_leader() {
         return Err("仅团队长有配对码".into());
     }
     let code = team::gen_pairing_code();
-    identity.pairing_code = Some(code.clone());
-    settings::write_settings(&settings)?;
+    team::credentials::replace_pairing_code(&identity.team_id, &code)?;
     Ok(code)
 }
 
@@ -5305,7 +5356,7 @@ struct TeamViewDto {
 /// 团队看板数据:按 roster 顺序(团队长在前),**按我的可见权限过滤后**返回。
 #[tauri::command]
 async fn team_view(pool: tauri::State<'_, SqlitePool>) -> Result<TeamViewDto, String> {
-    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    let identity = team::credentials::read_runtime_identity()?.ok_or("未加入团队")?;
     // 自己的快照现重建,保证看板里"我"永远是最新的
     team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
     let roster = match team::store::load_signed_roster(pool.inner()).await? {
@@ -5364,7 +5415,7 @@ async fn team_submit_edit(
     field: String,
     value: String,
 ) -> Result<(), String> {
-    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    let identity = team::credentials::read_runtime_identity()?.ok_or("未加入团队")?;
     if !team::EDITABLE_FIELDS.contains(&field.as_str()) {
         return Err("只允许改案件登记层字段(状态/备注)".into());
     }
@@ -5422,7 +5473,7 @@ async fn team_revert_edit(
     pool: tauri::State<'_, SqlitePool>,
     edit_id: String,
 ) -> Result<(), String> {
-    let identity = settings::read_settings()?.team.ok_or("未加入团队")?;
+    let identity = team::credentials::read_runtime_identity()?.ok_or("未加入团队")?;
     team::store::revert_edit(pool.inner(), &identity, &edit_id).await?;
     // 撤销后重建快照 + 传播
     team::store::rebuild_own_snapshot(pool.inner(), &identity).await?;
@@ -5613,19 +5664,21 @@ async fn build_local_kb_semantic_index(
     let settings = settings::read_settings().unwrap_or_default();
     let kb = local_kb::cache::LocalKb::auto_detect(&settings)
         .ok_or_else(|| "本地知识库未启用,无法建索引".to_string())?;
-    let key = settings
-        .embedding_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let key = credentials::resolve_static(credentials::StaticCredential::Embedding)
+        .map_err(|error| error.code().to_string())?
         .ok_or_else(|| {
             "未配置 embedding API key,请到设置里填写(硅基流动 bge-m3 免费)".to_string()
         })?;
     let endpoint = settings.embedding_endpoint.as_deref().unwrap_or("");
     let model = settings.embedding_model.as_deref().unwrap_or("");
-    let index =
-        local_kb::semantic::build_or_update_index(&kb.root, endpoint, model, key, Some(&app))
-            .await?;
+    let index = local_kb::semantic::build_or_update_index(
+        &kb.root,
+        endpoint,
+        model,
+        key.expose(),
+        Some(&app),
+    )
+    .await?;
     Ok(index.stats())
 }
 
@@ -5644,18 +5697,16 @@ pub(crate) fn spawn_kb_auto_index(app: tauri::AppHandle) {
         if settings.kb_semantic_auto_index == Some(false) {
             return;
         }
-        let key = settings
-            .embedding_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let key = credentials::resolve_static(credentials::StaticCredential::Embedding)
+            .ok()
+            .flatten();
         let Some(key) = key else { return }; // 没配 embedding 不自动索引
         let Some(kb) = local_kb::cache::LocalKb::auto_detect(&settings) else {
             return;
         };
         let endpoint = settings.embedding_endpoint.as_deref().unwrap_or("");
         let model = settings.embedding_model.as_deref().unwrap_or("");
-        local_kb::semantic::auto_update_index(&kb.root, endpoint, model, key, app).await;
+        local_kb::semantic::auto_update_index(&kb.root, endpoint, model, key.expose(), app).await;
     });
 }
 
@@ -5664,11 +5715,8 @@ pub(crate) fn spawn_kb_auto_index(app: tauri::AppHandle) {
 #[tauri::command]
 async fn embedding_speed_test(n: u32) -> Result<serde_json::Value, String> {
     let settings = settings::read_settings().unwrap_or_default();
-    let key = settings
-        .embedding_api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let key = credentials::resolve_static(credentials::StaticCredential::Embedding)
+        .map_err(|error| error.code().to_string())?
         .ok_or_else(|| {
             "未配置 embedding API key,请到设置里填写(硅基流动 bge-m3 免费)".to_string()
         })?;
@@ -5679,7 +5727,7 @@ async fn embedding_speed_test(n: u32) -> Result<serde_json::Value, String> {
         .map(|i| format!("法律检索速度测试探针第{i}条:合同解除的法定情形与违约责任。"))
         .collect();
     let t0 = std::time::Instant::now();
-    let v = embedding::embed(endpoint, model, key, &probes).await?;
+    let v = embedding::embed(endpoint, model, key.expose(), &probes).await?;
     let ms = t0.elapsed().as_millis() as u64;
     let dim = v.first().map(|e| e.len()).unwrap_or(0);
     Ok(serde_json::json!({
@@ -5714,12 +5762,11 @@ async fn get_yuandian_credits_overview(
 
 /// 验证 embedding 配置:embed 一个探针词,成功返回向量维度。给设置页「验证」按钮。
 #[tauri::command]
-async fn verify_embedding_key(
-    endpoint: String,
-    model: String,
-    api_key: String,
-) -> Result<usize, String> {
-    embedding::verify(&endpoint, &model, &api_key).await
+async fn verify_embedding_key(endpoint: String, model: String) -> Result<usize, String> {
+    let secret = credentials::resolve_static(credentials::StaticCredential::Embedding)
+        .map_err(|error| error.code().to_string())?
+        .ok_or_else(|| "EMBEDDING_CREDENTIAL_NOT_CONFIGURED".to_string())?;
+    embedding::verify(&endpoint, &model, secret.expose()).await
 }
 
 // ============================================================================
@@ -5859,10 +5906,18 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             lpr::get_lpr_snapshot,
             lpr::refresh_lpr_data,
+            db::material_queue::list_material_source_decisions,
+            db::material_queue::get_material_processing_batch,
+            db::material_queue::list_material_processing_batches,
+            db::material_queue::pause_material_processing_batch,
+            db::material_queue::cancel_material_processing_batch,
+            ingest::material_control::preview_material_import,
+            ingest::material_control::preview_material_refresh,
+            ingest::material_control::commit_material_preflight,
+            ingest::material_control::start_material_batch_execution,
+            ingest::material_control::resume_material_batch_execution,
+            ingest::material_control::ignore_failed_material_items,
             scan_case_folder,
-            import_case_folder,
-            plan_import_folder,
-            commit_import_folder,
             list_cases,
             get_case_with_docs,
             delete_case,
@@ -6021,7 +6076,6 @@ pub fn run() {
             export_report_html,
             export_report_docx,
             recompute_case_extraction,
-            refresh_case_files,
             preview_court_sms,
             ingest_court_sms,
             query_express,
@@ -6041,6 +6095,9 @@ pub fn run() {
             verify_minimax_key,
             verify_openai_compat_key,
             verify_yuandian_key,
+            list_credential_statuses,
+            set_credential,
+            delete_credential,
             check_for_update,
             app_version,
             seed_demo_case_if_empty,
@@ -6076,6 +6133,8 @@ pub fn run() {
             clear_chat_history,
             // MCP 数据源接入(粘贴识别 + 连接测试)
             parse_mcp_paste,
+            update_mcp_server_metadata,
+            delete_mcp_server,
             test_mcp_server,
             // 团队版 Phase 1(LAN 接力同步)
             team_status,
@@ -6093,6 +6152,8 @@ pub fn run() {
             // V0.2 D7 · 本地知识库 + 元典积分
             detect_kb_status,
             create_local_kb,
+            local_kb::relocation::switch_existing_local_kb,
+            local_kb::relocation::migrate_current_local_kb,
             import_kb_from_zip,
             export_kb_to_zip,
             export_case_bundle,
@@ -6104,6 +6165,8 @@ pub fn run() {
             embedding_speed_test,
             get_yuandian_monthly_stats,
             get_yuandian_credits_overview,
+            db::usage_dashboard::get_local_recognition_usage,
+            db::usage_dashboard::refresh_yuandian_local_usage,
             verify_embedding_key,
             // 私人专属功能(双轨发布模型;开源仓为桩命令)
             private::telemetry_get,

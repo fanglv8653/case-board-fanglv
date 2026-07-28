@@ -8,17 +8,17 @@
 //!
 //! 前端订阅 `extraction_progress` 事件即可看到实时进度。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Semaphore;
 
 use crate::db::documents::Document;
-use crate::ingest::extractor::{extract_cached_text, extract_one, ExtractResult};
+use crate::ingest::extractor::{extract_one, ExtractResult, ExtractionExecutionGuard};
 use crate::ingest::ocr::OcrContext;
 use crate::llm;
 use crate::settings;
@@ -32,6 +32,13 @@ const ROUND_CONCURRENCY: [usize; 3] = [8, 4, 1];
 
 /// 每轮之间的缓冲 sleep(秒),给服务端限流计数器恢复
 const INTER_ROUND_SLEEP_SEC: u64 = 3;
+
+/// 全应用唯一材料供应商调用闸门。批次可以并发创建/排队，但 OCR/LLM 执行器只能有一个。
+static MATERIAL_EXECUTION_GATE: OnceLock<Semaphore> = OnceLock::new();
+
+fn material_execution_gate() -> &'static Semaphore {
+    MATERIAL_EXECUTION_GATE.get_or_init(|| Semaphore::new(1))
+}
 
 /// MinerU "提交任务"接口最小间隔(毫秒)
 ///
@@ -190,36 +197,274 @@ pub fn spawn_extraction(
     pool: SqlitePool,
     case_id: String,
     documents: Vec<Document>,
-    run_analysis: bool,
+    _run_analysis: bool,
 ) {
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = run_extraction(&app, &pool, &case_id, &documents, run_analysis).await {
-            crate::dlog!("[pipeline] case {} 抽取 fatal error: {}", case_id, e);
+        if let Err(e) = enqueue_decided_documents_and_run(&app, &pool, &case_id, &documents).await {
+            crate::dlog!("[material_queue] case {} 入队/执行失败: {}", case_id, e);
         }
     });
 }
 
-/// 批量后台抽取:**多个案件按顺序排队**跑(case A 全抽完 → 再 case B),而不是每案各起一个并发 pipeline。
-///
-/// 2026-06-16(反馈 ea761d3d 大量 OCR 429):旧的多案件导入对每个案件各调一次 `spawn_extraction`,
-/// 每个内部又 `buffer_unordered(8)` → 导入 N 案 = N 个 pipeline 并发 × 各 8 文档 = 最多 **N×8 并发 OCR**,
-/// 直接打爆 MinerU 免费限流(50 files/min、300 requests/min)。
-/// 这里改成**单个后台任务里逐案 `await run_extraction`**:同一时刻只有一个案件在抽(案内仍 ≤8 并发,
-/// 约 32 文档/min,在 MinerU 50/min 之下)。配合「导入上限 3 案」+ 建议用额度更高的 PaddleOCR,基本规避限流。
-/// 每个案件的进度仍走各自 `extraction_progress`(case_id 标记),前端按案件订阅不受影响。
-pub fn spawn_extraction_batch(
-    app: AppHandle,
-    pool: SqlitePool,
-    jobs: Vec<(String, Vec<Document>)>,
-    run_analysis: bool,
-) {
+async fn enqueue_decided_documents_and_run(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    case_id: &str,
+    documents: &[Document],
+) -> Result<Option<String>, String> {
+    let decisions = crate::db::material_queue::list_decisions(pool, case_id).await?;
+    let recognized = decisions
+        .into_iter()
+        .filter(|decision| decision.disposition == "recognize")
+        .map(|decision| decision.source_path)
+        .collect::<std::collections::HashSet<_>>();
+    let items = documents
+        .iter()
+        .filter(|doc| {
+            doc.extraction_status == "pending"
+                && doc.deleted_at.is_none()
+                && recognized.contains(&doc.source_path)
+        })
+        .map(|doc| crate::db::material_queue::MaterialQueueItemInput {
+            source_path: doc.source_path.clone(),
+            document_id: Some(doc.id.clone()),
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let detail = crate::db::material_queue::create_batch(pool, case_id, &items).await?;
+    crate::db::material_queue::start_batch(pool, &detail.batch.id).await?;
+    run_material_processing_batch(app, pool, &detail.batch.id).await?;
+    Ok(Some(detail.batch.id))
+}
+
+/// 启动已经由用户确认并创建的持久批次。领取令牌始终只存在 Rust 内部。
+pub fn spawn_material_processing_batch(app: AppHandle, pool: SqlitePool, batch_id: String) {
     tauri::async_runtime::spawn(async move {
-        for (case_id, documents) in jobs {
-            if let Err(e) = run_extraction(&app, &pool, &case_id, &documents, run_analysis).await {
-                crate::dlog!("[pipeline] case {} 批量抽取 fatal error: {}", case_id, e);
-            }
+        if let Err(error) = run_material_processing_batch(&app, &pool, &batch_id).await {
+            crate::dlog!("[material_queue] batch {} 执行失败: {}", batch_id, error);
         }
     });
+}
+
+async fn run_material_processing_batch(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    batch_id: &str,
+) -> Result<(), String> {
+    let _execution_permit = material_execution_gate()
+        .acquire()
+        .await
+        .map_err(|_| "材料执行闸门已关闭".to_string())?;
+    // 等待全局闸门期间，用户可能已暂停/取消该批次；获闸后必须重新确认。
+    let initial = crate::db::material_queue::get_batch_detail(pool, batch_id).await?;
+    if initial.batch.status != "running" {
+        return Ok(());
+    }
+    let case_id = initial.batch.case_id.clone();
+    let total = initial.items.len();
+    let user_settings = settings::read_settings().unwrap_or_default();
+    let llm_config = llm::LlmConfig::from_settings(&user_settings);
+    let cloud_ocr = user_settings.effective_ocr_provider() == "cloud";
+    let ocr_ctx = OcrContext {
+        cloud_enabled: cloud_ocr,
+        mineru_token: cloud_ocr
+            .then(|| {
+                crate::credentials::resolve_static_string(
+                    crate::credentials::StaticCredential::Mineru,
+                )
+                .ok()
+                .flatten()
+            })
+            .flatten(),
+        paddle_vl_token: cloud_ocr
+            .then(|| {
+                crate::credentials::resolve_static_string(
+                    crate::credentials::StaticCredential::PaddleVl,
+                )
+                .ok()
+                .flatten()
+            })
+            .flatten(),
+        cloud_primary: user_settings.effective_ocr_cloud_primary().to_string(),
+        force_backend: None,
+        poll_tx: None,
+    };
+    let ocr_provider = user_settings.effective_ocr_provider().to_string();
+    let llm_provider = user_settings.effective_llm_provider().to_string();
+    let _ = app.emit(
+        "extraction_progress",
+        ProgressEvent::Started {
+            case_id: case_id.clone(),
+            total,
+            ocr_provider: ocr_provider.clone(),
+            llm_provider: llm_provider.clone(),
+            llm_model: llm_config.model.clone(),
+        },
+    );
+    if user_settings.needs_local_server() {
+        crate::lifecycle::ensure_local_ready(user_settings.local_model_dir.as_deref())
+            .await
+            .map_err(|error| format!("本机模型未就绪: {error}"))?;
+    }
+
+    let throttle = SubmitThrottle::new();
+    let mut completed_count = 0usize;
+    loop {
+        let Some(item) = crate::db::material_queue::claim_next(pool, batch_id).await? else {
+            break;
+        };
+        let Some(claim_token) = item.claim_token.clone() else {
+            return Err("队列条目领取后缺少内部令牌".to_string());
+        };
+        let Some(document_id) = item.document_id.as_deref() else {
+            crate::db::material_queue::fail_item(
+                pool,
+                item.id.clone(),
+                claim_token,
+                Some("missing_document".to_string()),
+                Some("识别条目未关联文档索引".to_string()),
+            )
+            .await?;
+            continue;
+        };
+        let Some(doc) = crate::db::documents::get_document_by_id(pool, document_id)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            crate::db::material_queue::fail_item(
+                pool,
+                item.id.clone(),
+                claim_token,
+                Some("missing_document".to_string()),
+                Some("文档索引不存在或已删除".to_string()),
+            )
+            .await?;
+            continue;
+        };
+        if settle_without_network_if_document_terminal(
+            pool,
+            &item.id,
+            &claim_token,
+            &doc.extraction_status,
+        )
+        .await?
+        {
+            completed_count += 1;
+            let outcome = DocOutcome::Skipped {
+                reason: format!("文档状态已为 {}，零网络结算队列条目", doc.extraction_status),
+            };
+            let _ = app.emit(
+                "extraction_progress",
+                ProgressEvent::DocFinished {
+                    case_id: case_id.clone(),
+                    doc_id: doc.id,
+                    filename: doc.filename,
+                    index: item.ordinal as usize,
+                    total,
+                    completed_count,
+                    outcome,
+                },
+            );
+            continue;
+        }
+        let guard =
+            ExtractionExecutionGuard::new(pool.clone(), item.id.clone(), claim_token.clone());
+        let mut outcome = DocOutcome::Failed {
+            error: "识别未开始".to_string(),
+        };
+        for round_num in 1..=ROUND_CONCURRENCY.len() {
+            if !crate::db::material_queue::execution_allowed(pool, &item.id, &claim_token).await? {
+                break;
+            }
+            outcome = process_one_doc(
+                app,
+                pool,
+                &case_id,
+                &llm_config,
+                &ocr_ctx,
+                &ocr_provider,
+                &llm_provider,
+                item.ordinal as usize,
+                total,
+                doc.clone(),
+                round_num,
+                round_num == ROUND_CONCURRENCY.len(),
+                &throttle,
+                Some(&guard),
+            )
+            .await;
+            if !matches!(outcome, DocOutcome::Failed { .. }) {
+                break;
+            }
+            if round_num < ROUND_CONCURRENCY.len() {
+                tokio::time::sleep(Duration::from_secs(INTER_ROUND_SLEEP_SEC)).await;
+            }
+        }
+
+        if !crate::db::material_queue::execution_allowed(pool, &item.id, &claim_token).await? {
+            continue;
+        }
+        match &outcome {
+            DocOutcome::Extracted | DocOutcome::Skipped { .. } => {
+                crate::db::material_queue::finish_item(pool, &item.id, &claim_token).await?;
+            }
+            DocOutcome::Failed { error } => {
+                let category = classify_queue_error(error);
+                crate::db::material_queue::fail_item(
+                    pool,
+                    item.id.clone(),
+                    claim_token.clone(),
+                    Some(category.to_string()),
+                    Some(error.clone()),
+                )
+                .await?;
+            }
+        }
+        completed_count += 1;
+        let _ = app.emit(
+            "extraction_progress",
+            ProgressEvent::DocFinished {
+                case_id: case_id.clone(),
+                doc_id: doc.id,
+                filename: doc.filename,
+                index: item.ordinal as usize,
+                total,
+                completed_count,
+                outcome,
+            },
+        );
+    }
+    Ok(())
+}
+
+async fn settle_without_network_if_document_terminal(
+    pool: &SqlitePool,
+    item_id: &str,
+    claim_token: &str,
+    extraction_status: &str,
+) -> Result<bool, String> {
+    if !matches!(extraction_status, "done" | "skipped") {
+        return Ok(false);
+    }
+    crate::db::material_queue::finish_item(pool, item_id, claim_token).await?;
+    Ok(true)
+}
+
+fn classify_queue_error(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    if lower.contains("429") || lower.contains("限额") || lower.contains("quota") {
+        "rate_limit"
+    } else if lower.contains("timeout") || lower.contains("超时") {
+        "timeout"
+    } else if lower.contains("ocr") {
+        "ocr"
+    } else if lower.contains("llm") || lower.contains("json") {
+        "llm"
+    } else {
+        "processing"
+    }
 }
 
 /// 强制重抽单个文档的共享入口:重置 `extraction_status='pending'` + 清 `last_error`
@@ -251,6 +496,16 @@ pub async fn trigger_reextract(
         .ok_or_else(|| "文档不存在或已删除".to_string())?;
     let case_id = doc.case_id.clone();
     let filename = doc.filename.clone();
+    crate::db::material_queue::save_decisions(
+        pool,
+        &case_id,
+        &[crate::db::material_queue::MaterialDecisionInput {
+            source_path: doc.source_path.clone(),
+            disposition: "recognize".to_string(),
+            document_id: Some(doc.id.clone()),
+        }],
+    )
+    .await?;
     // run_analysis=false:重识别单文档不自动跑全案分析(省钱),用户识别完一批后手动点「重新分析」。
     spawn_extraction(app, pool.clone(), case_id, vec![doc], false);
     Ok(filename)
@@ -263,109 +518,21 @@ pub struct CachedRetryReport {
     pub error: Option<String>,
 }
 
-/// Cache-first retry entry point. A readable cached extraction never invokes OCR; only a
-/// missing/unreadable cache falls back to the normal re-extraction pipeline.
+/// 兼容旧的缓存重试入口，但实际执行统一进入持久队列。
+///
+/// 缓存文本的 LLM 重试此前绕过 claim/token，无法可靠暂停或取消。为保证所有外部调用
+/// 都受执行令牌控制，此入口不再直接调用 LLM；由队列工作器按统一策略处理。
 pub async fn trigger_reextract_cached(
     app: AppHandle,
     pool: &SqlitePool,
     doc_id: &str,
 ) -> Result<CachedRetryReport, String> {
-    let doc = crate::db::documents::get_document_by_id(pool, doc_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "文档不存在或已删除".to_string())?;
-    let cached = doc
-        .extracted_text_path
-        .as_deref()
-        .and_then(|path| std::fs::read_to_string(path).ok());
-    let Some(text) = cached else {
-        trigger_reextract(app, pool, doc_id, None).await?;
-        return Ok(CachedRetryReport {
-            used_cached_text: false,
-            status: "pending".into(),
-            error: None,
-        });
-    };
-    let user_settings = settings::read_settings().map_err(|e| e.to_string())?;
-    let config = llm::LlmConfig::from_settings(&user_settings);
-    match extract_cached_text(
-        &config,
-        text.clone(),
-        &doc.filename,
-        doc.category.as_deref(),
-    )
-    .await
-    {
-        ExtractResult::Extracted {
-            fields,
-            partial_error,
-            ..
-        } => {
-            let json = serde_json::to_string(&fields).map_err(|e| e.to_string())?;
-            let status = if partial_error.is_some() {
-                "partial"
-            } else {
-                "done"
-            };
-            sqlx::query("UPDATE documents SET extracted_fields = ?, extraction_status = ?, last_error = ? WHERE id = ?")
-                .bind(json).bind(status).bind(&partial_error).bind(doc_id).execute(pool).await.map_err(|e| e.to_string())?;
-            if matches!(
-                crate::ingest::reliability::classify_domain(fields.case_type.as_deref(), &text),
-                crate::ingest::reliability::Domain::Criminal
-            ) {
-                if let Err(e) =
-                    crate::db::criminal_extraction_candidates::persist_extraction_candidate(
-                        pool,
-                        &doc.case_id,
-                        &doc.id,
-                        &doc.filename,
-                        &config.model,
-                        &text,
-                        &fields,
-                        partial_error.as_deref(),
-                    )
-                    .await
-                {
-                    let _ = crate::db::criminal_extraction_candidates::persist_failed_candidate(
-                        pool,
-                        &doc.case_id,
-                        &doc.id,
-                        &doc.filename,
-                        &config.model,
-                        &text,
-                        &e,
-                    )
-                    .await;
-                    return Ok(CachedRetryReport {
-                        used_cached_text: true,
-                        status: "partial".into(),
-                        error: Some(format!("刑事识别候选保存失败: {e}")),
-                    });
-                }
-            }
-            Ok(CachedRetryReport {
-                used_cached_text: true,
-                status: status.into(),
-                error: partial_error,
-            })
-        }
-        ExtractResult::Failed { error, .. } => {
-            sqlx::query(
-                "UPDATE documents SET extraction_status = 'failed', last_error = ? WHERE id = ?",
-            )
-            .bind(&error)
-            .bind(doc_id)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-            Ok(CachedRetryReport {
-                used_cached_text: true,
-                status: "failed".into(),
-                error: Some(error),
-            })
-        }
-        _ => Err("缓存重试得到非字段抽取结果".into()),
-    }
+    trigger_reextract(app, pool, doc_id, None).await?;
+    Ok(CachedRetryReport {
+        used_cached_text: false,
+        status: "pending".into(),
+        error: None,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -440,6 +607,15 @@ pub async fn reextract_criminal_case_materials(
     }
     let scheduled_ocr_count = missing.len();
     if !missing.is_empty() {
+        let decisions = missing
+            .iter()
+            .map(|doc| crate::db::material_queue::MaterialDecisionInput {
+                source_path: doc.source_path.clone(),
+                disposition: "recognize".to_string(),
+                document_id: Some(doc.id.clone()),
+            })
+            .collect::<Vec<_>>();
+        crate::db::material_queue::save_decisions(pool, case_id, &decisions).await?;
         spawn_extraction(app, pool.clone(), case_id.to_string(), missing, false);
     }
     Ok(CriminalCaseReextractReport {
@@ -448,271 +624,6 @@ pub async fn reextract_criminal_case_materials(
         failed_count: errors.len(),
         errors,
     })
-}
-
-async fn run_extraction(
-    app: &AppHandle,
-    pool: &SqlitePool,
-    case_id: &str,
-    documents: &[Document],
-    run_analysis: bool,
-) -> Result<(), String> {
-    // 2026-05-23 晚十:重扫不重抽 — 只处理 pending 状态的文档(done / skipped / failed 跳过)
-    // 如果用户想强制重抽某文档,可以手工 UPDATE extraction_status='pending'(V0.X 加按钮)
-    // 2026-05-24 g · 并发改造:收成 owned Vec<Document>,这样 buffer_unordered 的 closure 可以 move
-    let pending: Vec<Document> = documents
-        .iter()
-        .filter(|d| d.extraction_status == "pending" && d.deleted_at.is_none())
-        .cloned()
-        .collect();
-
-    let total = pending.len();
-    let total_scanned = documents.len();
-    crate::dlog!(
-        "[pipeline] case={} 扫到 {} 份,本次需抽 {} 份(其余已 done / skipped / failed)",
-        case_id,
-        total_scanned,
-        total
-    );
-
-    let start = std::time::Instant::now();
-
-    // 2026-05-23 晚六:OCR 和 LLM 独立维度 — 先读 settings 再 emit Started(便于前端显示后端)
-    let user_settings = settings::read_settings().unwrap_or_default();
-    let llm_config = llm::LlmConfig::from_settings(&user_settings);
-    let cloud_ocr = user_settings.effective_ocr_provider() == "cloud";
-    let ocr_ctx = OcrContext {
-        cloud_enabled: cloud_ocr,
-        // 云端模式带两家 token(2026-06-12 主/备动态切换,见 ocr.rs)。本地模式 None。
-        mineru_token: cloud_ocr
-            .then(|| user_settings.mineru_api_key.clone())
-            .flatten(),
-        paddle_vl_token: cloud_ocr
-            .then(|| user_settings.paddle_vl_api_key.clone())
-            .flatten(),
-        cloud_primary: user_settings.effective_ocr_cloud_primary().to_string(),
-        // 默认无强制后端;去水印重识别时由 process_one_doc 从 doc.ocr_backend_override 逐文档注入。
-        force_backend: None,
-        // 轮询进度通道由 process_one_doc 逐文档注入(带 doc 上下文);批级模板这里留空。
-        poll_tx: None,
-    };
-    let ocr_provider = user_settings.effective_ocr_provider().to_string();
-    let llm_provider = user_settings.effective_llm_provider().to_string();
-
-    let _ = app.emit(
-        "extraction_progress",
-        ProgressEvent::Started {
-            case_id: case_id.to_string(),
-            total,
-            ocr_provider: ocr_provider.clone(),
-            llm_provider: llm_provider.clone(),
-            llm_model: llm_config.model.clone(),
-        },
-    );
-
-    crate::dlog!(
-        "[pipeline] OCR={}, LLM={} (endpoint={}, key={})",
-        user_settings.effective_ocr_provider(),
-        user_settings.effective_llm_provider(),
-        llm_config.endpoint,
-        if llm_config.api_key.is_some() {
-            "set"
-        } else {
-            "—"
-        },
-    );
-
-    // 2026-05-23 晚六:如果任一 provider 是本机,后台自动起 llama-server
-    if user_settings.needs_local_server() {
-        if let Err(e) =
-            crate::lifecycle::ensure_local_ready(user_settings.local_model_dir.as_deref()).await
-        {
-            crate::dlog!("[pipeline] 本机服务启动失败: {}", e);
-            let _ = app.emit(
-                "extraction_progress",
-                ProgressEvent::Error {
-                    case_id: case_id.to_string(),
-                    error: format!("本机模型未就绪: {}", e),
-                },
-            );
-            return Ok(());
-        }
-    }
-
-    // 2026-05-25 V0.1.8 三轮动态降级(替代原来固定 8 路):
-    //   第 1 轮 buffer_unordered(8) — 全部 pending
-    //   第 2 轮 buffer_unordered(4) — 第 1 轮失败的
-    //   第 3 轮 buffer_unordered(1) — 第 2 轮还失败的;只有第 3 轮失败才标 failed 落 last_error
-    //
-    // 进度计数:每个 doc 在它**最终**完成时(成功 / skipped / 第 3 轮失败)才递增 completed_count
-    // 并 emit DocFinished。中间轮失败静默(避免前端进度回弹)。
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    let completed = Arc::new(AtomicUsize::new(0));
-
-    // 全局节流闸门,跨三轮 + 所有并发 task 共享(避开 MinerU 50 文件/分钟限流)
-    let throttle = Arc::new(SubmitThrottle::new());
-
-    // doc.id → 该 doc 的最终 outcome(每轮覆盖)
-    let mut final_outcomes: HashMap<String, DocOutcome> = HashMap::with_capacity(total);
-    // 待重试队列(每轮过滤失败的)
-    let mut queue: Vec<Document> = pending;
-
-    for (round_idx, &concurrency) in ROUND_CONCURRENCY.iter().enumerate() {
-        if queue.is_empty() {
-            break;
-        }
-        let round_num = round_idx + 1; // 1-indexed,日志友好
-        let is_final = round_num == ROUND_CONCURRENCY.len();
-        crate::dlog!(
-            "[pipeline] case={} 第 {}/{} 轮: {} 路并发跑 {} 份",
-            case_id,
-            round_num,
-            ROUND_CONCURRENCY.len(),
-            concurrency,
-            queue.len(),
-        );
-
-        let round_results: Vec<(Document, DocOutcome)> =
-            stream::iter(queue.into_iter().enumerate())
-                .map(|(index, doc)| {
-                    let app = app.clone();
-                    let pool = pool.clone();
-                    let case_id_owned = case_id.to_string();
-                    let llm_config = llm_config.clone();
-                    let ocr_ctx = ocr_ctx.clone();
-                    let ocr_provider = ocr_provider.clone();
-                    let llm_provider = llm_provider.clone();
-                    let completed = Arc::clone(&completed);
-                    let throttle = Arc::clone(&throttle);
-                    let filename = doc.filename.clone();
-                    let doc_id = doc.id.clone();
-                    async move {
-                        let outcome = process_one_doc(
-                            &app,
-                            &pool,
-                            &case_id_owned,
-                            &llm_config,
-                            &ocr_ctx,
-                            &ocr_provider,
-                            &llm_provider,
-                            index,
-                            total,
-                            doc.clone(),
-                            round_num,
-                            is_final,
-                            &throttle,
-                        )
-                        .await;
-
-                        // 只有最终结果(成功 / skipped / 第 3 轮失败)才递增 completed_count + emit DocFinished
-                        let is_terminal = !matches!(outcome, DocOutcome::Failed { .. }) || is_final;
-                        if is_terminal {
-                            let done_so_far = completed.fetch_add(1, Ordering::SeqCst) + 1;
-                            let _ = app.emit(
-                                "extraction_progress",
-                                ProgressEvent::DocFinished {
-                                    case_id: case_id_owned,
-                                    doc_id,
-                                    filename,
-                                    index,
-                                    total,
-                                    completed_count: done_so_far,
-                                    outcome: outcome.clone(),
-                                },
-                            );
-                        }
-                        (doc, outcome)
-                    }
-                })
-                .buffer_unordered(concurrency)
-                .collect()
-                .await;
-
-        // 收集本轮结果:成功/skipped/最终失败 → 写入 final_outcomes;
-        // 非最终轮的失败 → 进下一轮 queue
-        let mut next_queue: Vec<Document> = Vec::new();
-        for (doc, outcome) in round_results {
-            match &outcome {
-                DocOutcome::Failed { .. } if !is_final => {
-                    next_queue.push(doc);
-                }
-                _ => {
-                    final_outcomes.insert(doc.id.clone(), outcome);
-                }
-            }
-        }
-        queue = next_queue;
-
-        // 还有下一轮 → 给 MinerU 限流计数器缓口气
-        if !queue.is_empty() && !is_final {
-            tokio::time::sleep(Duration::from_secs(INTER_ROUND_SLEEP_SEC)).await;
-        }
-    }
-
-    let mut extracted = 0;
-    let mut skipped = 0;
-    let mut failed = 0;
-    for outcome in final_outcomes.values() {
-        match outcome {
-            DocOutcome::Extracted => extracted += 1,
-            DocOutcome::Skipped { .. } => skipped += 1,
-            DocOutcome::Failed { .. } => failed += 1,
-        }
-    }
-
-    // 2026-05-24 h · 新架构:所有文档 OCR 完成后,**让 LLM 全局抽**(替代旧 aggregator 规则)。
-    // 拼所有 MD → DeepSeek 1M 上下文 → 两次并发 LLM call(填表 + 案件分析报告)
-    // 2026-06-13(胡彬律师反馈):run_analysis=false(单文档重识别)时跳过,不烧 DeepSeek;
-    //   用户识别完一批后手动点「重新分析」一次即可。
-    let (analysis_ok, analysis_error) = if run_analysis {
-        // 2026-06-11:这步耗时几十秒~几分钟,先 emit Analyzing 让前端浮层显示"通读全案分析中"
-        let _ = app.emit(
-            "extraction_progress",
-            ProgressEvent::Analyzing {
-                case_id: case_id.to_string(),
-            },
-        );
-        let report =
-            crate::ingest::global_pipeline::run_global_extract(pool, case_id, &llm_config).await;
-        crate::dlog!(
-            "[global_extract] case={} docs={} table_ok={} report_ok={} elapsed={}ms{}",
-            case_id,
-            report.docs_included,
-            report.table_ok,
-            report.report_ok,
-            report.elapsed_ms,
-            report
-                .error
-                .as_ref()
-                .map(|e| format!(" err={}", e))
-                .unwrap_or_default(),
-        );
-        (report.table_ok, report.error.clone())
-    } else {
-        // 跳过自动分析:不是失败,标 ok(前端 banner 不报警);画像待用户手动「重新分析」更新。
-        crate::dlog!(
-            "[global_extract] case={} 跳过自动分析(单文档重识别,省钱),待用户手动「重新分析」",
-            case_id
-        );
-        (true, None)
-    };
-
-    let _ = app.emit(
-        "extraction_progress",
-        ProgressEvent::Completed {
-            case_id: case_id.to_string(),
-            total,
-            extracted,
-            skipped,
-            failed,
-            elapsed_ms: start.elapsed().as_millis(),
-            analysis_ok,
-            analysis_error,
-        },
-    );
-
-    Ok(())
 }
 
 /// 单个 doc 的完整处理(emit 进度 + 调 extractor + 写 DB)。
@@ -739,6 +650,7 @@ async fn process_one_doc(
     round_num: usize,
     is_final_round: bool,
     throttle: &SubmitThrottle,
+    execution_guard: Option<&crate::ingest::extractor::ExtractionExecutionGuard>,
 ) -> DocOutcome {
     // 文件名加轮次后缀(第 2/3 轮),前端能感知"在重试"
     let display_name = if round_num > 1 {
@@ -824,6 +736,7 @@ async fn process_one_doc(
             Path::new(&doc.source_path),
             &doc.filename,
             doc.category.as_deref(),
+            execution_guard,
         )
         .await
     } else if doc.is_ai_artifact {
@@ -867,6 +780,7 @@ async fn process_one_doc(
             Path::new(&doc.source_path),
             &doc.filename,
             doc.category.as_deref(),
+            execution_guard,
         )
         .await
     };
@@ -1161,7 +1075,11 @@ fn extracts_dir_for_case(case_id: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod criminal_reextract_guard_tests {
-    use super::require_criminal_material_domain;
+    use super::{
+        material_execution_gate, require_criminal_material_domain,
+        settle_without_network_if_document_terminal,
+    };
+    use crate::db::material_queue::{MaterialDecisionInput, MaterialQueueItemInput};
 
     #[test]
     fn manual_criminal_domain_passes_the_backend_gate() {
@@ -1175,5 +1093,69 @@ mod criminal_reextract_guard_tests {
             assert!(error.starts_with("DOMAIN_MISMATCH:"));
             assert!(error.contains(domain));
         }
+    }
+
+    #[tokio::test]
+    async fn application_material_gate_allows_only_one_batch_executor() {
+        let first = material_execution_gate().acquire().await.unwrap();
+        assert!(
+            material_execution_gate().try_acquire().is_err(),
+            "第二个案件批次不能同时进入供应商执行区"
+        );
+        drop(first);
+        assert!(material_execution_gate().try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn terminal_document_claim_settles_without_entering_extraction() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        sqlx::query(
+            "INSERT INTO cases(id,name,case_type,source_folder) \
+             VALUES ('case-terminal','测试','诉讼','C:/terminal')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::db::material_queue::save_decisions(
+            &pool,
+            "case-terminal",
+            &[MaterialDecisionInput {
+                source_path: "done.pdf".into(),
+                disposition: "recognize".into(),
+                document_id: None,
+            }],
+        )
+        .await
+        .unwrap();
+        let batch = crate::db::material_queue::create_batch(
+            &pool,
+            "case-terminal",
+            &[MaterialQueueItemInput {
+                source_path: "done.pdf".into(),
+                document_id: None,
+            }],
+        )
+        .await
+        .unwrap();
+        crate::db::material_queue::start_batch(&pool, &batch.batch.id)
+            .await
+            .unwrap();
+        let item = crate::db::material_queue::claim_next(&pool, &batch.batch.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(settle_without_network_if_document_terminal(
+            &pool,
+            &item.id,
+            item.claim_token.as_deref().unwrap(),
+            "done",
+        )
+        .await
+        .unwrap());
+        let after = crate::db::material_queue::get_batch_detail(&pool, &batch.batch.id)
+            .await
+            .unwrap();
+        assert_eq!(after.items[0].status, "completed");
+        assert_eq!(after.batch.status, "completed");
     }
 }

@@ -980,23 +980,95 @@ export interface CachedExtractionRetryReport {
   error: string | null;
 }
 
-/** 对应 Rust 端 `ImportResult`,import_case_folder 命令的返回 */
-export interface ImportResult {
-  case: Case;
-  docs: ScannedDoc[];
-  is_existing: boolean;
+export type MaterialDisposition = "recognize" | "index_only" | "excluded";
+
+export interface MaterialPreflightItem {
+  sourcePath: string;
+  relativePath: string;
+  filename: string;
+  sizeBytes: number;
+  stage: string | null;
+  category: string | null;
+  isExisting: boolean;
+  defaultDisposition: MaterialDisposition;
 }
 
-/** 多案件检测:一个候选案件。对应 Rust `case_split::CaseCandidate`。 */
-export interface CaseCandidate {
-  dir: string;
-  suggested_name: string;
-  doc_count: number;
-  has_stage_subdirs: boolean;
-  /** 拆分弹窗里默认是否勾选。命中非案件资料词表(证件/宣传/模板…)→ false(默认不选,仍可手动勾上) */
-  default_selected: boolean;
-  /** 目录内文档清单(相对路径,封顶 100),给"展开看文件"用。条数 < doc_count 即被截断。 */
-  files: string[];
+export interface MaterialPreflight {
+  mode: "import" | "refresh";
+  caseId: string | null;
+  rootPath: string;
+  legalDomain: "criminal" | "civil";
+  totalFiles: number;
+  totalSizeBytes: number;
+  largeCriminalBatch: boolean;
+  items: MaterialPreflightItem[];
+}
+
+export interface MaterialDecisionInput {
+  sourcePath: string;
+  disposition: MaterialDisposition;
+  documentId?: string | null;
+}
+
+export interface MaterialProcessingBatch {
+  id: string;
+  caseId: string;
+  status: string;
+  errorCategory: string | null;
+  errorSummary: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+}
+
+export interface MaterialProcessingItem {
+  id: string;
+  batchId: string;
+  caseId: string;
+  sourcePath: string;
+  documentId: string | null;
+  ordinal: number;
+  status: string;
+  claimToken: string | null;
+  claimedAt: string | null;
+  completedAt: string | null;
+  errorCategory: string | null;
+  errorSummary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MaterialProcessingEvent {
+  id: string;
+  batchId: string;
+  itemId: string | null;
+  eventType: string;
+  fromStatus: string | null;
+  toStatus: string | null;
+  actor: string;
+  errorCategory: string | null;
+  errorSummary: string | null;
+  createdAt: string;
+}
+
+export interface MaterialBatchDetail {
+  batch: MaterialProcessingBatch;
+  items: MaterialProcessingItem[];
+  events: MaterialProcessingEvent[];
+}
+
+export interface CommitMaterialPreflightResult {
+  case: Case;
+  documents: Document[];
+  sync: {
+    added: number;
+    updated: number;
+    unchanged: number;
+    deleted: number;
+  };
+  batch: MaterialBatchDetail | null;
+  isExisting: boolean;
 }
 
 /** 文档标记(源文件看板 Phase 3)。对应 Rust `db::document_tags::DocumentTag`。 */
@@ -1029,26 +1101,6 @@ export interface Bookmark {
   page: number;
   label: string | null;
   created_at: string;
-}
-
-/** 被忽略的目录。对应 Rust `case_split::IgnoredDir`。 */
-export interface IgnoredDir {
-  path: string;
-  reason: string;
-  /** 目录内文档清单。空目录为空;"杂项/补充目录"有内容 → 可展开 + 勾回作为案件导入。 */
-  files: string[];
-}
-
-/** 拆分预案。对应 Rust `case_split::ImportPlan`,plan_import_folder 命令的返回。 */
-export interface ImportPlan {
-  root: string;
-  cases: CaseCandidate[];
-  shared_dirs: string[];
-  ignored: IgnoredDir[];
-  /** 是否建议拆分(置信度 medium+);false = 走保底单案导入 */
-  multi: boolean;
-  /** 根文件夹此前是否已作为单个案件导入过(拆分会与旧案重复) */
-  root_already_imported: boolean;
 }
 
 /** 对应 Rust 端 `CaseWithDocs`,get_case_with_docs 命令的返回 */
@@ -1113,7 +1165,17 @@ export interface Citation {
 /* ------------------------------------------------------------------ */
 
 /** 对应 Rust `settings::Settings`。所有字段都可空(用户没填时为 null)。 */
+export interface CredentialStatus {
+  locator: string;
+  configured: boolean;
+  backend: "windows_credential_manager" | string;
+  error_code: string | null;
+}
+
 export interface Settings {
+  /** WebView never receives credential values; it receives status only. */
+  credential_statuses?: CredentialStatus[];
+  credential_migration_version?: number | null;
   /** 用户的显示称呼(例:"刘律师"),首页问候用。 */
   user_display_name: string | null;
   /** 合同审查修订批注版的默认作者；为空时回退到 user_display_name。 */
@@ -1133,10 +1195,8 @@ export interface Settings {
 
   /** [DEPRECATED] 老的全局云端开关,保留向后兼容,以 ocr/llm_provider 优先 */
   cloud_enabled: boolean;
-  mineru_api_key: string | null;
   mineru_endpoint: string | null;
   /** 2026-06-12:PaddleOCR VL-1.6(AI Studio)访问令牌,免费 2 万页/天。 */
-  paddle_vl_api_key: string | null;
   /** PaddleOCR key 验证通过时间(ISO 8601)。非 null = 绿勾。 */
   paddle_vl_verified_at: string | null;
   /** 云端 OCR 主力:"mineru"(默认)/ "paddle-vl"。另一家自动成为备用。 */
@@ -1145,11 +1205,9 @@ export interface Settings {
   ollama_model: string | null;
   cloud_llm_endpoint: string | null;
   cloud_llm_model: string | null;
-  cloud_llm_api_key: string | null;
   /** 云端 LLM 后端:"deepseek"(默认/null)/ "minimax" / "glm" / "mimo" / "custom"。
    *  minimax 读 minimax_*;glm/mimo/custom 读各自独立配置;其余读 cloud_llm_*。 */
   cloud_llm_backend: string | null;
-  minimax_api_key: string | null;
   minimax_endpoint: string | null;
   /** MiniMax 模型名(可编辑文本,默认 MiniMax-M2)。型号以 MiniMax 控制台为准。 */
   minimax_model: string | null;
@@ -1157,30 +1215,22 @@ export interface Settings {
   /** 2026-06-16:旧版通用 OpenAI 兼容字段。保留作升级兜底,新 UI 写入下面的独立字段。 */
   compat_llm_endpoint: string | null;
   compat_llm_model: string | null;
-  compat_llm_api_key: string | null;
   compat_llm_verified_at: string | null;
   /** 2026-06-17:智谱 / MiMo / 自定义模型各自独立保存,切换服务商不互相覆盖。 */
   glm_llm_endpoint: string | null;
   glm_llm_model: string | null;
-  glm_llm_api_key: string | null;
   glm_llm_verified_at: string | null;
   mimo_llm_endpoint: string | null;
   mimo_llm_model: string | null;
-  mimo_llm_api_key: string | null;
   mimo_llm_verified_at: string | null;
   custom_llm_endpoint: string | null;
   custom_llm_model: string | null;
-  custom_llm_api_key: string | null;
   custom_llm_verified_at: string | null;
   /** 2026-05-24 k:元典法律开放平台 API key(执行案件查被执行人 / 财产线索)*/
-  yuandian_api_key: string | null;
   /** 2026-06-01 V0.3:快递100 实时查询 customer + key(快递查询工具用)*/
-  kuaidi100_customer: string | null;
-  kuaidi100_key: string | null;
   /** 2026-06-01 V0.3.3:Embedding 云端模型(案件文档语义检索)。填了 api_key 才启用,否则回退关键词。 */
   embedding_endpoint: string | null;
   embedding_model: string | null;
-  embedding_api_key: string | null;
   embedding_verified_at: string | null;
   /** 本地知识库语义索引「自动维护」开关。null/true=开(默认),false=关。 */
   kb_semantic_auto_index: boolean | null;
@@ -1444,24 +1494,42 @@ export interface LawyerProfile {
   updated_at: string;
 }
 
-/** 外部 MCP server 配置项(对应 Rust chat::mcp_bridge::McpServerConfig)。
- *  transport 是 tagged union,形状必须跟后端 serde 完全一致,否则整次保存会反序列化失败。 */
+/** WebView 可见的去密 MCP 投影；敏感值只存在系统凭据库。 */
 export interface McpServerConfig {
-  /** 人读名,也用作工具命名空间前缀(mcp__<name>__<tool>)。 */
+  server_id: string;
   name: string;
-  transport: McpTransport;
-  /** 是否启用。只连 enabled 的;默认 true。 */
+  transport: McpStoredTransport;
   enabled: boolean;
+  complete: McpSecretReference;
 }
 
-/** MCP 传输方式(对应 Rust McpTransport,#[serde(tag="type", rename_all="lowercase")])。
- *  http = Streamable HTTP(元典/企查查/万得/法宝等云端 MCP,URL+请求头,用户零环境依赖);
- *  stdio = 本地命令子进程。两种均已实现(2026-06-10)。 */
-export type McpTransport =
-  | { type: "stdio"; command: string; args: string[]; env: Record<string, string> }
-  | { type: "http"; url: string; headers?: Record<string, string> };
+export interface McpSecretReference {
+  locator: string;
+  configured: boolean;
+}
 
-/** 智能粘贴识别结果(对应 Rust chat::mcp_paste::ParsedPaste)。 */
+export type McpStoredValue =
+  | { kind: "plain"; value: string }
+  | { kind: "secret"; credential: McpSecretReference };
+
+export type McpStoredArgument =
+  | { kind: "plain"; value: string }
+  | { kind: "secret"; prefix: string; credential: McpSecretReference };
+
+export type McpStoredTransport =
+  | {
+      type: "stdio";
+      command: string;
+      args: McpStoredArgument[];
+      env: Record<string, McpSecretReference>;
+    }
+  | {
+      type: "http";
+      url: McpStoredValue;
+      headers: Record<string, McpSecretReference>;
+    };
+
+/** 导入完成后返回的安全投影。 */
 export interface ParsedMcpPaste {
   servers: McpServerConfig[];
   /** 人读警告(占位符令牌等),原样展示。 */
@@ -1479,15 +1547,87 @@ export interface McpTestReport {
 /* 团队版 Phase 1(LAN 接力同步,对应 Rust team 模块)                  */
 /* ------------------------------------------------------------------ */
 
-/** 本机团队身份(存 settings.json;secret/配对码只在本机)。 */
+/** 可返回给 WebView 的非敏感团队身份。 */
 export interface TeamIdentity {
   team_id: string;
   team_name: string;
-  team_secret: string;
   member_id: string;
   my_name: string;
   role: "leader" | "member" | string;
-  pairing_code?: string | null;
+}
+
+export interface RecognitionUsageQuery {
+  granularity: "day" | "month";
+  from?: string | null;
+  to?: string | null;
+}
+
+export interface RecognitionUsageBucket {
+  bucket: string;
+  stage: string;
+  providerModel: string;
+  taskCount: number;
+  successCount: number;
+  failureCount: number;
+  skippedCount: number;
+  averageElapsedMs: number | null;
+  rateLimit429Count: number;
+  fallbackCount: number | null;
+  pageCount: number | null;
+}
+
+export interface RecognitionUsageOverview {
+  dataSource: string;
+  isVendorReported: boolean;
+  generatedAt: string;
+  granularity: "day" | "month";
+  from: string | null;
+  to: string | null;
+  buckets: RecognitionUsageBucket[];
+  capabilities: {
+    fallbackCountAvailable: boolean;
+    fallbackCountReason: string;
+    pageCountAvailable: boolean;
+    pageCountReason: string;
+    rateLimitSource: string;
+  };
+}
+
+export interface YuandianLocalUsageOverview {
+  dataSource: string;
+  isOfficialBalance: boolean;
+  officialBalance: number | null;
+  estimateBasis: string;
+  current: {
+    year_month: string;
+    credits_used: number;
+    api_calls: number;
+    kb_hits: number;
+    updated_at: string;
+  };
+  previousRecordedMonth: {
+    year_month: string;
+    credits_used: number;
+    api_calls: number;
+    kb_hits: number;
+    updated_at: string;
+  } | null;
+  totalEstimatedCredits: number;
+  totalRecordedApiCalls: number;
+  totalRecordedKbHits: number;
+  hasAnyRecord: boolean;
+  lastRecordedAt: string | null;
+  refreshedAt: string;
+}
+
+export interface LocalKbRelocationBackendResult {
+  operation: string;
+  old_root: string;
+  new_root: string;
+  backup_path: string;
+  backup_available: boolean;
+  copied: boolean;
+  index_rebuild_required: boolean;
 }
 
 /** 成员 + 权限(roster 条目)。view: null=全队可见;edit: 可编辑哪些成员的登记字段。 */
@@ -1513,6 +1653,12 @@ export interface TeamStatus {
   kicked_from: string | null;
   identity: TeamIdentity | null;
   roster: TeamRoster | null;
+}
+
+/** 创建团队的一次性响应；配对码不会出现在后续 teamStatus 中。 */
+export interface TeamCreateResult {
+  status: TeamStatus;
+  pairing_code: string;
 }
 
 /** 团队看板里的单个案件(登记表粒度快照)。 */

@@ -76,6 +76,7 @@ export function TeamModule() {
   const [view, setView] = useState<TeamView | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [showManage, setShowManage] = useState(false);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
   /// 打开的团队案件详情:{成员id, 案件id};null = 看板列表
   const [detail, setDetail] = useState<{ memberId: string; caseId: string } | null>(null);
   /// 排序方式(可扩展:以后有需求直接往 SORT_MODES 加一项)
@@ -127,7 +128,15 @@ export function TeamModule() {
   }
 
   if (!status?.in_team || !view) {
-    return <TeamOnboard onDone={() => void reload()} />;
+    return (
+      <TeamOnboard
+        onDone={(code) => {
+          setPairingCode(code ?? null);
+          setShowManage(Boolean(code));
+          void reload();
+        }}
+      />
+    );
   }
 
   const isLeader = view.my_role === "leader";
@@ -215,6 +224,8 @@ export function TeamModule() {
           <ManagePanel
             status={status}
             edits={view.edits}
+            pairingCode={pairingCode}
+            onPairingCodeChange={setPairingCode}
             onChanged={() => void reload()}
           />
         )}
@@ -254,7 +265,7 @@ export function TeamModule() {
 /* 未入团:介绍 + 创建 / 加入(所有入口都在本页)                        */
 /* ==================================================================== */
 
-function TeamOnboard({ onDone }: { onDone: () => void }) {
+function TeamOnboard({ onDone }: { onDone: (pairingCode?: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [teamName, setTeamName] = useState("");
   const [myName, setMyName] = useState("");
@@ -323,9 +334,9 @@ function TeamOnboard({ onDone }: { onDone: () => void }) {
                 disabled={busy || !teamName.trim() || !myName.trim()}
                 onClick={() =>
                   void run("创建团队", async () => {
-                    await teamCreate(teamName, myName);
-                    toast("团队已创建!点「管理」看配对码,告诉队友即可加入", "success");
-                    onDone();
+                    const result = await teamCreate(teamName, myName);
+                    toast("团队已创建!配对码仅本次显示,请及时告诉队友", "success");
+                    onDone(result.pairing_code);
                   })
                 }
                 className="rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
@@ -451,10 +462,14 @@ function TeamOnboard({ onDone }: { onDone: () => void }) {
 function ManagePanel({
   status,
   edits,
+  pairingCode,
+  onPairingCodeChange,
   onChanged,
 }: {
   status: TeamStatus;
   edits: TeamEdit[];
+  pairingCode: string | null;
+  onPairingCodeChange: (code: string | null) => void;
   onChanged: () => void;
 }) {
   const identity = status.identity!;
@@ -462,7 +477,6 @@ function ManagePanel({
   const isLeader = identity.role === "leader";
   const [busy, setBusy] = useState(false);
   const [permFor, setPermFor] = useState<string | null>(null);
-  const [pairingCode, setPairingCode] = useState(identity.pairing_code ?? null);
 
   async function run(label: string, f: () => Promise<void>) {
     if (busy) return;
@@ -502,7 +516,7 @@ function ManagePanel({
             onClick={() =>
               void run("刷新配对码", async () => {
                 const c = await teamRefreshCode();
-                setPairingCode(c);
+                onPairingCodeChange(c);
                 toast("配对码已更新,旧码作废", "success");
               })
             }
@@ -511,8 +525,8 @@ function ManagePanel({
             <RefreshCw className="size-3.5" />
           </button>
           <span className="w-full text-caption text-sky-800/80">
-            配对码<strong>一次性</strong>:有人加入后自动更换,把新码再给下一位。加入时需要你开着
-            App(加入后日常同步不需要)。
+            配对码<strong>一次性</strong>:有人加入后本码即作废。下一位加入前请点刷新生成新码；
+            页面重载后不会回显。加入时需要你开着 App(加入后日常同步不需要)。
           </span>
         </div>
       )}

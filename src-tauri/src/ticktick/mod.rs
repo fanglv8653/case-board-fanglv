@@ -195,7 +195,7 @@ async fn disconnect(app: &AppHandle) -> Result<Value, String> {
     st.items.clear();
     st.config.project_id = None;
     st.config.project_name = None;
-    state::save(app, &st)?;
+    state::disconnect(app, &st)?;
     Ok(serde_json::json!({ "ok": true }))
 }
 

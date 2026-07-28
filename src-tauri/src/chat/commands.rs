@@ -161,17 +161,27 @@ pub async fn case_chat_impl(
     if settings.effective_llm_provider() == "cloud" {
         let backend = settings.effective_cloud_llm_backend();
         // 2026-06-16:按后端取对应 key 字段(DeepSeek / MiniMax / 通用兼容 三选一)。
-        let (key_value, name): (Option<String>, &str) = if backend == "minimax" {
-            (settings.minimax_api_key.clone(), "MiniMax")
+        let (slot, name) = if backend == "minimax" {
+            (crate::credentials::StaticCredential::Minimax, "MiniMax")
         } else if settings.cloud_llm_is_compat() {
             let label = crate::llm::providers::compat_preset(backend)
                 .map(|p| p.label)
                 .unwrap_or("云端 LLM");
-            (settings.effective_compat_llm_api_key(), label)
+            (
+                match backend {
+                    "glm" => crate::credentials::StaticCredential::Glm,
+                    "mimo" => crate::credentials::StaticCredential::Mimo,
+                    _ => crate::credentials::StaticCredential::Custom,
+                },
+                label,
+            )
         } else {
-            (settings.cloud_llm_api_key.clone(), "DeepSeek")
+            (crate::credentials::StaticCredential::Deepseek, "DeepSeek")
         };
-        let key_missing = key_value.as_deref().map(str::trim).unwrap_or("").is_empty();
+        let key_missing = crate::credentials::resolve_static(slot)
+            .ok()
+            .flatten()
+            .is_none();
         if key_missing {
             return Err(format!("尚未配置 {} API Key,请在设置页填入", name));
         }
@@ -194,7 +204,8 @@ pub async fn case_chat_impl(
     let registry_tools = if settings.mcp_servers.is_empty() {
         registry_tools
     } else {
-        let mcp_tools = crate::chat::mcp_bridge::connect_mcp_servers(&settings.mcp_servers).await;
+        let mcp_tools =
+            crate::chat::mcp_bridge::connect_stored_mcp_servers(&settings.mcp_servers).await;
         registry_tools.with_mcp(mcp_tools)
     };
     let mut active_scene_plan = scene_plan.clone();

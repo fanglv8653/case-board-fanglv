@@ -37,14 +37,16 @@ pub mod criminal_workflows;
 pub mod criminal_workspace;
 pub mod document_tags;
 pub mod documents;
-pub mod income_records;
-pub mod feishu_sync;
 pub mod feishu_entities;
+pub mod feishu_sync;
+pub mod income_records;
 pub mod lawyer_profiles;
+pub mod material_queue;
 pub mod metrics;
 pub mod payments;
 pub mod seed;
 pub mod todos;
+pub mod usage_dashboard;
 
 /// `directories` 用的标识——macOS 上这会拼成 `~/Library/Application Support/FanglvCaseBoard/`
 const APP_QUALIFIER: &str = "";
@@ -220,6 +222,13 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
         .run(&pool)
         .await
         .map_err(|e| DbError::Migrate(e.to_string()))?;
+
+    // A process cannot safely prove that previously-running external work is
+    // still alive. Move it to an explicit user-reviewed recovery state in one
+    // transaction; never auto-resume or consume provider quota on startup.
+    material_queue::recover_interrupted_material_processing(&pool)
+        .await
+        .map_err(|e| DbError::Migrate(format!("恢复材料处理队列失败: {e}")))?;
 
     Ok(pool)
 }

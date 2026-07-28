@@ -261,9 +261,9 @@ function DiagnosticPreview({ diag }: { diag: FeedbackDiagnostic }) {
       {/* Settings 脱敏快照(三态:已验证 ✓ / 未验证 ⚠ / 未填)
           2026-05-26 V0.1.11:老板补强反馈通道——key 状态要一眼能看出,
           避免出现"key 填了但没验证通过却以为没问题"的盲区 */}
-      <KeyRow label="MinerU key" filled={s.mineru_api_key} verified={s.mineru_verified} />
-      <KeyRow label="DeepSeek key" filled={s.deepseek_api_key} verified={s.deepseek_verified} />
-      <KeyRow label="元典 key" filled={s.yuandian_api_key} verified={s.yuandian_verified} />
+                <KeyRow label="MinerU key" filled={s.mineru_credential_state} verified={s.mineru_verified} />
+                <KeyRow label="DeepSeek key" filled={s.deepseek_credential_state} verified={s.deepseek_verified} />
+                <KeyRow label="元典 key" filled={s.yuandian_credential_state} verified={s.yuandian_verified} />
       <div className="my-1 h-px bg-border/50" />
       {/* 系统级 */}
       <Row

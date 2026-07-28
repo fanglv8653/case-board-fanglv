@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import { Loader2, Save, AlertTriangle, Gavel } from "lucide-react";
 
-import { getSettings, saveSettings } from "@/lib/api";
+import { getSettings, saveSettings, setCredential } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 import { toast } from "@/components/ui/toast";
 import { useFeatureFlag } from "@/lib/featureFlags";
@@ -25,7 +25,6 @@ export function CourtFilingTool() {
   const [python, setPython] = useState("");
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
-  const [cookieDir, setCookieDir] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -35,9 +34,6 @@ export function CourtFilingTool() {
         setSettings(s);
         setCliPath(s.court_filing_cli_path ?? "");
         setPython(s.court_filing_python ?? "");
-        setAccount(s.court_filing_account ?? "");
-        setPassword(s.court_filing_password ?? "");
-        setCookieDir(s.court_filing_cookie_dir ?? "");
       })
       .catch(() => {});
   }, []);
@@ -48,16 +44,25 @@ export function CourtFilingTool() {
     if (!settings) return;
     setSaving(true);
     try {
+      if (account.trim()) {
+        await setCredential("court-filing/zxfw/account", account.trim());
+      }
+      if (password) {
+        await setCredential("court-filing/zxfw/password", password);
+      }
       const next: Settings = {
         ...settings,
         court_filing_cli_path: cliPath.trim() || null,
         court_filing_python: python.trim() || null,
-        court_filing_account: account.trim() || null,
-        court_filing_password: password.trim() || null,
-        court_filing_cookie_dir: cookieDir.trim() || null,
+        // 旧字段只用于一次性迁移；WebView 不再持有或回写凭据。
+        court_filing_account: null,
+        court_filing_password: null,
+        court_filing_cookie_dir: null,
       };
       await saveSettings(next);
-      setSettings(next);
+      setSettings(await getSettings());
+      setAccount("");
+      setPassword("");
       setDirty(false);
       toast("立案配置已保存", "info");
     } catch (e) {
@@ -66,6 +71,13 @@ export function CourtFilingTool() {
       setSaving(false);
     }
   };
+
+  const accountConfigured = settings?.credential_statuses?.some(
+    (status) => status.locator === "court-filing/zxfw/account" && status.configured,
+  );
+  const passwordConfigured = settings?.credential_statuses?.some(
+    (status) => status.locator === "court-filing/zxfw/password" && status.configured,
+  );
 
   return (
     <div className="space-y-6">
@@ -135,18 +147,20 @@ export function CourtFilingTool() {
           <Field label="一张网账号(手机号)">
             <input
               type="text"
+              autoComplete="off"
               value={account}
               onChange={(e) => { setAccount(e.target.value); markDirty(); }}
-              placeholder="登录全国法院一张网的手机号"
+              placeholder={accountConfigured ? "已安全保存；留空不修改" : "登录全国法院一张网的手机号"}
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
             />
           </Field>
           <Field label="一张网密码">
             <input
               type="password"
+              autoComplete="new-password"
               value={password}
               onChange={(e) => { setPassword(e.target.value); markDirty(); }}
-              placeholder="只存本机,不上传"
+              placeholder={passwordConfigured ? "已安全保存；留空不修改" : "写入 Windows 凭据管理器"}
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
             />
           </Field>
@@ -168,15 +182,9 @@ export function CourtFilingTool() {
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
             />
           </Field>
-          <Field label="Cookie 缓存目录(可选)" hint="留空 = 默认应用数据目录">
-            <input
-              type="text"
-              value={cookieDir}
-              onChange={(e) => { setCookieDir(e.target.value); markDirty(); }}
-              placeholder="登录态缓存目录"
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
-            />
-          </Field>
+          <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            登录态 Cookie 默认不落盘；每次申报重新建立受控会话，避免明文会话文件泄漏。
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button

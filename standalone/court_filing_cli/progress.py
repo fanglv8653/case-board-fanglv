@@ -12,6 +12,8 @@ import json
 import sys
 import time
 
+from court_filing_cli.secrets import redact_value
+
 # 标准退出码
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
@@ -39,6 +41,7 @@ def emit(
         "ts": _now(),
     }
     event.update(extra)
+    event = redact_value(event)
     line = json.dumps(event, ensure_ascii=False)
     sys.stdout.write(line + "\n")
     sys.stdout.flush()

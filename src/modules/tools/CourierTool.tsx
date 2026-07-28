@@ -20,7 +20,6 @@ import {
   ChevronRight,
   Settings as SettingsIcon,
   ExternalLink,
-  Save,
 } from "lucide-react";
 
 import {
@@ -29,13 +28,13 @@ import {
   queryExpress,
   deleteExpressTrack,
   getSettings,
-  saveSettings,
   openUrl,
   type ExpressTrack,
 } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 import { toast } from "@/components/ui/toast";
 import { confirmDialog } from "@/lib/dialog";
+import { CredentialField } from "@/components/settings/CredentialField";
 
 const CARRIERS: { code: string; name: string }[] = [
   { code: "shunfeng", name: "顺丰" },
@@ -162,25 +161,35 @@ export function CourierTool() {
 
   // 快递100 接口配置(2026-06-16:从设置页迁到这里,就近配置 customer + key)
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [custCfg, setCustCfg] = useState("");
-  const [keyCfg, setKeyCfg] = useState("");
-  const [savingCfg, setSavingCfg] = useState(false);
-  const [cfgDirty, setCfgDirty] = useState(false);
   const [cfgOpen, setCfgOpen] = useState(false);
-  const configured = !!(
-    settings?.kuaidi100_customer?.trim() && settings?.kuaidi100_key?.trim()
-  );
+  const configured =
+    settings?.credential_statuses?.some(
+      (status) =>
+        status.locator === "provider/kuaidi100/customer" && status.configured,
+    ) === true &&
+    settings?.credential_statuses?.some(
+      (status) =>
+        status.locator === "provider/kuaidi100/key" && status.configured,
+    ) === true;
 
   // 打开面板:读 settings(快递100 配置)+ 本地单号 + 自动刷新在途单号(40 天内免费)
   useEffect(() => {
     getSettings()
       .then((s) => {
         setSettings(s);
-        setCustCfg(s.kuaidi100_customer ?? "");
-        setKeyCfg(s.kuaidi100_key ?? "");
         // 未配置则展开配置区提示填写,已配置则收起
         setCfgOpen(
-          !(s.kuaidi100_customer?.trim() && s.kuaidi100_key?.trim()),
+          !(
+            s.credential_statuses?.some(
+              (status) =>
+                status.locator === "provider/kuaidi100/customer" &&
+                status.configured,
+            ) &&
+            s.credential_statuses?.some(
+              (status) =>
+                status.locator === "provider/kuaidi100/key" && status.configured,
+            )
+          ),
         );
       })
       .catch(() => {});
@@ -191,26 +200,6 @@ export function CourierTool() {
       .then(setTracks)
       .catch(() => {});
   }, []);
-
-  const saveKuaidiCfg = async () => {
-    if (!settings) return;
-    setSavingCfg(true);
-    try {
-      const next: Settings = {
-        ...settings,
-        kuaidi100_customer: custCfg.trim() || null,
-        kuaidi100_key: keyCfg.trim() || null,
-      };
-      await saveSettings(next);
-      setSettings(next);
-      setCfgDirty(false);
-      toast("快递100 配置已保存", "info");
-    } catch (e) {
-      toast(`保存失败:${e}`, "error");
-    } finally {
-      setSavingCfg(false);
-    }
-  };
 
   const handleQuery = async () => {
     if (!num.trim()) return;
@@ -296,56 +285,53 @@ export function CourierTool() {
           </button>
         </summary>
         <div className="space-y-3 border-t border-border px-4 py-3">
-          <div className="space-y-1">
-            <label className="block text-caption text-muted-foreground">
-              customer(授权码)
-            </label>
-            <input
-              type="text"
-              value={custCfg}
-              onChange={(e) => {
-                setCustCfg(e.target.value);
-                setCfgDirty(true);
-              }}
-              placeholder="快递100 后台的 customer"
-              autoComplete="off"
-              className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm placeholder:text-muted-foreground/50 focus:border-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
-            />
-          </div>
-          <div className="space-y-1">
-            <label className="block text-caption text-muted-foreground">
-              key(授权 key)
-            </label>
-            <input
-              type="password"
-              value={keyCfg}
-              onChange={(e) => {
-                setKeyCfg(e.target.value);
-                setCfgDirty(true);
-              }}
-              placeholder="快递100 后台的 key"
-              autoComplete="off"
-              className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm placeholder:text-muted-foreground/50 focus:border-foreground focus:outline-none focus:ring-1 focus:ring-foreground/20"
-            />
-          </div>
-          <div className="flex items-center justify-end gap-2">
-            <span className="text-caption text-muted-foreground">
-              只存本机,不上传任何地方
-            </span>
-            <button
-              type="button"
-              onClick={saveKuaidiCfg}
-              disabled={savingCfg || !cfgDirty || !settings}
-              className="inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-            >
-              {savingCfg ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <Save className="size-3.5" />
-              )}
-              保存
-            </button>
-          </div>
+          <CredentialField
+            label="customer（授权码）"
+            locator="provider/kuaidi100/customer"
+            status={settings?.credential_statuses?.find(
+              (status) => status.locator === "provider/kuaidi100/customer",
+            )}
+            onStatusChange={(status) =>
+              setSettings((current) =>
+                current
+                  ? {
+                      ...current,
+                      credential_statuses: [
+                        ...(current.credential_statuses ?? []).filter(
+                          (item) => item.locator !== status.locator,
+                        ),
+                        status,
+                      ],
+                    }
+                  : current,
+              )
+            }
+          />
+          <CredentialField
+            label="key（授权 key）"
+            locator="provider/kuaidi100/key"
+            status={settings?.credential_statuses?.find(
+              (status) => status.locator === "provider/kuaidi100/key",
+            )}
+            onStatusChange={(status) =>
+              setSettings((current) =>
+                current
+                  ? {
+                      ...current,
+                      credential_statuses: [
+                        ...(current.credential_statuses ?? []).filter(
+                          (item) => item.locator !== status.locator,
+                        ),
+                        status,
+                      ],
+                    }
+                  : current,
+              )
+            }
+          />
+          <p className="text-caption text-muted-foreground">
+            凭据仅安全保存在本机，不会回显已保存值。
+          </p>
         </div>
       </details>
 

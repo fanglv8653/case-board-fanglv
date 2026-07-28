@@ -12,6 +12,7 @@
 //! 安全模型(老板 2026-06-10 拍板):配对码 + HMAC 挡**团队外**的人(同所隔壁团队);
 //! 团队内是信任关系,分组权限=客户端默认不显示(不加密)。快照只到"案件登记表"粒度。
 
+pub mod credentials;
 pub mod net;
 pub mod store;
 
@@ -26,19 +27,38 @@ type HmacSha256 = Hmac<Sha256>;
 // ============================================================================
 
 /// 本机的团队身份。None = 未入团。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct TeamIdentity {
     pub team_id: String,
     pub team_name: String,
     /// 全队共享鉴权密钥(64 hex)。跟 API key 同级:只存本机。
+    #[serde(default, skip_serializing)]
     pub team_secret: String,
     pub member_id: String,
     pub my_name: String,
     /// "leader" | "member"
     pub role: String,
     /// 6 位配对码,**仅团队长持有**(入队请求只有团队长能批)。
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub pairing_code: Option<String>,
+}
+
+impl std::fmt::Debug for TeamIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TeamIdentity")
+            .field("team_id", &self.team_id)
+            .field("team_name", &self.team_name)
+            .field("team_secret", &"[REDACTED]")
+            .field("member_id", &self.member_id)
+            .field("my_name", &self.my_name)
+            .field("role", &self.role)
+            .field(
+                "pairing_code",
+                &self.pairing_code.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl TeamIdentity {

@@ -104,9 +104,13 @@ import type {
   FeishuCalendarEvent,
   LawyerProfile,
   NewCaseInstance,
-  ImportPlan,
-  ImportResult,
+  MaterialBatchDetail,
+  MaterialDecisionInput,
+  MaterialPreflight,
+  MaterialProcessingBatch,
+  CommitMaterialPreflightResult,
   ScannedDoc,
+  CredentialStatus,
   Settings,
   UpdateInfo,
   VerifyResult,
@@ -121,26 +125,61 @@ export function scanCaseFolder(path: string): Promise<ScannedDoc[]> {
   return invoke<ScannedDoc[]>("scan_case_folder", { path });
 }
 
-/** 导入文件夹:扫描 + upsert 案件 + 替换文档列表。是 V0.1 的主路径。 */
-export function importCaseFolder(path: string): Promise<ImportResult> {
-  return invoke<ImportResult>("import_case_folder", { path });
+export function previewMaterialImport(
+  path: string,
+  legalDomain: "criminal" | "civil",
+): Promise<MaterialPreflight> {
+  return invoke<MaterialPreflight>("preview_material_import", { path, legalDomain });
 }
 
-/** 多案件检测:对文件夹做拆分预案(只读)。multi=false 时按单案导入即可。 */
-export function planImportFolder(path: string): Promise<ImportPlan> {
-  return invoke<ImportPlan>("plan_import_folder", { path });
+export function previewMaterialRefresh(caseId: string): Promise<MaterialPreflight> {
+  return invoke<MaterialPreflight>("preview_material_refresh", { caseId });
 }
 
-/** 按确认后的拆分预案批量建案。`root` = 被拖入的上层文件夹(用于替换旧的整体单案)。 */
-export function commitImportFolder(
-  root: string,
-  cases: { dir: string; name: string }[],
-  sharedDirs: string[],
-): Promise<ImportResult[]> {
-  return invoke<ImportResult[]>("commit_import_folder", {
-    root,
-    cases,
-    sharedDirs,
+export function commitMaterialPreflight(input: {
+  mode: "import" | "refresh";
+  caseId?: string | null;
+  rootPath: string;
+  legalDomain: "criminal" | "civil";
+  decisions: MaterialDecisionInput[];
+  startProcessing: boolean;
+}): Promise<CommitMaterialPreflightResult> {
+  return invoke<CommitMaterialPreflightResult>("commit_material_preflight", { input });
+}
+
+export function listMaterialProcessingBatches(
+  caseId?: string,
+): Promise<MaterialProcessingBatch[]> {
+  return invoke<MaterialProcessingBatch[]>("list_material_processing_batches", { caseId });
+}
+
+export function getMaterialProcessingBatch(batchId: string): Promise<MaterialBatchDetail> {
+  return invoke<MaterialBatchDetail>("get_material_processing_batch", { batchId });
+}
+
+export function startMaterialBatchExecution(batchId: string): Promise<MaterialBatchDetail> {
+  return invoke<MaterialBatchDetail>("start_material_batch_execution", { batchId });
+}
+
+export function pauseMaterialProcessingBatch(batchId: string): Promise<MaterialBatchDetail> {
+  return invoke<MaterialBatchDetail>("pause_material_processing_batch", { batchId });
+}
+
+export function resumeMaterialBatchExecution(batchId: string): Promise<MaterialBatchDetail> {
+  return invoke<MaterialBatchDetail>("resume_material_batch_execution", { batchId });
+}
+
+export function cancelMaterialProcessingBatch(batchId: string): Promise<MaterialBatchDetail> {
+  return invoke<MaterialBatchDetail>("cancel_material_processing_batch", { batchId });
+}
+
+export function ignoreFailedMaterialItems(
+  batchId: string,
+  errorCategory?: string,
+): Promise<MaterialBatchDetail> {
+  return invoke<MaterialBatchDetail>("ignore_failed_material_items", {
+    batchId,
+    errorCategory,
   });
 }
 
@@ -309,13 +348,13 @@ export function allowCaseAssets(folder: string): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 /** 2026-05-25 V0.1.6:在线验证 MinerU API token。 */
-export function verifyMinerUKey(token: string): Promise<VerifyResult> {
-  return invoke<VerifyResult>("verify_mineru_key", { token });
+export function verifyMinerUKey(): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_mineru_key");
 }
 
 /** 2026-06-12:在线验证 PaddleOCR VL(AI Studio)访问令牌。 */
-export function verifyPaddleVlKey(token: string): Promise<VerifyResult> {
-  return invoke<VerifyResult>("verify_paddle_vl_key", { token });
+export function verifyPaddleVlKey(): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_paddle_vl_key");
 }
 
 /** 2026-05-25 V0.1.6:onboarding 完成时调一次,如果案件表为空就 seed 示例案件。 */
@@ -325,34 +364,30 @@ export function seedDemoCaseIfEmpty(): Promise<boolean> {
 
 /** 2026-05-25 V0.1.6:在线验证 DeepSeek API key。 */
 export function verifyDeepSeekKey(
-  apiKey: string,
   endpoint?: string,
 ): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_deepseek_key", {
-    apiKey,
     endpoint: endpoint || null,
   });
 }
 
 /** 2026-06-15:在线验证 MiniMax API key(走 /v1/models 鉴权)。 */
 export function verifyMiniMaxKey(
-  apiKey: string,
   endpoint?: string,
 ): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_minimax_key", {
-    apiKey,
     endpoint: endpoint || null,
   });
 }
 
 /** 2026-06-16:在线验证通用 OpenAI 兼容后端(GLM/MiMo/自定义)—— 一发最小 chat 请求验 key+地址+模型。 */
 export function verifyOpenAICompatKey(
-  apiKey: string,
+  locator: string,
   endpoint: string,
   model: string,
 ): Promise<VerifyResult> {
   return invoke<VerifyResult>("verify_openai_compat_key", {
-    apiKey,
+    locator,
     endpoint,
     model,
   });
@@ -360,8 +395,20 @@ export function verifyOpenAICompatKey(
 
 /** 2026-05-25 V0.1.8:在线验证元典(open.chineselaw.com)API key。
  *  消耗 1 次企业搜索配额(用 name=test top_k=1 探测,代价最小)。*/
-export function verifyYuandianKey(apiKey: string): Promise<VerifyResult> {
-  return invoke<VerifyResult>("verify_yuandian_key", { apiKey });
+export function verifyYuandianKey(): Promise<VerifyResult> {
+  return invoke<VerifyResult>("verify_yuandian_key");
+}
+
+export function listCredentialStatuses(): Promise<CredentialStatus[]> {
+  return invoke<CredentialStatus[]>("list_credential_statuses");
+}
+
+export function setCredential(locator: string, value: string): Promise<CredentialStatus> {
+  return invoke<CredentialStatus>("set_credential", { locator, value });
+}
+
+export function deleteCredential(locator: string): Promise<CredentialStatus> {
+  return invoke<CredentialStatus>("delete_credential", { locator });
 }
 
 /** 2026-05-25 V0.1.8:检测远程最新版本(lawtools.top 仓库的 version.json)。
@@ -385,16 +432,28 @@ export function saveSettings(payload: Settings): Promise<void> {
   return invoke<void>("save_settings", { payload });
 }
 
-/** 智能粘贴:把平台接入文档复制来的配置文本解析成 MCP server 列表(本地解析,不联网)。 */
+/** 智能粘贴并立即迁入系统凭据库；返回值不含任何敏感值。 */
 export function parseMcpPaste(text: string): Promise<import("./types").ParsedMcpPaste> {
   return invoke("parse_mcp_paste", { text });
 }
 
-/** MCP 连接测试:真连一次(握手 + 列工具)。失败 reject 真实原因(401/403 等)。 */
-export function testMcpServer(
-  config: import("./types").McpServerConfig
-): Promise<import("./types").McpTestReport> {
-  return invoke("test_mcp_server", { config });
+export function updateMcpServerMetadata(
+  serverId: string,
+  name: string,
+  enabled: boolean,
+): Promise<import("./types").McpServerConfig[]> {
+  return invoke("update_mcp_server_metadata", { serverId, name, enabled });
+}
+
+export function deleteMcpServer(
+  serverId: string,
+): Promise<import("./types").McpServerConfig[]> {
+  return invoke("delete_mcp_server", { serverId });
+}
+
+/** MCP 连接测试只提交稳定 UUID，凭据仅在 Rust 内解析。 */
+export function testMcpServer(serverId: string): Promise<import("./types").McpTestReport> {
+  return invoke("test_mcp_server", { serverId });
 }
 
 /* ------------------------------------------------------------------ */
@@ -408,7 +467,7 @@ export function teamStatus(): Promise<import("./types").TeamStatus> {
 export function teamCreate(
   teamName: string,
   myName: string
-): Promise<import("./types").TeamStatus> {
+): Promise<import("./types").TeamCreateResult> {
   return invoke("team_create", { teamName, myName });
 }
 
@@ -1254,13 +1313,13 @@ export interface ConsoleError {
 export interface SettingsSnapshot {
   setup_completed: boolean;
   user_display_name_set: boolean;
-  mineru_api_key: string; // "[SET]" | "[EMPTY]"
+  mineru_credential_state: string; // "[SET]" | "[EMPTY]"
   mineru_endpoint: string | null;
   mineru_verified: boolean;
-  deepseek_api_key: string;
+  deepseek_credential_state: string;
   deepseek_endpoint: string | null;
   deepseek_verified: boolean;
-  yuandian_api_key: string;
+  yuandian_credential_state: string;
   yuandian_verified: boolean;
   local_model_dir: string | null;
   local_server_endpoint: string | null;
@@ -1493,10 +1552,6 @@ export interface SyncStats {
   updated: number;
   unchanged: number;
   deleted: number;
-}
-
-export function refreshCaseFiles(caseId: string): Promise<SyncStats> {
-  return invoke<SyncStats>("refresh_case_files", { caseId });
 }
 
 /* ───────────── 法院短信处理(V0.3 · 一张网 zxfw.court.gov.cn) ───────────── */
@@ -1975,6 +2030,30 @@ export function buildLocalKbSemanticIndex(): Promise<KbIndexStats> {
   return invoke<KbIndexStats>("build_local_kb_semantic_index");
 }
 
+export function getLocalRecognitionUsage(
+  query: import("./types").RecognitionUsageQuery,
+): Promise<import("./types").RecognitionUsageOverview> {
+  return invoke("get_local_recognition_usage", { query });
+}
+
+export function refreshYuandianLocalUsage(): Promise<
+  import("./types").YuandianLocalUsageOverview
+> {
+  return invoke("refresh_yuandian_local_usage");
+}
+
+export function switchExistingLocalKb(
+  targetPath: string,
+): Promise<import("./types").LocalKbRelocationBackendResult> {
+  return invoke("switch_existing_local_kb", { targetPath });
+}
+
+export function migrateCurrentLocalKb(
+  targetPath: string,
+): Promise<import("./types").LocalKbRelocationBackendResult> {
+  return invoke("migrate_current_local_kb", { targetPath });
+}
+
 /** 月度元典积分账(对应 Rust `db::credits::MonthlyCredits`)。 */
 export interface YuandianMonthlyStats {
   year_month: string;
@@ -2010,9 +2089,8 @@ export function getYuandianCreditsOverview(): Promise<CreditsOverview> {
 export function verifyEmbeddingKey(
   endpoint: string,
   model: string,
-  apiKey: string,
 ): Promise<number> {
-  return invoke<number>("verify_embedding_key", { endpoint, model, apiKey });
+  return invoke<number>("verify_embedding_key", { endpoint, model });
 }
 
 /* ============================================================

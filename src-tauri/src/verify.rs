@@ -28,7 +28,7 @@ impl VerifyResult {
             message: String::new(),
         }
     }
-    fn fail(msg: impl Into<String>) -> Self {
+    pub(crate) fn fail(msg: impl Into<String>) -> Self {
         Self {
             ok: false,
             message: msg.into(),

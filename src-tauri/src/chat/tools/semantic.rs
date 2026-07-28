@@ -48,19 +48,18 @@ impl Tool for SemanticSearchCaseDocs {
             .unwrap_or(DEFAULT_TOP_N);
 
         // 配置门禁:没配 embedding key → 优雅回退提示(不报错,让模型改用关键词工具,AI 无感)
-        let key = ctx
-            .settings
-            .embedding_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let Some(key) = key else {
+        let key_secret =
+            crate::credentials::resolve_static(crate::credentials::StaticCredential::Embedding)
+                .ok()
+                .flatten();
+        let Some(key_secret) = key_secret else {
             return Ok(ToolResult::plain(
                 "本案未配置语义检索(embedding 未设置)。请改用 `find_in_document`(关键词精确查)\
                  或 `read_case_doc`(读全文)来查材料;如需启用语义检索,请提示用户在设置页配置 embedding。\
                  不要反复调用本工具。",
             ));
         };
+        let key = key_secret.expose();
         let endpoint = ctx.settings.embedding_endpoint.as_deref().unwrap_or("");
         let model = ctx.settings.embedding_model.as_deref().unwrap_or("");
 

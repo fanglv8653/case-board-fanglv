@@ -895,7 +895,7 @@ pub async fn build_or_update_index(
 /// **不在这里建索引**(核心法索引可能几分钟,不能卡 chat 工具调用):索引由「重建向量索引」
 /// 显式构建。索引不存在 / 空 / 跟当前 embedding 模型签名不符 → 返回空,工具层回退关键词。
 pub async fn semantic_search(
-    _kb_root: &Path,
+    kb_root: &Path,
     query: &str,
     top_n: usize,
     endpoint: &str,
@@ -904,7 +904,10 @@ pub async fn semantic_search(
 ) -> Result<Vec<KbHit>, String> {
     let index = load_index_cached().await;
     let cur_sig = crate::embedding::index::signature(endpoint, model);
-    if index.files.is_empty() || index.signature != cur_sig {
+    if index.files.is_empty()
+        || index.signature != cur_sig
+        || index.kb_root != canonical_root(kb_root)
+    {
         // 没建索引 / 换了 embedding 模型(向量维度/语义变了)→ 当未命中,提示重建
         return Ok(vec![]);
     }

@@ -189,7 +189,14 @@ export function ExecutionDetailView({
   async function ensureYuandianKey(): Promise<boolean> {
     try {
       const settings = await getSettings();
-      if (settings.yuandian_api_key?.trim()) return true;
+      if (
+        settings.credential_statuses?.some(
+          (status) =>
+            status.locator === "provider/yuandian/api-key" && status.configured,
+        )
+      ) {
+        return true;
+      }
     } catch (e) {
       alert(`读取设置失败:${e}`);
       return false;

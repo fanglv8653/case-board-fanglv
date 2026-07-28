@@ -39,8 +39,7 @@ pub fn validate_litigation_output(
             missing_citation_kinds: contract.citation_kinds.clone(),
             missing_chat_sections: contract.chat_sections.clone(),
             fallback_note: Some(
-                "本轮保留普通聊天结果，请补齐四图结构与引用后再沉淀为正式诉讼分析。"
-                    .to_string(),
+                "本轮保留普通聊天结果，请补齐四图结构与引用后再沉淀为正式诉讼分析。".to_string(),
             ),
         });
     }

@@ -28,6 +28,7 @@ pub mod context;
 pub mod hooks;
 pub mod loop_guard;
 pub mod mcp_bridge;
+pub mod mcp_credentials;
 pub mod mcp_paste;
 pub mod model_router;
 pub mod parallel;

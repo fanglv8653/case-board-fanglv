@@ -2,13 +2,11 @@
 
 用法:
     python -m court_filing_cli \\
-        --account 13800138000 \\
-        --password xxx \\
+        --credentials-stdin \\
         --filing-type civil \\
         --case-data /path/to/case_data.json \\
         --materials /path/to/materials.json \\
         --output-dir /tmp/court_filing/job1 \\
-        [--cookie-dir ~/.caseboard/court_filing_cookies] \\
         [--headless] \\
         [--captcha-mode auto] \\
         [--save-screenshot]
@@ -28,6 +26,12 @@ import time
 
 from court_filing_cli.progress import EXIT_SUCCESS, EXIT_FAILURE, EXIT_ARG_ERROR, emit, emit_result
 from court_filing_cli.schemas import CaseData, load_case_data, load_materials, validate_case_data
+from court_filing_cli.secrets import (
+    FilingSecrets,
+    SecretRedactionFilter,
+    read_secrets_from_stdin,
+    redact_text,
+)
 
 
 # ────────────────────────── Logging 配置 ──────────────────────────
@@ -38,6 +42,7 @@ def _configure_logging(level: str = "INFO") -> None:
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s", datefmt="%H:%M:%S"))
+    handler.addFilter(SecretRedactionFilter())
     root.addHandler(handler)
 
     # 防止库的日志泄露到 stdout
@@ -49,22 +54,14 @@ def _configure_logging(level: str = "INFO") -> None:
 
 # ────────────────────────── 主流程 ──────────────────────────
 
-def run_login(args: argparse.Namespace) -> None:
-    """M1：仅登录，用于验证登录流程 + Cookie 持久化。"""
-    from court_filing_cli.cookie_service import CookieService
+def run_login(args: argparse.Namespace, secrets: FilingSecrets) -> None:
+    """M1：仅登录。CLI 默认不持久化 Cookie。"""
     from court_filing_cli.browser import create_browser
     from court_filing_cli.sites.court_zxfw import CourtZxfwService
     from court_filing_cli.progress import emit
 
     output_dir = args.output_dir
-    cookie_dir = args.cookie_dir
     debug_dir = output_dir if args.save_screenshot else None
-
-    cookie_service = None
-    if cookie_dir:
-        safe_account = args.account.replace("@", "_at_").replace("/", "_")
-        cookie_path = os.path.join(cookie_dir, f"court_zxfw_{safe_account}.json")
-        cookie_service = CookieService(storage_path=cookie_path)
 
     # 构建验证码识别器
     from court_filing_cli.captcha_manual import AutoDegradingRecognizer, ManualCaptchaRecognizer
@@ -80,7 +77,7 @@ def run_login(args: argparse.Namespace) -> None:
             service = CourtZxfwService(
                 page=page,
                 context=context,
-                cookie_service=cookie_service,
+                cookie_service=None,
                 captcha_recognizer=captcha_recognizer,
                 debug_dir=debug_dir,
             )
@@ -88,8 +85,8 @@ def run_login(args: argparse.Namespace) -> None:
             max_retries = 10 if args.captcha_mode == "auto" else 3
             emit("login", "login.start", "正在登录一张网...")
             result = service.login(
-                account=args.account,
-                password=args.password,
+                account=secrets.account,
+                password=secrets.password,
                 max_captcha_retries=max_retries,
                 save_debug=args.save_screenshot,
             )
@@ -107,12 +104,13 @@ def run_login(args: argparse.Namespace) -> None:
                 emit_result(False, msg)
 
     except Exception as e:
-        emit("system", "cli.error", f"CLI 异常: {e}", level="error", traceback=str(e))
-        emit_result(False, f"CLI 异常: {e}")
+        safe_error = redact_text(e)
+        emit("system", "cli.error", f"CLI 异常: {safe_error}", level="error")
+        emit_result(False, f"CLI 异常: {safe_error}")
         sys.exit(EXIT_FAILURE)
 
 
-def run_filing(args: argparse.Namespace) -> None:
+def run_filing(args: argparse.Namespace, secrets: FilingSecrets) -> None:
     """立案主流程（登录 + 民事6步/执行5步 → 到预览页）。"""
     from court_filing_cli.runner import run_filing as _run
     from court_filing_cli.schemas import load_case_data, load_materials, validate_case_data
@@ -137,10 +135,9 @@ def run_filing(args: argparse.Namespace) -> None:
     result = _run(
         case_data=case_data,
         materials=materials,
-        account=args.account,
-        password=args.password,
+        account=secrets.account,
+        password=secrets.password,
         output_dir=args.output_dir,
-        cookie_dir=args.cookie_dir,
         headless=args.headless,
         save_screenshot=args.save_screenshot,
         captcha_mode=args.captcha_mode,
@@ -159,17 +156,20 @@ def build_parser() -> argparse.ArgumentParser:
         prog="court_filing_cli",
         description="法院「一张网」在线立案 CLI（法穿独立抽取版）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="示例:\n"
-               "  python -m court_filing_cli --account 13800138000 --password xxx "
+        epilog="示例（凭据 JSON 由父进程写 stdin，不得写命令行）:\n"
+               "  python -m court_filing_cli --credentials-stdin "
                "--output-dir /tmp/test\n"
-               "  python -m court_filing_cli --account 13800138000 --password xxx "
+               "  python -m court_filing_cli --credentials-stdin "
                "--filing-type civil --case-data case.json --materials mats.json "
-               "--output-dir /tmp/job1 --cookie-dir ~/.caseboard/cookies\n",
+               "--output-dir /tmp/job1\n",
     )
 
-    # 账号密码
-    parser.add_argument("--account", required=True, help="一张网账号（手机号）")
-    parser.add_argument("--password", required=True, help="一张网密码")
+    parser.add_argument(
+        "--credentials-stdin",
+        action="store_true",
+        required=True,
+        help="从 stdin 读取一次性账号/密码 JSON（唯一支持的凭据入口）",
+    )
 
     # 模式
     parser.add_argument("--login-only", action="store_true",
@@ -181,7 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 输出
     parser.add_argument("--output-dir", required=True, help="输出目录（截图/进度/日志）")
-    parser.add_argument("--cookie-dir", help="Cookie 存储目录（不传则不持久化 Cookie）")
 
     # 浏览器
     parser.add_argument("--headless", action="store_true",
@@ -204,20 +203,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-
     _configure_logging(args.log_level)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    emit("system", "cli.params", f"headless={args.headless}, captcha_mode={args.captcha_mode}, "
-         f"output_dir={args.output_dir}, cookie_dir={args.cookie_dir}")
-
-    if args.login_only:
-        run_login(args)
-    else:
-        if not args.case_data:
-            emit("system", "cli.error", "filing 模式需要 --case-data", level="error")
-            sys.exit(EXIT_ARG_ERROR)
-        run_filing(args)
+    try:
+        secrets = read_secrets_from_stdin()
+    except ValueError as error:
+        emit("system", "cli.credentials_rejected", redact_text(error), level="error")
+        sys.exit(EXIT_ARG_ERROR)
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+        emit(
+            "system",
+            "cli.params",
+            f"headless={args.headless}, captcha_mode={args.captcha_mode}, "
+            f"output_dir={args.output_dir}, cookie_persistence=disabled",
+        )
+        if args.login_only:
+            run_login(args, secrets)
+        else:
+            if not args.case_data:
+                emit("system", "cli.error", "filing 模式需要 --case-data", level="error")
+                sys.exit(EXIT_ARG_ERROR)
+            run_filing(args, secrets)
+    except SystemExit:
+        raise
+    except Exception as error:
+        safe_error = redact_text(error)
+        emit("system", "cli.error", f"CLI 异常: {safe_error}", level="error")
+        emit_result(False, f"CLI 异常: {safe_error}")
+        sys.exit(EXIT_FAILURE)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
 //! - 我们靠"昨日快照 vs 今日 fetch 余额 delta"算今日消费
 //! - 每天保存一次快照(`deepseek_balance_snapshots` 表)
 //!
-//! API key 从 `settings.cloud_llm_api_key` 读(已经存在用户设置里)。
+//! API key 由调用方通过凭据解析器取得，设置对象不再承载明文。
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -69,7 +69,7 @@ struct BalanceResponse {
 /// 拉 DeepSeek 当前余额 + 计算今日消费；仅在余额业务值变化时写当天快照。
 ///
 /// 流程:
-///   1. 读 settings.cloud_llm_api_key
+///   1. 由凭据解析器读取 DeepSeek credential
 ///   2. fetch GET /user/balance + Bearer Authorization
 ///   3. 找 currency=CNY 那条
 ///   4. 算今日消费:今天 0 点之前最近的一条快照 - 当前 totalBalance
@@ -132,15 +132,8 @@ pub async fn fetch_balance_and_persist(
     let today_str = today.format("%Y-%m-%d").to_string();
     let now_iso = chrono::Utc::now().to_rfc3339();
 
-    let day_start = persist_balance_if_changed(
-        pool,
-        &today_str,
-        &now_iso,
-        total,
-        granted,
-        topped_up,
-    )
-    .await?;
+    let day_start =
+        persist_balance_if_changed(pool, &today_str, &now_iso, total, granted, topped_up).await?;
 
     let today_consumed = day_start.map(|ds| (ds - total).max(0.0));
 
@@ -201,12 +194,10 @@ async fn persist_balance_if_changed(
     .execute(pool)
     .await?;
 
-    sqlx::query_scalar(
-        "SELECT day_start_balance FROM deepseek_balance_snapshots WHERE date = ?",
-    )
-    .bind(today)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_scalar("SELECT day_start_balance FROM deepseek_balance_snapshots WHERE date = ?")
+        .bind(today)
+        .fetch_optional(pool)
+        .await
 }
 
 /// 读最近一条已缓存的余额(不发请求,用于启动时立刻显示一个值)。

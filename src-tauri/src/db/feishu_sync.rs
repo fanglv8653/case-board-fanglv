@@ -497,11 +497,7 @@ async fn complete_pull_internal(
     }
     let entity_counts = if let Some(bundle) = management {
         crate::db::feishu_entities::import_management_records(
-            &mut tx,
-            run_id,
-            app_token,
-            table_id,
-            bundle,
+            &mut tx, run_id, app_token, table_id, bundle,
         )
         .await?
     } else {
@@ -554,15 +550,7 @@ pub async fn complete_pull_with_entities(
     bundle: FeishuCaseManagementRecords,
 ) -> Result<FeishuPullResult, String> {
     let records = bundle.cases.clone();
-    complete_pull_internal(
-        pool,
-        run_id,
-        app_token,
-        table_id,
-        records,
-        Some(&bundle),
-    )
-    .await
+    complete_pull_internal(pool, run_id, app_token, table_id, records, Some(&bundle)).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -1172,20 +1160,39 @@ mod tests {
             assert_eq!(result.contact_count, 2);
         }
         let work_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_work_items")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let stage_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_stage_items")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         let contact_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_agency_contacts")
-            .fetch_one(&pool).await.unwrap();
-        let manual_content: String = sqlx::query_scalar("SELECT content FROM case_work_items WHERE id='manual-work'")
-            .fetch_one(&pool).await.unwrap();
-        let case_fields: (String, String) = sqlx::query_as("SELECT name,display_name_override FROM cases WHERE id='case-1'")
-            .fetch_one(&pool).await.unwrap();
-        let unchanged_audits: i64 = sqlx::query_scalar("SELECT count(*) FROM feishu_sync_entity_audits WHERE action='unchanged'")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let manual_content: String =
+            sqlx::query_scalar("SELECT content FROM case_work_items WHERE id='manual-work'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let case_fields: (String, String) =
+            sqlx::query_as("SELECT name,display_name_override FROM cases WHERE id='case-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let unchanged_audits: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM feishu_sync_entity_audits WHERE action='unchanged'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!((work_count, stage_count, contact_count), (2, 1, 2));
         assert_eq!(manual_content, "不得覆盖");
-        assert_eq!(case_fields, ("20260721陈某诈骗案".into(), "陈某诈骗案".into()));
+        assert_eq!(
+            case_fields,
+            ("20260721陈某诈骗案".into(), "陈某诈骗案".into())
+        );
         assert_eq!(unchanged_audits, 4);
     }
 
@@ -1194,10 +1201,13 @@ mod tests {
         let pool = inbound_fixture().await;
         let first = start_pull_run(&pool).await.unwrap();
         complete_pull_with_entities(&pool, &first, "app", "table", management_bundle(true))
-            .await.unwrap();
+            .await
+            .unwrap();
         let second = start_pull_run(&pool).await.unwrap();
-        let result = complete_pull_with_entities(&pool, &second, "app", "table", management_bundle(false))
-            .await.unwrap();
+        let result =
+            complete_pull_with_entities(&pool, &second, "app", "table", management_bundle(false))
+                .await
+                .unwrap();
         let visible_remote: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM case_work_items WHERE external_source='feishu' AND deleted_at IS NULL) + (SELECT count(*) FROM case_stage_items WHERE external_source='feishu' AND deleted_at IS NULL) + (SELECT count(*) FROM case_agency_contacts WHERE external_source='feishu' AND deleted_at IS NULL)")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(result.archived_entity_count, 4);
@@ -1209,14 +1219,25 @@ mod tests {
         let pool = inbound_fixture().await;
         let run_id = start_pull_run(&pool).await.unwrap();
         let mut bundle = management_bundle(true);
-        bundle.progress[0].fields.as_object_mut().unwrap().remove("进度日期");
+        bundle.progress[0]
+            .fields
+            .as_object_mut()
+            .unwrap()
+            .remove("进度日期");
         let error = complete_pull_with_entities(&pool, &run_id, "app", "table", bundle)
-            .await.unwrap_err();
+            .await
+            .unwrap_err();
         assert!(error.contains("缺少进度日期"));
         let snapshot_count: i64 = sqlx::query_scalar("SELECT count(*) FROM feishu_sync_snapshots")
-            .fetch_one(&pool).await.unwrap();
-        let remote_entity_count: i64 = sqlx::query_scalar("SELECT count(*) FROM case_work_items WHERE external_source='feishu'")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let remote_entity_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM case_work_items WHERE external_source='feishu'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(snapshot_count, 0);
         assert_eq!(remote_entity_count, 0);
     }

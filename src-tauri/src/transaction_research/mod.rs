@@ -151,10 +151,17 @@ pub async fn transaction_legal_research(
     };
 
     let tool_runs = run_research_tools(&registry, &ctx, &question, &settings).await;
-    let tool_trace = tool_runs.iter().map(|run| run.trace.clone()).collect::<Vec<_>>();
+    let tool_trace = tool_runs
+        .iter()
+        .map(|run| run.trace.clone())
+        .collect::<Vec<_>>();
     let materials = tool_runs
         .iter()
-        .filter_map(|run| run.content.as_ref().map(|content| (run.trace.tool.as_str(), content.as_str())))
+        .filter_map(|run| {
+            run.content
+                .as_ref()
+                .map(|content| (run.trace.tool.as_str(), content.as_str()))
+        })
         .map(|(tool, content)| format!("## 工具: {tool}\n{content}"))
         .collect::<Vec<_>>();
 
@@ -163,14 +170,15 @@ pub async fn transaction_legal_research(
             "请确认是否已在设置页配置元典 API Key。".to_string(),
             "如果你有本地知识库，也请确认知识库目录是否已绑定并启用。".to_string(),
         ];
-        if settings
-            .yuandian_api_key
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
+        if crate::credentials::resolve_static(crate::credentials::StaticCredential::Yuandian)
+            .ok()
+            .flatten()
+            .is_none()
         {
-            follow_up_questions.insert(0, "当前未配置元典 API Key，是否先在设置页完成配置？".to_string());
+            follow_up_questions.insert(
+                0,
+                "当前未配置元典 API Key，是否先在设置页完成配置？".to_string(),
+            );
         }
         return Ok(TransactionLegalResearchResponse {
             question: question.clone(),
@@ -213,26 +221,28 @@ async fn run_research_tools(
     registry: &ToolRegistry,
     ctx: &ToolContext<'_>,
     question: &str,
-    settings: &Settings,
+    _settings: &Settings,
 ) -> Vec<ToolRun> {
     let keyword = compact_keyword(question);
-    let has_yuandian_key = settings
-        .yuandian_api_key
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
+    let has_yuandian_key =
+        crate::credentials::resolve_static(crate::credentials::StaticCredential::Yuandian)
+            .ok()
+            .flatten()
+            .is_some();
 
-    let mut runs = vec![run_tool(
-        registry,
-        "search_local_kb",
-        json!({
-            "keyword": keyword,
-            "max_results": 5,
-            "include_yuandian_cache": false
-        }),
-        ctx,
-    )
-    .await];
+    let mut runs = vec![
+        run_tool(
+            registry,
+            "search_local_kb",
+            json!({
+                "keyword": keyword,
+                "max_results": 5,
+                "include_yuandian_cache": false
+            }),
+            ctx,
+        )
+        .await,
+    ];
 
     if has_yuandian_key {
         runs.push(
@@ -393,7 +403,9 @@ fn build_question(input: &TransactionLegalResearchInput) -> String {
     let stance = normalize_stance_label(input.stance.as_deref());
 
     if !risk.is_empty() {
-        let mut question = format!("请检索中国法下与“{risk}”相关的法条、监管规则和类案，并说明对{stance}的风险影响。");
+        let mut question = format!(
+            "请检索中国法下与“{risk}”相关的法条、监管规则和类案，并说明对{stance}的风险影响。"
+        );
         if !clause_ref.is_empty() {
             question.push_str(&format!("重点关注条款位置：{clause_ref}。"));
         }
@@ -621,10 +633,7 @@ fn build_authorities(
     authorities
 }
 
-fn fact_to_authority(
-    fact: &EvidenceItem,
-    relevance: String,
-) -> TransactionResearchAuthority {
+fn fact_to_authority(fact: &EvidenceItem, relevance: String) -> TransactionResearchAuthority {
     TransactionResearchAuthority {
         authority_type: fact.source_type.clone(),
         title: fact.title.clone(),
@@ -645,7 +654,8 @@ fn authorities_to_citations(
             locator: authority.locator.clone(),
         };
         if !citations.iter().any(|existing| {
-            normalize_source_type(&existing.source_type) == normalize_source_type(&citation.source_type)
+            normalize_source_type(&existing.source_type)
+                == normalize_source_type(&citation.source_type)
                 && normalized_key(&existing.source_name) == normalized_key(&citation.source_name)
                 && normalized_key(&existing.locator) == normalized_key(&citation.locator)
         }) {
@@ -670,7 +680,11 @@ fn best_evidence_match<'a>(
         if score < 4 {
             continue;
         }
-        if best.as_ref().map(|(_, best_score)| score > *best_score).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|(_, best_score)| score > *best_score)
+            .unwrap_or(true)
+        {
             best = Some((fact, score));
         }
     }
@@ -796,7 +810,9 @@ fn extract_law_evidence(value: &Value, tool: &str) -> Vec<EvidenceItem> {
                 source_type: "law".to_string(),
                 title,
                 locator: build_law_locator(item),
-                snippet: normalize_whitespace(pick_first_str(item, &["content", "snippet"]).unwrap_or("")),
+                snippet: normalize_whitespace(
+                    pick_first_str(item, &["content", "snippet"]).unwrap_or(""),
+                ),
                 tool: tool.to_string(),
             })
         })
@@ -817,7 +833,9 @@ fn extract_regulation_evidence(value: &Value, tool: &str) -> Vec<EvidenceItem> {
                 source_type: "regulation".to_string(),
                 title: title.to_string(),
                 locator: build_regulation_locator(item),
-                snippet: normalize_whitespace(pick_first_str(item, &["content", "snippet"]).unwrap_or("")),
+                snippet: normalize_whitespace(
+                    pick_first_str(item, &["content", "snippet"]).unwrap_or(""),
+                ),
                 tool: tool.to_string(),
             })
         })
@@ -838,7 +856,9 @@ fn extract_case_evidence(value: &Value, tool: &str) -> Vec<EvidenceItem> {
                 source_type: "case".to_string(),
                 title: title.to_string(),
                 locator: build_case_locator(item),
-                snippet: normalize_whitespace(pick_first_str(item, &["content", "snippet"]).unwrap_or("")),
+                snippet: normalize_whitespace(
+                    pick_first_str(item, &["content", "snippet"]).unwrap_or(""),
+                ),
                 tool: tool.to_string(),
             })
         })
@@ -939,7 +959,12 @@ fn article_label(raw: &str) -> String {
 }
 
 fn normalize_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 fn compact_keyword(question: &str) -> String {
@@ -949,8 +974,7 @@ fn compact_keyword(question: &str) -> String {
         .filter(|ch| {
             !matches!(
                 ch,
-                '\n'
-                    | '\r'
+                '\n' | '\r'
                     | '\t'
                     | '，'
                     | ','

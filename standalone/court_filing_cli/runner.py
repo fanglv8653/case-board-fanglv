@@ -10,6 +10,7 @@ from typing import Any
 
 from court_filing_cli.progress import emit
 from court_filing_cli.schemas import CaseData
+from court_filing_cli.secrets import redact_text
 
 logger = logging.getLogger("court_filing_cli.runner")
 
@@ -64,7 +65,6 @@ def run_filing(
     account: str,
     password: str,
     output_dir: str,
-    cookie_dir: str | None = None,
     headless: bool = False,
     save_screenshot: bool = False,
     captcha_mode: str = "auto",
@@ -77,7 +77,6 @@ def run_filing(
         account: 一张网账号
         password: 一张网密码
         output_dir: 输出目录（截图等）
-        cookie_dir: Cookie 存储目录
         headless: 是否无头模式
         save_screenshot: 是否保存截图（注意：立案截图依赖 Django，CLI 版默认 False）
 
@@ -85,17 +84,8 @@ def run_filing(
         {"success": bool, "message": str, "url": str}
     """
     from court_filing_cli.browser import create_browser
-    from court_filing_cli.cookie_service import CookieService
     from court_filing_cli.sites.court_zxfw import CourtZxfwService
     from court_filing_cli.sites.court_zxfw_filing.service import CourtZxfwFilingService
-
-    # ── 准备 Cookie ──
-    cookie_service = None
-    if cookie_dir:
-        import os
-        safe_account = account.replace("@", "_at_").replace("/", "_")
-        cookie_path = os.path.join(cookie_dir, f"court_zxfw_{safe_account}.json")
-        cookie_service = CookieService(storage_path=cookie_path)
 
     # ── 组装 case_data dict ──
     case_data_dict = _build_case_data_dict(case_data, materials)
@@ -109,7 +99,7 @@ def run_filing(
             login_service = CourtZxfwService(
                 page=page,
                 context=context,
-                cookie_service=cookie_service,
+                cookie_service=None,
                 captcha_recognizer=captcha_recognizer,
                 debug_dir=output_dir if save_screenshot else None,
             )
@@ -158,6 +148,7 @@ def run_filing(
 
     except Exception as e:
         timing["overall_end"] = time.monotonic()
-        logger.error("立案流程异常: %s", e, exc_info=True)
-        emit("system", "cli.error", f"立案流程异常: {e}", level="error", traceback=str(e))
-        return {"success": False, "message": f"立案流程异常: {e}", "timing": timing}
+        safe_error = redact_text(e)
+        logger.error("立案流程异常: %s", safe_error)
+        emit("system", "cli.error", f"立案流程异常: {safe_error}", level="error")
+        return {"success": False, "message": f"立案流程异常: {safe_error}", "timing": timing}

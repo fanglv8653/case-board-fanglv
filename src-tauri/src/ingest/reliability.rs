@@ -141,7 +141,10 @@ mod tests {
     }
     #[test]
     fn english_case_type_routes_criminal_before_civil_keywords() {
-        assert_eq!(classify_domain(Some("criminal"), "原告被告"), Domain::Criminal);
+        assert_eq!(
+            classify_domain(Some("criminal"), "原告被告"),
+            Domain::Criminal
+        );
     }
     #[test]
     fn chunks_and_dedupes() {

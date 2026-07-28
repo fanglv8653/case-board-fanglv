@@ -25,7 +25,7 @@ static RING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 /// 内部用,生产代码请用 `dlog!()` 宏。
 pub fn push_log(line: String) {
     // 先脱敏(路径里可能含当事人姓名)
-    let safe = crate::feedback::sanitize_paths(&line);
+    let safe = crate::security::redaction::redact(&crate::feedback::sanitize_paths(&line));
     eprintln!("{}", safe);
     if let Ok(mut g) = RING.lock() {
         if g.len() >= RING_CAPACITY {
@@ -82,7 +82,7 @@ fn write_crash_log(payload: &str, location: &str) {
         "==== CaseBoard v{} panic @ {} ====\n[panic] {} @ {}\n--- 最近日志({} 行) ---\n{}\n\n",
         env!("CARGO_PKG_VERSION"),
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        crate::feedback::sanitize_paths(payload),
+        crate::security::redaction::redact(&crate::feedback::sanitize_paths(payload)),
         location,
         recent.len(),
         recent.join("\n"),

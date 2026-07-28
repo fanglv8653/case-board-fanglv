@@ -14,6 +14,7 @@ pub mod cache;
 pub mod experience;
 pub mod hash;
 pub mod init;
+pub mod relocation;
 pub mod search;
 pub mod semantic;
 pub mod share;

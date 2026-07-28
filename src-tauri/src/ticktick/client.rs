@@ -63,7 +63,7 @@ pub async fn list_projects(
         .send()
         .await
         .map_err(|e| format!("拉取清单列表失败:{e}"))?;
-    read_json(resp, "清单列表").await
+    read_json(resp, "清单列表", token).await
 }
 
 /// 探测「收件箱(Inbox)」的真实 id。
@@ -79,7 +79,7 @@ pub async fn discover_inbox_id(cfg: &TickTickConfig, token: &str) -> Result<Stri
         .send()
         .await
         .map_err(|e| format!("探测收件箱失败:{e}"))?;
-    let created: RemoteTask = read_json(resp, "探测收件箱").await?;
+    let created: RemoteTask = read_json(resp, "探测收件箱", token).await?;
     let inbox_id = created
         .project_id
         .clone()
@@ -101,7 +101,7 @@ pub async fn project_data(
         .send()
         .await
         .map_err(|e| format!("拉取清单任务失败:{e}"))?;
-    let data: ProjectData = read_json(resp, "清单任务").await?;
+    let data: ProjectData = read_json(resp, "清单任务", token).await?;
     Ok(data.tasks)
 }
 
@@ -125,7 +125,7 @@ pub async fn create_task(
         .send()
         .await
         .map_err(|e| format!("创建任务失败:{e}"))?;
-    read_json(resp, "创建任务").await
+    read_json(resp, "创建任务", token).await
 }
 
 /// 更新任务标题/日期。官方 Open API 更新走 `POST /open/v1/task/{id}`;
@@ -166,9 +166,9 @@ pub async fn update_task(
             .send()
             .await
             .map_err(|e| format!("更新任务(PUT)失败:{e}"))?;
-        return ok_or_err(resp2, "更新任务").await;
+        return ok_or_err(resp2, "更新任务", token).await;
     }
-    ok_or_err(resp, "更新任务").await
+    ok_or_err(resp, "更新任务", token).await
 }
 
 /// 标记任务完成。
@@ -187,7 +187,7 @@ pub async fn complete_task(
         .send()
         .await
         .map_err(|e| format!("完成任务失败:{e}"))?;
-    ok_or_err(resp, "完成任务").await
+    ok_or_err(resp, "完成任务", token).await
 }
 
 /// 删除任务。
@@ -203,7 +203,7 @@ pub async fn delete_task(
         .send()
         .await
         .map_err(|e| format!("删除任务失败:{e}"))?;
-    ok_or_err(resp, "删除任务").await
+    ok_or_err(resp, "删除任务", token).await
 }
 
 /// 把 `YYYY-MM-DD` 归一成滴答能收的日期时间(全天,北京时区 09:00)。
@@ -223,22 +223,61 @@ fn normalize_due(due: Option<&str>) -> Option<String> {
 async fn read_json<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
     what: &str,
+    token: &str,
 ) -> Result<T, String> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        let snippet: String = text.chars().take(300).collect();
+        let snippet = sanitize_response_error(&text, token);
         return Err(format!("{what} {}:{snippet}", status.as_u16()));
     }
-    serde_json::from_str(&text).map_err(|e| format!("解析{what}响应失败:{e}(原文:{text})"))
+    serde_json::from_str(&text).map_err(|e| {
+        let snippet = sanitize_response_error(&text, token);
+        format!("解析{what}响应失败:{e}(原文:{snippet})")
+    })
 }
 
-async fn ok_or_err(resp: reqwest::Response, what: &str) -> Result<(), String> {
+async fn ok_or_err(resp: reqwest::Response, what: &str, token: &str) -> Result<(), String> {
     let status = resp.status();
     if status.is_success() {
         return Ok(());
     }
     let text = resp.text().await.unwrap_or_default();
-    let snippet: String = text.chars().take(300).collect();
+    let snippet = sanitize_response_error(&text, token);
     Err(format!("{what} {}:{snippet}", status.as_u16()))
+}
+
+const MAX_RESPONSE_ERROR_CHARS: usize = 300;
+
+fn sanitize_response_error(text: &str, token: &str) -> String {
+    let exact = if token.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(token, "[REDACTED]")
+    };
+    crate::security::redaction::redact(&exact)
+        .chars()
+        .take(MAX_RESPONSE_ERROR_CHARS)
+        .collect()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::{sanitize_response_error, MAX_RESPONSE_ERROR_CHARS};
+
+    #[test]
+    fn third_party_error_is_exactly_and_pattern_redacted_before_truncation() {
+        let token = "opaque-real-token-marker";
+        let body = format!(
+            "echo={token}; Authorization: Bearer secondary-secret; {}",
+            "x".repeat(500)
+        );
+
+        let safe = sanitize_response_error(&body, token);
+
+        assert!(!safe.contains(token));
+        assert!(!safe.contains("secondary-secret"));
+        assert!(safe.contains("[REDACTED]"));
+        assert!(safe.chars().count() <= MAX_RESPONSE_ERROR_CHARS);
+    }
 }

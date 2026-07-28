@@ -11,11 +11,9 @@ import {
   Download,
   Upload,
   AlertTriangle,
-  Coins,
   RefreshCw,
   Sparkles,
   Trash2,
-  Plus,
   Plug,
   Brain,
   Wrench,
@@ -31,19 +29,37 @@ import { confirmDialog } from "@/lib/dialog";
 import { Button } from "@/components/ui/button";
 import { HoverHint } from "@/components/HoverHint";
 import { KbSemanticIndexCard } from "@/components/KbSemanticIndexCard";
+import { CredentialField } from "@/components/settings/CredentialField";
 import {
+  LocalUsageDashboard,
+  type LocalUsageMetric,
+  type LocalUsageSnapshot,
+} from "@/components/settings/LocalUsageDashboard";
+import {
+  LocalKbRelocationCard,
+  type LocalKbRelocationProgress,
+  type LocalKbRelocationResult,
+} from "@/components/settings/LocalKbRelocationCard";
+import {
+  buildLocalKbSemanticIndex,
   createLocalKb,
   detectKbStatus,
   exportKbToZip,
   getSettings,
-  getYuandianCreditsOverview,
+  getLocalRecognitionUsage,
   importKbFromZip,
+  migrateCurrentLocalKb,
   pruneYuandianCache,
+  refreshYuandianLocalUsage,
   openInDefaultApp,
   openUrl,
   parseMcpPaste,
+  deleteMcpServer,
   saveSettings,
+  setCredential,
+  switchExistingLocalKb,
   testMcpServer,
+  updateMcpServerMetadata,
   verifyDeepSeekKey,
   verifyMiniMaxKey,
   verifyOpenAICompatKey,
@@ -54,10 +70,10 @@ import {
   type KbConflictStrategy,
   type KbImportResult,
   type KbStatus,
-  type CreditsOverview,
 } from "@/lib/api";
-import type { Settings, McpServerConfig } from "@/lib/types";
+import type { CredentialStatus, Settings, McpServerConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { localDateKey } from "@/lib/localDate";
 import { FEATURE_FLAGS, useFeatureFlag } from "@/lib/featureFlags";
 import { FONT_SCALE, useFontScale } from "@/lib/uiScale";
 import {
@@ -72,22 +88,31 @@ import {
 
 const SETTINGS_SAVED_EVENT = "caseboard:settings-saved";
 
+const CREDENTIAL_LOCATORS = {
+  mineru: "provider/mineru/api-key",
+  paddle: "provider/paddle-vl/api-key",
+  deepseek: "provider/deepseek/api-key",
+  minimax: "provider/minimax/api-key",
+  glm: "provider/glm/api-key",
+  mimo: "provider/mimo/api-key",
+  custom: "provider/custom/api-key",
+  yuandian: "provider/yuandian/api-key",
+  embedding: "provider/embedding/api-key",
+} as const;
+
 type VerifyStatus = "idle" | "verifying" | "ok" | "fail";
 type CompatBackend = "glm" | "mimo" | "custom";
 type CompatSettingKey =
   | "glm_llm_endpoint"
   | "glm_llm_model"
-  | "glm_llm_api_key"
   | "glm_llm_verified_at"
   | "mimo_llm_endpoint"
   | "mimo_llm_model"
-  | "mimo_llm_api_key"
   | "mimo_llm_verified_at"
   | "custom_llm_endpoint"
   | "custom_llm_model"
-  | "custom_llm_api_key"
   | "custom_llm_verified_at";
-type CompatFieldKind = "endpoint" | "model" | "apiKey" | "verifiedAt";
+type CompatFieldKind = "endpoint" | "model" | "verifiedAt";
 
 /** 云端 AI 后端可选项(下拉)。glm/mimo/custom 共用「通用 OpenAI 兼容」配置(compat_llm_*)。 */
 const CLOUD_BACKEND_OPTIONS = [
@@ -122,26 +147,22 @@ const COMPAT_FIELD_KEYS: Record<
   {
     endpoint: CompatSettingKey;
     model: CompatSettingKey;
-    apiKey: CompatSettingKey;
     verifiedAt: CompatSettingKey;
   }
 > = {
   glm: {
     endpoint: "glm_llm_endpoint",
     model: "glm_llm_model",
-    apiKey: "glm_llm_api_key",
     verifiedAt: "glm_llm_verified_at",
   },
   mimo: {
     endpoint: "mimo_llm_endpoint",
     model: "mimo_llm_model",
-    apiKey: "mimo_llm_api_key",
     verifiedAt: "mimo_llm_verified_at",
   },
   custom: {
     endpoint: "custom_llm_endpoint",
     model: "custom_llm_model",
-    apiKey: "custom_llm_api_key",
     verifiedAt: "custom_llm_verified_at",
   },
 };
@@ -165,10 +186,8 @@ function legacyCompatValue(
   kind: CompatFieldKind,
 ): string | null {
   const key =
-    kind === "apiKey"
-      ? "compat_llm_api_key"
-      : kind === "verifiedAt"
-        ? "compat_llm_verified_at"
+    kind === "verifiedAt"
+      ? "compat_llm_verified_at"
         : kind === "model"
           ? "compat_llm_model"
           : "compat_llm_endpoint";
@@ -250,6 +269,7 @@ export function SettingsModal({
     if (onClose) onClose();
   };
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [credentialDrafts, setCredentialDrafts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -326,8 +346,52 @@ export function SettingsModal({
     settings?.yuandian_verified_at,
   ]);
 
+  const credentialConfigured = (locator: string) =>
+    settings?.credential_statuses?.some(
+      (status) => status.locator === locator && status.configured,
+    ) ?? false;
+
+  const credentialStatus = (locator: string) =>
+    settings?.credential_statuses?.find((status) => status.locator === locator);
+
+  const updateCredentialStatus = (status: CredentialStatus) => {
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            credential_statuses: [
+              ...(current.credential_statuses ?? []).filter(
+                (item) => item.locator !== status.locator,
+              ),
+              status,
+            ],
+          }
+        : current,
+    );
+  };
+
+  async function persistCredentialDraft(locator: string) {
+    const value = credentialDrafts[locator]?.trim();
+    if (!value) return;
+    const status = await setCredential(locator, value);
+    setCredentialDrafts((current) => ({ ...current, [locator]: "" }));
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            credential_statuses: [
+              ...(current.credential_statuses ?? []).filter(
+                (item) => item.locator !== locator,
+              ),
+              status,
+            ],
+          }
+        : current,
+    );
+  }
+
   async function handleVerifyMineru() {
-    if (!settings?.mineru_api_key?.trim()) {
+    if (!(credentialDrafts[CREDENTIAL_LOCATORS.mineru]?.trim() || credentialConfigured(CREDENTIAL_LOCATORS.mineru))) {
       setMineruStatus("fail");
       setMineruMsg("请先填入 Token");
       return;
@@ -335,7 +399,8 @@ export function SettingsModal({
     setMineruStatus("verifying");
     setMineruMsg("");
     try {
-      const r = await verifyMinerUKey(settings.mineru_api_key);
+      await persistCredentialDraft(CREDENTIAL_LOCATORS.mineru);
+      const r = await verifyMinerUKey();
       if (r.ok) {
         setMineruStatus("ok");
         setMineruMsg("");
@@ -353,7 +418,7 @@ export function SettingsModal({
   }
 
   async function handleVerifyPaddle() {
-    if (!settings?.paddle_vl_api_key?.trim()) {
+    if (!(credentialDrafts[CREDENTIAL_LOCATORS.paddle]?.trim() || credentialConfigured(CREDENTIAL_LOCATORS.paddle))) {
       setPaddleStatus("fail");
       setPaddleMsg("请先填入访问令牌");
       return;
@@ -361,7 +426,8 @@ export function SettingsModal({
     setPaddleStatus("verifying");
     setPaddleMsg("");
     try {
-      const r = await verifyPaddleVlKey(settings.paddle_vl_api_key);
+      await persistCredentialDraft(CREDENTIAL_LOCATORS.paddle);
+      const r = await verifyPaddleVlKey();
       if (r.ok) {
         setPaddleStatus("ok");
         setPaddleMsg("");
@@ -379,7 +445,8 @@ export function SettingsModal({
   }
 
   async function handleVerifyDeepSeek() {
-    if (!settings?.cloud_llm_api_key?.trim()) {
+    if (!settings) return;
+    if (!(credentialDrafts[CREDENTIAL_LOCATORS.deepseek]?.trim() || credentialConfigured(CREDENTIAL_LOCATORS.deepseek))) {
       setDeepseekStatus("fail");
       setDeepseekMsg("请先填入 API Key");
       return;
@@ -387,8 +454,8 @@ export function SettingsModal({
     setDeepseekStatus("verifying");
     setDeepseekMsg("");
     try {
+      await persistCredentialDraft(CREDENTIAL_LOCATORS.deepseek);
       const r = await verifyDeepSeekKey(
-        settings.cloud_llm_api_key,
         settings.cloud_llm_endpoint ?? undefined,
       );
       if (r.ok) {
@@ -408,7 +475,8 @@ export function SettingsModal({
   }
 
   async function handleVerifyMiniMax() {
-    if (!settings?.minimax_api_key?.trim()) {
+    if (!settings) return;
+    if (!(credentialDrafts[CREDENTIAL_LOCATORS.minimax]?.trim() || credentialConfigured(CREDENTIAL_LOCATORS.minimax))) {
       setMinimaxStatus("fail");
       setMinimaxMsg("请先填入 API Key");
       return;
@@ -416,8 +484,8 @@ export function SettingsModal({
     setMinimaxStatus("verifying");
     setMinimaxMsg("");
     try {
+      await persistCredentialDraft(CREDENTIAL_LOCATORS.minimax);
       const r = await verifyMiniMaxKey(
-        settings.minimax_api_key,
         settings.minimax_endpoint ?? undefined,
       );
       if (r.ok) {
@@ -439,10 +507,10 @@ export function SettingsModal({
   async function handleVerifyCompat() {
     if (!settings || !isCompatBackend(settings.cloud_llm_backend)) return;
     const keys = COMPAT_FIELD_KEYS[settings.cloud_llm_backend];
-    const apiKey = effectiveCompatValue(settings, settings.cloud_llm_backend, "apiKey") || "";
+    const locator = CREDENTIAL_LOCATORS[settings.cloud_llm_backend];
     const endpoint = effectiveCompatValue(settings, settings.cloud_llm_backend, "endpoint") || "";
     const model = effectiveCompatValue(settings, settings.cloud_llm_backend, "model") || "";
-    if (!apiKey.trim()) {
+    if (!(credentialDrafts[locator]?.trim() || credentialConfigured(locator))) {
       setCompatStatus("fail");
       setCompatMsg("请先填入 API Key");
       return;
@@ -450,8 +518,9 @@ export function SettingsModal({
     setCompatStatus("verifying");
     setCompatMsg("");
     try {
+      await persistCredentialDraft(locator);
       const r = await verifyOpenAICompatKey(
-        apiKey,
+        locator,
         endpoint,
         model,
       );
@@ -495,34 +564,39 @@ export function SettingsModal({
     updateField("cloud_llm_backend", null); // deepseek / 默认
   }
 
-  async function handleVerifyYuandian() {
-    if (!settings?.yuandian_api_key?.trim()) {
+  async function handleVerifyYuandian(): Promise<boolean> {
+    if (!(credentialDrafts[CREDENTIAL_LOCATORS.yuandian]?.trim() || credentialConfigured(CREDENTIAL_LOCATORS.yuandian))) {
       setYuandianStatus("fail");
       setYuandianMsg("请先填入 API Key");
-      return;
+      return false;
     }
     setYuandianStatus("verifying");
     setYuandianMsg("");
     try {
-      const r = await verifyYuandianKey(settings.yuandian_api_key);
+      await persistCredentialDraft(CREDENTIAL_LOCATORS.yuandian);
+      const r = await verifyYuandianKey();
       if (r.ok) {
         setYuandianStatus("ok");
         setYuandianMsg("");
         updateField("yuandian_verified_at", new Date().toISOString());
+        return true;
       } else {
         setYuandianStatus("fail");
         setYuandianMsg(r.message);
         updateField("yuandian_verified_at", null);
+        return false;
       }
     } catch (e) {
       setYuandianStatus("fail");
       setYuandianMsg(String(e));
       updateField("yuandian_verified_at", null);
+      return false;
     }
   }
 
   async function handleVerifyEmbedding() {
-    if (!settings?.embedding_api_key?.trim()) {
+    if (!settings) return;
+    if (!(credentialDrafts[CREDENTIAL_LOCATORS.embedding]?.trim() || credentialConfigured(CREDENTIAL_LOCATORS.embedding))) {
       setEmbeddingStatus("fail");
       setEmbeddingMsg("请先填入 API Key");
       return;
@@ -530,10 +604,10 @@ export function SettingsModal({
     setEmbeddingStatus("verifying");
     setEmbeddingMsg("");
     try {
+      await persistCredentialDraft(CREDENTIAL_LOCATORS.embedding);
       const dim = await verifyEmbeddingKey(
         settings.embedding_endpoint ?? "",
         settings.embedding_model ?? "",
-        settings.embedding_api_key,
       );
       setEmbeddingStatus("ok");
       setEmbeddingMsg(`✓ 已验证 · 向量维度 ${dim}`);
@@ -641,9 +715,6 @@ export function SettingsModal({
         keys.model,
         legacyCompatValue(current, "model") || COMPAT_PRESETS[backend].model || null,
       );
-    }
-    if (!compatValue(next, backend, "apiKey")) {
-      setStringSetting(next, keys.apiKey, legacyCompatValue(current, "apiKey"));
     }
     if (!compatValue(next, backend, "verifiedAt")) {
       setStringSetting(next, keys.verifiedAt, legacyCompatValue(current, "verifiedAt"));
@@ -883,14 +954,22 @@ export function SettingsModal({
                       hint="选填。填了即自动成为另一家 OCR 的备用线路;免费额度 2 万页/天"
                     >
                       <div className="flex items-center gap-2">
+                        <div className="flex-1">
+                          <CredentialField
+                            label="PaddleOCR 访问令牌"
+                            locator={CREDENTIAL_LOCATORS.paddle}
+                            status={credentialStatus(CREDENTIAL_LOCATORS.paddle)}
+                            onStatusChange={updateCredentialStatus}
+                          />
+                        </div>
                         <input
                           type="password"
-                          value={settings.paddle_vl_api_key ?? ""}
+                          value={credentialDrafts[CREDENTIAL_LOCATORS.paddle] ?? ""}
                           onChange={(e) => {
-                            updateField(
-                              "paddle_vl_api_key",
-                              e.target.value || null,
-                            );
+                            setCredentialDrafts((current) => ({
+                              ...current,
+                              [CREDENTIAL_LOCATORS.paddle]: e.target.value,
+                            }));
                             // 改 token 就重置验证状态;清空 token 时主力退回 MinerU
                             if (paddleStatus !== "idle") {
                               setPaddleStatus("idle");
@@ -902,7 +981,7 @@ export function SettingsModal({
                             }
                           }}
                           placeholder="AI Studio 访问令牌"
-                          className={cn(inputCls, "flex-1")}
+                          className="hidden"
                           autoComplete="off"
                         />
                         <VerifyStatusIcon status={paddleStatus} />
@@ -914,7 +993,8 @@ export function SettingsModal({
                           onClick={handleVerifyPaddle}
                           disabled={
                             paddleStatus === "verifying" ||
-                            !settings.paddle_vl_api_key?.trim()
+                            !credentialDrafts[CREDENTIAL_LOCATORS.paddle]?.trim() &&
+                            !credentialConfigured(CREDENTIAL_LOCATORS.paddle)
                           }
                         >
                           {paddleStatus === "verifying" ? (
@@ -946,11 +1026,22 @@ export function SettingsModal({
                   >
                     <Field label="API Token">
                       <div className="flex items-center gap-2">
+                        <div className="flex-1">
+                          <CredentialField
+                            label="MinerU API Token"
+                            locator={CREDENTIAL_LOCATORS.mineru}
+                            status={credentialStatus(CREDENTIAL_LOCATORS.mineru)}
+                            onStatusChange={updateCredentialStatus}
+                          />
+                        </div>
                         <input
                           type="password"
-                          value={settings.mineru_api_key ?? ""}
+                          value={credentialDrafts[CREDENTIAL_LOCATORS.mineru] ?? ""}
                           onChange={(e) => {
-                            updateField("mineru_api_key", e.target.value || null);
+                            setCredentialDrafts((current) => ({
+                              ...current,
+                              [CREDENTIAL_LOCATORS.mineru]: e.target.value,
+                            }));
                             // 改 token 就重置验证状态
                             if (mineruStatus !== "idle") {
                               setMineruStatus("idle");
@@ -959,7 +1050,7 @@ export function SettingsModal({
                             }
                           }}
                           placeholder="eyJ0eXBl..."
-                          className={cn(inputCls, "flex-1")}
+                          className="hidden"
                           autoComplete="off"
                         />
                         <VerifyStatusIcon status={mineruStatus} />
@@ -971,7 +1062,8 @@ export function SettingsModal({
                           onClick={handleVerifyMineru}
                           disabled={
                             mineruStatus === "verifying" ||
-                            !settings.mineru_api_key?.trim()
+                            !credentialDrafts[CREDENTIAL_LOCATORS.mineru]?.trim() &&
+                            !credentialConfigured(CREDENTIAL_LOCATORS.mineru)
                           }
                         >
                           {mineruStatus === "verifying" ? (
@@ -1027,7 +1119,7 @@ export function SettingsModal({
                         建议用 <strong>PaddleOCR 为主、MinerU 备用</strong> ——
                         PaddleOCR 速度更快、免费额度更高(2 万页/天 vs MinerU 1 千页/天),
                         批量导入更不容易卡。
-                        {!settings.paddle_vl_api_key?.trim() &&
+                        {!credentialConfigured(CREDENTIAL_LOCATORS.paddle) &&
                           "(需先在上方「PaddleOCR」卡填访问令牌)"}
                       </p>
                     </Field>
@@ -1046,14 +1138,22 @@ export function SettingsModal({
               >
                 <Field label="API Key">
                   <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <CredentialField
+                        label="元典 API Key"
+                        locator={CREDENTIAL_LOCATORS.yuandian}
+                        status={credentialStatus(CREDENTIAL_LOCATORS.yuandian)}
+                        onStatusChange={updateCredentialStatus}
+                      />
+                    </div>
                     <input
                       type="password"
-                      value={settings.yuandian_api_key ?? ""}
+                      value={credentialDrafts[CREDENTIAL_LOCATORS.yuandian] ?? ""}
                       onChange={(e) => {
-                        updateField(
-                          "yuandian_api_key",
-                          e.target.value || null,
-                        );
+                        setCredentialDrafts((current) => ({
+                          ...current,
+                          [CREDENTIAL_LOCATORS.yuandian]: e.target.value,
+                        }));
                         // 改 key 就重置验证状态
                         if (yuandianStatus !== "idle") {
                           setYuandianStatus("idle");
@@ -1062,7 +1162,7 @@ export function SettingsModal({
                         }
                       }}
                       placeholder="sk_..."
-                      className={cn(inputCls, "flex-1")}
+                      className="hidden"
                       autoComplete="off"
                     />
                     <VerifyStatusIcon status={yuandianStatus} />
@@ -1074,7 +1174,8 @@ export function SettingsModal({
                       onClick={handleVerifyYuandian}
                       disabled={
                         yuandianStatus === "verifying" ||
-                        !settings.yuandian_api_key?.trim()
+                        !credentialDrafts[CREDENTIAL_LOCATORS.yuandian]?.trim() &&
+                        !credentialConfigured(CREDENTIAL_LOCATORS.yuandian)
                       }
                     >
                       {yuandianStatus === "verifying" ? (
@@ -1131,14 +1232,22 @@ export function SettingsModal({
                   >
                     <Field label="API Key">
                       <div className="flex items-center gap-2">
+                        <div className="flex-1">
+                          <CredentialField
+                            label="DeepSeek API Key"
+                            locator={CREDENTIAL_LOCATORS.deepseek}
+                            status={credentialStatus(CREDENTIAL_LOCATORS.deepseek)}
+                            onStatusChange={updateCredentialStatus}
+                          />
+                        </div>
                         <input
                           type="password"
-                          value={settings.cloud_llm_api_key ?? ""}
+                          value={credentialDrafts[CREDENTIAL_LOCATORS.deepseek] ?? ""}
                           onChange={(e) => {
-                            updateField(
-                              "cloud_llm_api_key",
-                              e.target.value || null,
-                            );
+                            setCredentialDrafts((current) => ({
+                              ...current,
+                              [CREDENTIAL_LOCATORS.deepseek]: e.target.value,
+                            }));
                             if (deepseekStatus !== "idle") {
                               setDeepseekStatus("idle");
                               setDeepseekMsg("");
@@ -1146,7 +1255,7 @@ export function SettingsModal({
                             }
                           }}
                           placeholder="sk-..."
-                          className={cn(inputCls, "flex-1")}
+                          className="hidden"
                           autoComplete="off"
                         />
                         <VerifyStatusIcon status={deepseekStatus} />
@@ -1158,7 +1267,8 @@ export function SettingsModal({
                           onClick={handleVerifyDeepSeek}
                           disabled={
                             deepseekStatus === "verifying" ||
-                            !settings.cloud_llm_api_key?.trim()
+                            !credentialDrafts[CREDENTIAL_LOCATORS.deepseek]?.trim() &&
+                            !credentialConfigured(CREDENTIAL_LOCATORS.deepseek)
                           }
                         >
                           {deepseekStatus === "verifying" ? (
@@ -1216,14 +1326,22 @@ export function SettingsModal({
                   >
                     <Field label="API Key">
                       <div className="flex items-center gap-2">
+                        <div className="flex-1">
+                          <CredentialField
+                            label="MiniMax API Key"
+                            locator={CREDENTIAL_LOCATORS.minimax}
+                            status={credentialStatus(CREDENTIAL_LOCATORS.minimax)}
+                            onStatusChange={updateCredentialStatus}
+                          />
+                        </div>
                         <input
                           type="password"
-                          value={settings.minimax_api_key ?? ""}
+                          value={credentialDrafts[CREDENTIAL_LOCATORS.minimax] ?? ""}
                           onChange={(e) => {
-                            updateField(
-                              "minimax_api_key",
-                              e.target.value || null,
-                            );
+                            setCredentialDrafts((current) => ({
+                              ...current,
+                              [CREDENTIAL_LOCATORS.minimax]: e.target.value,
+                            }));
                             if (minimaxStatus !== "idle") {
                               setMinimaxStatus("idle");
                               setMinimaxMsg("");
@@ -1231,7 +1349,7 @@ export function SettingsModal({
                             }
                           }}
                           placeholder="填入 MiniMax 平台的 API Key"
-                          className={cn(inputCls, "flex-1")}
+                          className="hidden"
                           autoComplete="off"
                         />
                         <VerifyStatusIcon status={minimaxStatus} />
@@ -1243,7 +1361,8 @@ export function SettingsModal({
                           onClick={handleVerifyMiniMax}
                           disabled={
                             minimaxStatus === "verifying" ||
-                            !settings.minimax_api_key?.trim()
+                            !credentialDrafts[CREDENTIAL_LOCATORS.minimax]?.trim() &&
+                            !credentialConfigured(CREDENTIAL_LOCATORS.minimax)
                           }
                         >
                           {minimaxStatus === "verifying" ? (
@@ -1301,7 +1420,8 @@ export function SettingsModal({
                         : "custom";
                       const preset = COMPAT_PRESETS[cur];
                       const keys = COMPAT_FIELD_KEYS[cur];
-                      const apiKey = effectiveCompatValue(settings, cur, "apiKey") ?? "";
+                      const locator = CREDENTIAL_LOCATORS[cur];
+                      const apiKey = credentialDrafts[locator] ?? "";
                       const model = effectiveCompatValue(settings, cur, "model") ?? "";
                       const endpoint =
                         effectiveCompatValue(settings, cur, "endpoint") ??
@@ -1332,18 +1452,26 @@ export function SettingsModal({
                         >
                           <Field label="API Key">
                             <div className="flex items-center gap-2">
+                              <div className="flex-1">
+                                <CredentialField
+                                  label={`${preset.label} API Key`}
+                                  locator={locator}
+                                  status={credentialStatus(locator)}
+                                  onStatusChange={updateCredentialStatus}
+                                />
+                              </div>
                               <input
                                 type="password"
                                 value={apiKey}
                                 onChange={(e) => {
-                                  updateField(
-                                    keys.apiKey,
-                                    e.target.value || null,
-                                  );
+                                  setCredentialDrafts((current) => ({
+                                    ...current,
+                                    [locator]: e.target.value,
+                                  }));
                                   onConfigChange();
                                 }}
                                 placeholder="填入服务商平台的 API Key"
-                                className={cn(inputCls, "flex-1")}
+                                className="hidden"
                                 autoComplete="off"
                               />
                               <VerifyStatusIcon status={compatStatus} />
@@ -1355,7 +1483,8 @@ export function SettingsModal({
                                 onClick={handleVerifyCompat}
                                 disabled={
                                   compatStatus === "verifying" ||
-                                  !apiKey.trim()
+                                  !apiKey.trim() &&
+                                  !credentialConfigured(locator)
                                 }
                               >
                                 {compatStatus === "verifying" ? (
@@ -1433,11 +1562,22 @@ export function SettingsModal({
               >
                 <Field label="API Key">
                   <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <CredentialField
+                        label="Embedding API Key"
+                        locator={CREDENTIAL_LOCATORS.embedding}
+                        status={credentialStatus(CREDENTIAL_LOCATORS.embedding)}
+                        onStatusChange={updateCredentialStatus}
+                      />
+                    </div>
                     <input
                       type="password"
-                      value={settings.embedding_api_key ?? ""}
+                      value={credentialDrafts[CREDENTIAL_LOCATORS.embedding] ?? ""}
                       onChange={(e) => {
-                        updateField("embedding_api_key", e.target.value || null);
+                        setCredentialDrafts((current) => ({
+                          ...current,
+                          [CREDENTIAL_LOCATORS.embedding]: e.target.value,
+                        }));
                         if (embeddingStatus !== "idle") {
                           setEmbeddingStatus("idle");
                           setEmbeddingMsg("");
@@ -1445,7 +1585,7 @@ export function SettingsModal({
                         }
                       }}
                       placeholder="sk-..."
-                      className={cn(inputCls, "flex-1")}
+                      className="hidden"
                       autoComplete="off"
                     />
                     <VerifyStatusIcon status={embeddingStatus} />
@@ -1457,7 +1597,8 @@ export function SettingsModal({
                       onClick={handleVerifyEmbedding}
                       disabled={
                         embeddingStatus === "verifying" ||
-                        !settings.embedding_api_key?.trim()
+                        !credentialDrafts[CREDENTIAL_LOCATORS.embedding]?.trim() &&
+                        !credentialConfigured(CREDENTIAL_LOCATORS.embedding)
                       }
                     >
                       {embeddingStatus === "verifying" ? (
@@ -1482,7 +1623,7 @@ export function SettingsModal({
               {/* ── 知识库:法律向量检索维护(法条+案例+企业语义索引)── */}
               {tab === "kb" && (
               <KbSemanticIndexCard
-                embeddingConfigured={!!settings.embedding_api_key?.trim()}
+                embeddingConfigured={credentialConfigured(CREDENTIAL_LOCATORS.embedding)}
                 autoIndex={settings.kb_semantic_auto_index !== false}
                 onAutoChange={(v) => updateField("kb_semantic_auto_index", v)}
               />
@@ -1490,14 +1631,9 @@ export function SettingsModal({
 
               {/* 快递100 配置已迁到「法律工具 → 快递查询」页内,就近配置(2026-06-16)。 */}
 
-              {/* ── 数据源:元典积分账(本月统计)── */}
+              {/* ── 数据源:元典本地估算 + 识别服务本地用量 ── */}
               {tab === "datasource" && (
-              <YuandianCreditsCard
-                monthlyLimit={settings.yuandian_monthly_credit_limit ?? null}
-                onLimitChange={(n) =>
-                  updateField("yuandian_monthly_credit_limit", n)
-                }
-              />
+              <IntegratedUsageDashboard onValidateConnection={handleVerifyYuandian} />
               )}
 
               {/* ── 知识库:本地知识库三态卡 ── */}
@@ -1507,6 +1643,16 @@ export function SettingsModal({
                 kbEnabled={settings.local_kb_enabled !== false}
                 onKbRootChange={(p) => updateField("local_kb_root", p)}
                 onKbEnabledChange={(b) => updateField("local_kb_enabled", b)}
+              />
+              )}
+
+              {tab === "kb" && (
+              <IntegratedLocalKbRelocationCard
+                configuredRoot={settings.local_kb_root ?? null}
+                onRootChanged={(path) => {
+                  updateField("local_kb_root", path);
+                  updateField("local_kb_enabled", true);
+                }}
               />
               )}
 
@@ -1521,7 +1667,7 @@ export function SettingsModal({
               {/* ── 数据源:外部工具(MCP)白名单(企查查/万得/北大法宝 等远程 HTTP)──
                   整宽,AI 助手消费外部 MCP server 工具 */}
               {tab === "datasource" && (
-              <McpServersCard
+              <SecureMcpServersCard
                 servers={settings.mcp_servers ?? []}
                 onChange={(next) => updateField("mcp_servers", next)}
               />
@@ -2072,115 +2218,39 @@ const mcpTextareaCls = cn(
   "focus:outline-none focus:border-foreground focus:ring-1 focus:ring-foreground/20",
 );
 
-/** args: 一行一个,去首尾空白 + 丢空行。 */
-function argsToText(args: string[]): string {
-  return args.join("\n");
-}
-function textToArgs(t: string): string[] {
-  return t
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-/** env: 一行 `KEY=VALUE`,首个 `=` 为分隔;无 `=` / 空 key 的行丢弃。 */
-function envToText(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("\n");
-}
-function textToEnv(t: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of t.split("\n")) {
-    const eq = line.indexOf("=");
-    if (eq <= 0) continue; // 无 = 或 = 在首位(空 key)→ 丢弃
-    const key = line.slice(0, eq).trim();
-    if (!key) continue;
-    out[key] = line.slice(eq + 1).trim();
-  }
-  return out;
-}
-
-// 每行一个 client-only 稳定 id(**不进**保存形状,避免污染后端 serde)。仅为 React key 稳定 —
-// mid-list 删除时若用数组下标当 key,行内本地编辑缓冲会串到别的行槽位(经典 index-key bug)。
-let mcpRowSeq = 0;
-function nextMcpRowId(): string {
-  mcpRowSeq += 1;
-  return `mcp-row-${mcpRowSeq}`;
-}
-
-function McpServersCard({
+function SecureMcpServersCard({
   servers,
   onChange,
 }: {
   servers: McpServerConfig[];
   onChange: (next: McpServerConfig[]) => void;
 }) {
-  // 内部维护 {id, cfg}:id 只为稳定 key。挂载时 seed 一次自 props(本卡在 settings 加载后才
-  // 渲染,props 即加载值);此后本卡是 mcp_servers 的唯一改动源,无需 reactive 同步回 props。
-  const [rows, setRows] = useState<{ id: string; cfg: McpServerConfig }[]>(() =>
-    servers.map((cfg) => ({ id: nextMcpRowId(), cfg })),
-  );
-  function commit(next: { id: string; cfg: McpServerConfig }[]) {
-    setRows(next);
-    onChange(next.map((r) => r.cfg));
-  }
-  function patchRow(id: string, cfg: McpServerConfig) {
-    commit(rows.map((r) => (r.id === id ? { ...r, cfg } : r)));
-  }
-  function addHttpServer() {
-    commit([
-      ...rows,
-      {
-        id: nextMcpRowId(),
-        cfg: {
-          name: "",
-          transport: { type: "http", url: "", headers: {} },
-          enabled: true,
-        },
-      },
-    ]);
-  }
-  function addStdioServer() {
-    commit([
-      ...rows,
-      {
-        id: nextMcpRowId(),
-        cfg: {
-          name: "",
-          transport: { type: "stdio", command: "npx", args: [], env: {} },
-          enabled: true,
-        },
-      },
-    ]);
-  }
-  function removeRow(id: string) {
-    commit(rows.filter((r) => r.id !== id));
-  }
-
-  // ---- 智能粘贴识别(把平台接入文档的配置整段粘进来,自动拆成 server)----
+  const [rows, setRows] = useState(servers);
   const [pasteText, setPasteText] = useState("");
   const [pasteBusy, setPasteBusy] = useState(false);
-  const [pasteMsg, setPasteMsg] = useState<{ kind: "ok" | "warn" | "err"; lines: string[] } | null>(
-    null,
-  );
-  async function recognizePaste() {
+  const [message, setMessage] = useState<{ error: boolean; lines: string[] } | null>(null);
+
+  useEffect(() => setRows(servers), [servers]);
+
+  function commit(next: McpServerConfig[]) {
+    setRows(next);
+    onChange(next);
+  }
+
+  async function importPaste() {
     if (!pasteText.trim() || pasteBusy) return;
     setPasteBusy(true);
-    setPasteMsg(null);
+    setMessage(null);
     try {
-      const r = await parseMcpPaste(pasteText);
-      const existing = new Set(rows.map((x) => x.cfg.name));
-      const fresh = r.servers.filter((s) => !existing.has(s.name));
-      const skipped = r.servers.length - fresh.length;
-      commit([...rows, ...fresh.map((cfg) => ({ id: nextMcpRowId(), cfg }))]);
+      const result = await parseMcpPaste(pasteText);
+      commit(result.servers);
       setPasteText("");
-      const lines = [
-        `已识别 ${r.servers.length} 个 server${skipped > 0 ? `(${skipped} 个同名已存在,跳过)` : ""}，请逐个点「测试连接」确认能用。`,
-        ...r.warnings,
-      ];
-      setPasteMsg({ kind: r.warnings.length > 0 ? "warn" : "ok", lines });
-    } catch (e) {
-      setPasteMsg({ kind: "err", lines: [String(e)] });
+      setMessage({
+        error: false,
+        lines: ["配置已安全导入；敏感值未返回界面。", ...result.warnings],
+      });
+    } catch (error) {
+      setMessage({ error: true, lines: [String(error)] });
     } finally {
       setPasteBusy(false);
     }
@@ -2196,21 +2266,18 @@ function McpServersCard({
               外部工具（MCP）
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              让 AI 助手调外部数据平台的工具（加能力不必更新 App）。元典 / 企查查 / 万得 / 北大法宝等
-              平台的云端 MCP 都是「远程 HTTP」型：粘服务地址 + 访问令牌即可，无需安装任何环境。
-              <br />
-              不配 = 关闭，零影响。配错或连不上的 server 会被自动跳过，不影响 AI 助手正常使用。
+              配置中的令牌、请求头、敏感 URL 与环境变量会立即迁入 Windows
+              凭据管理器。界面和 settings.json 只保存稳定 UUID、定位符及“已配置”状态。
             </p>
           </div>
           <button
             type="button"
             onClick={() =>
-              openUrl("https://github.com/modelcontextprotocol/servers").catch((e) =>
-                console.warn("openUrl failed", e),
+              openUrl("https://github.com/modelcontextprotocol/servers").catch((error) =>
+                console.warn("openUrl failed", error),
               )
             }
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 transition-colors hover:border-sky-300 hover:bg-sky-100"
-            title="modelcontextprotocol/servers"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 hover:bg-sky-100"
           >
             <ExternalLink className="size-3.5" />
             看可用 server
@@ -2218,299 +2285,161 @@ function McpServersCard({
         </div>
 
         <div className="space-y-3 rounded-lg border border-border bg-background/50 p-4">
-          {/* 智能粘贴:推荐入口,平台文档配置整段粘进来自动识别 */}
           <div className="rounded-md border border-sky-200 bg-sky-50/50 p-3">
             <p className="mb-1.5 text-xs font-medium text-sky-900">
-              ⚡ 快捷接入：把平台「接入指南」里的配置整段粘进来（JSON 或 claude mcp add
-              命令都认），自动识别填好
+              粘贴平台接入配置。导入成功后输入框会立即清空，敏感值不会回填。
             </p>
             <textarea
               rows={3}
               value={pasteText}
-              onChange={(e) => setPasteText(e.target.value)}
-              placeholder={'例如平台文档里的:\n{ "mcpServers": { "xxx": { "type": "http", "url": "https://...", "headers": { "Authorization": "Bearer 你的密钥" } } } }'}
+              onChange={(event) => setPasteText(event.target.value)}
+              placeholder="粘贴 mcpServers JSON 或 claude mcp add 命令"
               className={mcpTextareaCls}
               spellCheck={false}
               autoComplete="off"
             />
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={recognizePaste}
-                disabled={pasteBusy || !pasteText.trim()}
-                className="inline-flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {pasteBusy ? "识别中…" : "识别并添加"}
-              </button>
-              <span className="text-caption text-muted-foreground">
-                本地解析，不联网；令牌只存本机
-              </span>
-            </div>
-            {pasteMsg && (
-              <div
-                className={cn(
-                  "mt-2 space-y-0.5 text-xs",
-                  pasteMsg.kind === "ok" && "text-emerald-700",
-                  pasteMsg.kind === "warn" && "text-amber-700",
-                  pasteMsg.kind === "err" && "text-red-600",
-                )}
-              >
-                {pasteMsg.lines.map((l, i) => (
-                  <p key={i}>{l}</p>
+            <button
+              type="button"
+              onClick={importPaste}
+              disabled={pasteBusy || !pasteText.trim()}
+              className="mt-2 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+            >
+              {pasteBusy ? "安全导入中…" : "安全导入"}
+            </button>
+            {message && (
+              <div className={cn("mt-2 text-xs", message.error ? "text-red-600" : "text-emerald-700")}>
+                {message.lines.map((line, index) => (
+                  <p key={index}>{line}</p>
                 ))}
               </div>
             )}
           </div>
 
-          {rows.length === 0 && (
-            <p className="text-xs text-muted-foreground">
-              还没有配置外部工具。把平台给的配置粘到上方识别，或点下方按钮手动添加。
-            </p>
+          {rows.length === 0 ? (
+            <p className="text-xs text-muted-foreground">尚未配置外部工具。</p>
+          ) : (
+            rows.map((server) => (
+              <SecureMcpServerRow key={server.server_id} server={server} onChange={commit} />
+            ))
           )}
-
-          {rows.map((r) => (
-            <McpServerRow
-              key={r.id}
-              cfg={r.cfg}
-              onChange={(c) => patchRow(r.id, c)}
-              onRemove={() => removeRow(r.id)}
-            />
-          ))}
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={addHttpServer}
-              className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-sky-300 bg-sky-50/60 px-3 py-1.5 text-xs font-medium text-sky-700 transition-colors hover:border-sky-400 hover:bg-sky-50"
-            >
-              <Plus className="size-3.5" />
-              添加远程 server（HTTP，推荐）
-            </button>
-            <button
-              type="button"
-              onClick={addStdioServer}
-              className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground"
-            >
-              <Plus className="size-3.5" />
-              添加本地命令（stdio）
-            </button>
-          </div>
         </div>
       </section>
     </div>
   );
 }
 
-/** 单个 MCP server 行。**关键**:args/env 用本行 local state 当「自由文本编辑缓冲」——
- *  直接拿派生 parse(argsToText/envToText)当受控 `value` 会吃键盘(env 里 `KEY` 还没敲到 `=`
- *  就被 textToEnv 丢掉、args 回车空行被 textToArgs 滤掉→光标弹回)。display 用原始字符串,
- *  只在 onChange 时 parse 进保存模型。buffer 仅挂载时 seed 一次(本行后续变化都源自 buffer 自身)。 */
-function McpServerRow({
-  cfg,
+function SecureMcpServerRow({
+  server,
   onChange,
-  onRemove,
 }: {
-  cfg: McpServerConfig;
-  onChange: (c: McpServerConfig) => void;
-  onRemove: () => void;
+  server: McpServerConfig;
+  onChange: (next: McpServerConfig[]) => void;
 }) {
-  const isStdio = cfg.transport.type === "stdio";
-  const [argsText, setArgsText] = useState(() =>
-    cfg.transport.type === "stdio" ? argsToText(cfg.transport.args) : "",
-  );
-  const [envText, setEnvText] = useState(() =>
-    cfg.transport.type === "stdio" ? envToText(cfg.transport.env) : "",
-  );
-  // http 的 headers 跟 env 同形(KEY=VALUE),同样需要本行编辑缓冲(见组件 doc)
-  const [headersText, setHeadersText] = useState(() =>
-    cfg.transport.type === "http" ? envToText(cfg.transport.headers ?? {}) : "",
-  );
+  const [name, setName] = useState(server.name);
+  const [enabled, setEnabled] = useState(server.enabled);
+  const [busy, setBusy] = useState<"save" | "test" | "delete" | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
 
-  // ---- 连接测试:真连一次(握手+列工具),结果就地显示;配置一改就归零 ----
-  const [test, setTest] = useState<{ s: "idle" | "busy" | "ok" | "err"; msg?: string }>({
-    s: "idle",
-  });
   useEffect(() => {
-    setTest({ s: "idle" });
-  }, [cfg]);
-  async function runTest() {
-    if (test.s === "busy") return;
-    setTest({ s: "busy" });
+    setName(server.name);
+    setEnabled(server.enabled);
+  }, [server]);
+
+  async function saveMetadata() {
+    setBusy("save");
+    setStatus(null);
     try {
-      const r = await testMcpServer(cfg);
-      const names = r.tool_names.slice(0, 5).join("、");
-      setTest({
-        s: "ok",
-        msg: `已连上，发现 ${r.tool_count} 个工具${names ? `：${names}${r.tool_count > 5 ? " …" : ""}` : ""}`,
-      });
-    } catch (e) {
-      setTest({ s: "err", msg: String(e) });
+      onChange(await updateMcpServerMetadata(server.server_id, name, enabled));
+      setStatus("名称和启用状态已保存；凭据定位符保持不变。");
+    } catch (error) {
+      setStatus(String(error));
+    } finally {
+      setBusy(null);
     }
   }
-  // name 会拼进 `mcp__<name>__<tool>`(= DeepSeek 函数名);非 [A-Za-z0-9_-] 后端会清洗成 `_`
-  // (兜底不让整个 tools 数组被拒),但仍提示用户用规范名,避免不同名清洗后撞车。
-  const nameInvalid = cfg.name.length > 0 && !/^[A-Za-z0-9_-]+$/.test(cfg.name);
 
+  async function runTest() {
+    setBusy("test");
+    setStatus(null);
+    try {
+      const report = await testMcpServer(server.server_id);
+      setStatus(`连接成功，发现 ${report.tool_count} 个工具。`);
+    } catch (error) {
+      setStatus(`连接失败：${String(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove() {
+    const confirmed = await confirmDialog("删除该 MCP server 及其本机凭据？此操作不可撤销。", {
+      title: "删除 MCP server",
+      okLabel: "删除",
+      danger: true,
+    });
+    if (!confirmed) return;
+    setBusy("delete");
+    try {
+      onChange(await deleteMcpServer(server.server_id));
+    } catch (error) {
+      setStatus(String(error));
+      setBusy(null);
+    }
+  }
+
+  const secretEntries =
+    server.transport.type === "http"
+      ? Object.entries(server.transport.headers)
+      : Object.entries(server.transport.env);
   return (
-    <div
-      className={cn(
-        "rounded-md border border-border bg-card/60 p-3",
-        !cfg.enabled && "opacity-60",
-      )}
-    >
-      <div className="mb-2 flex items-center gap-2">
+    <div className={cn("rounded-md border border-border bg-card/60 p-3", !enabled && "opacity-70")}>
+      <div className="flex flex-wrap items-center gap-2">
         <input
-          type="text"
-          value={cfg.name}
-          onChange={(e) => onChange({ ...cfg, name: e.target.value })}
-          placeholder="名称（如 filesystem，仅字母数字 _ -）"
-          className={cn(inputCls, "flex-1", nameInvalid && "border-amber-400")}
-          autoComplete="off"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          className={cn(inputCls, "min-w-52 flex-1")}
+          aria-label="MCP server 名称"
         />
-        <label className="flex shrink-0 items-center gap-1.5 text-xs text-foreground">
+        <label className="flex items-center gap-1.5 text-xs">
           <input
             type="checkbox"
-            checked={cfg.enabled}
-            onChange={(e) => onChange({ ...cfg, enabled: e.target.checked })}
-            className="size-3.5 accent-sky-600"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+            className="accent-sky-600"
           />
           启用
         </label>
-        <button
-          type="button"
-          onClick={runTest}
-          disabled={test.s === "busy"}
-          className="shrink-0 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 transition-colors hover:border-sky-300 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {test.s === "busy" ? "测试中…" : "测试连接"}
+        <button type="button" onClick={saveMetadata} disabled={busy !== null} className="rounded-md border px-2.5 py-1 text-xs">
+          {busy === "save" ? "保存中…" : "保存"}
         </button>
-        <button
-          type="button"
-          onClick={onRemove}
-          className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-          aria-label="删除"
-          title="删除这个 server"
-        >
+        <button type="button" onClick={runTest} disabled={busy !== null} className="rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs text-sky-700">
+          {busy === "test" ? "测试中…" : "测试连接"}
+        </button>
+        <button type="button" onClick={remove} disabled={busy !== null} className="rounded-md p-1.5 text-muted-foreground hover:text-destructive" aria-label="删除 MCP server">
           <Trash2 className="size-4" />
         </button>
       </div>
 
-      {nameInvalid && (
-        <p className="mb-2 text-caption text-amber-700">
-          名称建议只用字母、数字、下划线或连字符（会作为工具前缀）。
+      <div className="mt-2 space-y-1 text-caption text-muted-foreground">
+        <p>稳定 ID：{server.server_id}</p>
+        <p>
+          {server.transport.type === "http"
+            ? server.transport.url.kind === "secret"
+              ? "服务地址：已安全保存"
+              : `服务地址：${server.transport.url.value}`
+            : `本地命令：${server.transport.command}`}
         </p>
-      )}
-
-      {isStdio ? (
-        <div className="space-y-2.5">
-          <Field label="命令" hint="可执行程序，例：npx / uvx / node">
-            <input
-              type="text"
-              value={cfg.transport.type === "stdio" ? cfg.transport.command : ""}
-              onChange={(e) =>
-                cfg.transport.type === "stdio" &&
-                onChange({
-                  ...cfg,
-                  transport: { ...cfg.transport, command: e.target.value },
-                })
-              }
-              placeholder="npx"
-              className={inputCls}
-              autoComplete="off"
-            />
-          </Field>
-          <Field
-            label="参数（一行一个）"
-            hint="例：第一行 -y，第二行 @modelcontextprotocol/server-filesystem，第三行 /要授权的目录"
-          >
-            <textarea
-              rows={3}
-              value={argsText}
-              onChange={(e) => {
-                const t = e.target.value;
-                setArgsText(t);
-                if (cfg.transport.type === "stdio") {
-                  onChange({ ...cfg, transport: { ...cfg.transport, args: textToArgs(t) } });
-                }
-              }}
-              placeholder={"-y\n@modelcontextprotocol/server-filesystem\n/Users/你/案件目录"}
-              className={mcpTextareaCls}
-              spellCheck={false}
-            />
-          </Field>
-          <Field
-            label="环境变量（选填，一行一个 KEY=VALUE）"
-            hint="放 token 等；只存本机，不进 git / 日志"
-          >
-            <textarea
-              rows={2}
-              value={envText}
-              onChange={(e) => {
-                const t = e.target.value;
-                setEnvText(t);
-                if (cfg.transport.type === "stdio") {
-                  onChange({ ...cfg, transport: { ...cfg.transport, env: textToEnv(t) } });
-                }
-              }}
-              placeholder={"API_KEY=sk-xxxx"}
-              className={mcpTextareaCls}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </Field>
-        </div>
-      ) : (
-        <div className="space-y-2.5">
-          <Field label="服务地址（URL）" hint="平台接入文档给的 MCP 服务地址，https 开头">
-            <input
-              type="text"
-              value={cfg.transport.type === "http" ? cfg.transport.url : ""}
-              onChange={(e) =>
-                cfg.transport.type === "http" &&
-                onChange({
-                  ...cfg,
-                  transport: { ...cfg.transport, url: e.target.value },
-                })
-              }
-              placeholder="https://open.平台域名.com/mcp/xxx/stream"
-              className={inputCls}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </Field>
-          <Field
-            label="请求头（一行一个 KEY=VALUE）"
-            hint="放访问令牌，例：Authorization=Bearer 你的密钥；只存本机，不进 git / 日志"
-          >
-            <textarea
-              rows={2}
-              value={headersText}
-              onChange={(e) => {
-                const t = e.target.value;
-                setHeadersText(t);
-                if (cfg.transport.type === "http") {
-                  onChange({ ...cfg, transport: { ...cfg.transport, headers: textToEnv(t) } });
-                }
-              }}
-              placeholder={"Authorization=Bearer sk-xxxx"}
-              className={mcpTextareaCls}
-              spellCheck={false}
-              autoComplete="off"
-            />
-          </Field>
-        </div>
-      )}
-
-      {test.s === "ok" && <p className="mt-2 text-xs text-emerald-700">✓ {test.msg}</p>}
-      {test.s === "err" && (
-        <p className="mt-2 text-xs text-red-600">
-          ✗ 连接失败：{test.msg}
-          <span className="block text-caption text-muted-foreground">
-            提示：401 = 令牌不对或已过期（去平台重新生成）；403 = 该服务未开通或已到期；超时 =
-            地址不对或网络不通。
-          </span>
-        </p>
-      )}
+        {secretEntries.length > 0 && (
+          <p>
+            {server.transport.type === "http" ? "请求头" : "环境变量"}：
+            {secretEntries
+              .map(([key, reference]) => `${key}（${reference.configured ? "已配置" : "未配置"}）`)
+              .join("、")}
+          </p>
+        )}
+        <p>凭据集合：{server.complete.configured ? "完整" : "不完整（运行时将拒绝连接）"}</p>
+      </div>
+      {status && <p className="mt-2 text-xs text-muted-foreground">{status}</p>}
     </div>
   );
 }
@@ -2953,130 +2882,183 @@ function KbStatsRow({
   );
 }
 
-function YuandianCreditsCard({
-  monthlyLimit,
-  onLimitChange,
+function IntegratedUsageDashboard({
+  onValidateConnection,
 }: {
-  monthlyLimit: number | null;
-  onLimitChange: (n: number | null) => void;
+  onValidateConnection: () => Promise<boolean>;
 }) {
-  const [overview, setOverview] = useState<CreditsOverview | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [snapshot, setSnapshot] = useState<LocalUsageSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refreshLocal = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
-      const o = await getYuandianCreditsOverview();
-      setOverview(o);
-    } catch {
-      // 静默 — 元典没用过时也可能是 0,无所谓
+      const today = localDateKey();
+      const month = today.slice(0, 7);
+      const [daily, monthly, yuandian] = await Promise.all([
+        getLocalRecognitionUsage({ granularity: "day", from: today, to: today }),
+        getLocalRecognitionUsage({ granularity: "month", from: month, to: month }),
+        refreshYuandianLocalUsage(),
+      ]);
+      const mapMetrics = (
+        period: "day" | "month",
+        overview: typeof daily,
+      ): LocalUsageMetric[] =>
+        overview.buckets.map((bucket) => ({
+          period,
+          provider: bucket.providerModel,
+          stage: bucket.stage,
+          success_count: bucket.successCount,
+          failure_count: bucket.failureCount,
+          average_elapsed_ms: bucket.averageElapsedMs,
+          rate_limited_429_count: bucket.rateLimit429Count,
+          page_count: bucket.pageCount,
+          page_count_unavailable_reason: overview.capabilities.pageCountAvailable
+            ? null
+            : overview.capabilities.pageCountReason,
+          fallback_count: bucket.fallbackCount,
+          fallback_unavailable_reason: overview.capabilities.fallbackCountAvailable
+            ? null
+            : overview.capabilities.fallbackCountReason,
+        }));
+      setSnapshot({
+        metrics: [...mapMetrics("day", daily), ...mapMetrics("month", monthly)],
+        last_refreshed_at: yuandian.refreshedAt,
+        official_balance: yuandian.officialBalance,
+        official_balance_unavailable_reason: yuandian.isOfficialBalance
+          ? null
+          : "未提供官方余额接口",
+        yuandian_estimate: yuandian.hasAnyRecord
+          ? {
+              year_month: yuandian.current.year_month,
+              estimated_credits: yuandian.current.credits_used,
+              recorded_api_calls: yuandian.current.api_calls,
+              local_kb_hits: yuandian.current.kb_hits,
+              total_estimated_credits: yuandian.totalEstimatedCredits,
+              estimate_basis: yuandian.estimateBasis,
+              has_any_record: yuandian.hasAnyRecord,
+            }
+          : null,
+      });
+    } catch (error) {
+      setLoadError(formatErr(error));
+      throw error;
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  const cur = overview?.current;
-  const totalQueries = (cur?.api_calls ?? 0) + (cur?.kb_hits ?? 0);
-  const kbHitRate =
-    totalQueries > 0 ? Math.round(((cur?.kb_hits ?? 0) / totalQueries) * 100) : 0;
-  // 跨月归 0:当月没用过但历史有数据 → 补显示上月/累计,免得以为数据丢了
-  const showHistory =
-    (cur?.credits_used ?? 0) === 0 && (overview?.total_credits ?? 0) > 0;
+    refreshLocal().catch(() => undefined);
+  }, [refreshLocal]);
 
   return (
-    <Section
-      title="元典积分账"
-      desc="本月已用积分 / 本地 KB 帮你省了多少次外查"
-    >
-      <div className="grid grid-cols-2 gap-3">
-        <Stat
-          icon={<Coins className="size-4 text-amber-600" />}
-          label={`本月已用(${cur?.year_month ?? "—"})`}
-          value={cur?.credits_used ?? 0}
-          suffix="积分"
-          right={
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={refresh}
-              disabled={loading}
-              title="刷新"
-            >
-              <RefreshCw className={cn("size-3", loading && "animate-spin")} />
-            </Button>
-          }
-        />
-        <Stat
-          icon={<Database className="size-4 text-emerald-600" />}
-          label="本地命中节省"
-          value={cur?.kb_hits ?? 0}
-          suffix={`次 (命中率 ${kbHitRate}%)`}
-        />
-      </div>
-      {showHistory && (
-        <p className="-mt-1 rounded-md bg-sky-50 px-2.5 py-1.5 text-caption text-sky-700 dark:bg-sky-950/30 dark:text-sky-300">
-          本月暂未使用(每月 1 号归零)。
-          {overview?.prev_month &&
-            ` 上月(${overview.prev_month.year_month})用了 ${overview.prev_month.credits_used} 积分;`}
-          {` 历史累计 ${overview?.total_credits ?? 0} 积分 / 帮你省了 ${overview?.total_kb_hits ?? 0} 次外查。`}
-        </p>
-      )}
-      <Field
-        label="月度上限(超出后 chat 自动降级,不再调元典)"
-        hint="留空 = 不限制"
-      >
-        <input
-          type="number"
-          min={0}
-          step={10}
-          value={monthlyLimit ?? ""}
-          onChange={(e) => {
-            const v = e.target.value.trim();
-            onLimitChange(v === "" ? null : Math.max(0, Number(v)));
-          }}
-          placeholder="留空 = 不限"
-          className={inputCls}
-        />
-      </Field>
-    </Section>
+    <div className="lg:col-span-2">
+      <LocalUsageDashboard
+        snapshot={snapshot}
+        loading={loading}
+        loadError={loadError}
+        onValidateConnection={onValidateConnection}
+        onRefreshLocal={refreshLocal}
+      />
+    </div>
   );
 }
 
-function Stat({
-  icon,
-  label,
-  value,
-  suffix,
-  right,
+function IntegratedLocalKbRelocationCard({
+  configuredRoot,
+  onRootChanged,
 }: {
-  icon: React.ReactNode;
-  label: string;
-  value: number | string;
-  suffix?: string;
-  right?: React.ReactNode;
+  configuredRoot: string | null;
+  onRootChanged: (path: string) => void;
 }) {
+  const [currentPath, setCurrentPath] = useState(configuredRoot || "尚未绑定");
+
+  useEffect(() => {
+    detectKbStatus()
+      .then((status) => {
+        if (status.state === "bound") setCurrentPath(status.root);
+      })
+      .catch(() => {
+        if (configuredRoot) setCurrentPath(configuredRoot);
+      });
+  }, [configuredRoot]);
+
+  function progress(
+    callback: (value: LocalKbRelocationProgress) => void,
+    phase: string,
+    message: string,
+  ) {
+    callback({ phase, completed: 0, total: null, message });
+  }
+
+  function mapResult(result: Awaited<ReturnType<typeof switchExistingLocalKb>>): LocalKbRelocationResult {
+    return {
+      target_path: result.new_root,
+      backup_path: result.backup_path || null,
+      recovery_path: null,
+      index_rebuild_required: result.index_rebuild_required,
+    };
+  }
+
+  async function runRelocation(
+    mode: "switch" | "migrate",
+    targetPath: string,
+    onProgress: (value: LocalKbRelocationProgress) => void,
+  ) {
+    progress(
+      onProgress,
+      mode === "switch" ? "validating_existing" : "copying_and_verifying",
+      mode === "switch" ? "正在校验已有知识库…" : "正在复制并校验知识库，旧目录不会删除…",
+    );
+    const backend =
+      mode === "switch"
+        ? await switchExistingLocalKb(targetPath)
+        : await migrateCurrentLocalKb(targetPath);
+    const result = mapResult(backend);
+    setCurrentPath(result.target_path);
+    onRootChanged(result.target_path);
+    return result;
+  }
+
   return (
-    <div className="flex items-start justify-between rounded-md border border-border bg-background p-2.5">
-      <div className="flex min-w-0 items-start gap-2">
-        <div className="mt-0.5 shrink-0">{icon}</div>
-        <div className="min-w-0">
-          <p className="truncate text-caption text-muted-foreground">{label}</p>
-          <p className="text-sm font-semibold tabular-nums">
-            {value}
-            {suffix && (
-              <span className="ml-1 text-caption font-normal text-muted-foreground">
-                {suffix}
-              </span>
-            )}
-          </p>
-        </div>
-      </div>
-      {right}
+    <div className="lg:col-span-2">
+      <LocalKbRelocationCard
+        currentPath={currentPath}
+        onPickDirectory={async () => {
+          const picked = await dialogOpen({ directory: true, multiple: false });
+          return typeof picked === "string" && picked.trim() ? picked : null;
+        }}
+        onConfirm={(mode, targetPath) =>
+          confirmDialog(
+            mode === "switch_existing"
+              ? `切换到已有知识库：\n${targetPath}\n\n旧目录不会删除。`
+              : `迁移当前知识库到：\n${targetPath}\n\n迁移成功后旧目录仍保留为回退备份。`,
+            {
+              title: mode === "switch_existing" ? "确认切换知识库" : "确认迁移知识库",
+              okLabel: mode === "switch_existing" ? "切换" : "迁移",
+            },
+          )
+        }
+        onSwitchExisting={(target, onProgress) =>
+          runRelocation("switch", target, onProgress)
+        }
+        onMigrateCurrent={(target, onProgress) =>
+          runRelocation("migrate", target, onProgress)
+        }
+        onRebuildSemanticIndex={async (_target, onProgress) => {
+          progress(onProgress, "rebuilding_semantic_index", "正在按新目录重建语义索引…");
+          await buildLocalKbSemanticIndex();
+          onProgress({
+            phase: "semantic_index_complete",
+            completed: 1,
+            total: 1,
+            message: "语义索引重建完成。",
+          });
+        }}
+      />
     </div>
   );
 }
