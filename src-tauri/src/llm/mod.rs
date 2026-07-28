@@ -574,8 +574,119 @@ pub async fn extract_case_fields_with_hint(
     // LLM 输出可能带 markdown ```json ... ``` 包裹,容错剥离
     let cleaned = extract_json_from_content(&content);
 
-    serde_json::from_str::<ExtractedFields>(&cleaned)
+    parse_extracted_fields(&cleaned)
         .map_err(|e| LlmError::ContentJson(format!("{}; raw = {}", e, content)))
+}
+
+/// 兼容不同模型对同一抽取契约的常见表达差异。
+///
+/// 刑事 prompt 要求顶层兼容字段保持原有标量/数组格式，而 `criminal` 内的普通字段
+/// 使用 `{ value, confidence, evidence }`。部分模型会把顶层字段也包装成对象，或反过来
+/// 把 `criminal` 字段直接输出为标量。这里在反序列化前只做结构归一，不推断或补写事实。
+fn parse_extracted_fields(cleaned: &str) -> Result<ExtractedFields, serde_json::Error> {
+    let mut value = serde_json::from_str::<serde_json::Value>(cleaned)?;
+    normalize_extracted_fields_value(&mut value);
+    serde_json::from_value(value)
+}
+
+fn normalize_extracted_fields_value(value: &mut serde_json::Value) {
+    let Some(root) = value.as_object_mut() else {
+        return;
+    };
+    if !matches!(
+        root.get("criminal"),
+        Some(serde_json::Value::Object(_))
+    ) {
+        return;
+    }
+
+    const TOP_LEVEL_FIELDS: &[&str] = &[
+        "case_no",
+        "case_type",
+        "court",
+        "cause",
+        "case_stage",
+        "case_status",
+        "filed_at",
+        "expected_close_at",
+        "case_note",
+        "plaintiffs",
+        "defendants",
+        "third_parties",
+        "party_contacts",
+        "claim_amount",
+        "fees",
+        "judges",
+        "court_contacts",
+        "key_dates",
+        "preservations",
+        "invoice",
+    ];
+    for key in TOP_LEVEL_FIELDS {
+        let Some(field) = root.get_mut(*key) else {
+            continue;
+        };
+        let Some(unwrapped) = field
+            .as_object()
+            .and_then(|wrapper| wrapper.get("value"))
+            .cloned()
+        else {
+            continue;
+        };
+        *field = unwrapped;
+    }
+
+    let Some(criminal) = root
+        .get_mut("criminal")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    const CRIMINAL_WRAPPED_FIELDS: &[&str] = &[
+        "document_type",
+        "current_stage",
+        "procedure_type",
+        "suspected_charge",
+        "suspect_or_defendant_name",
+        "victim_name",
+        "detention_center",
+        "coercive_measure_type",
+        "guilty_plea_status",
+        "sentencing_recommendation",
+        "sentence_term",
+        "restitution_amount",
+        "restitution_status",
+        "victim_forgiveness",
+        "surrender_status",
+        "meritorious_service_status",
+    ];
+    for key in CRIMINAL_WRAPPED_FIELDS {
+        let Some(field) = criminal.get_mut(*key) else {
+            continue;
+        };
+        if field.is_object() {
+            continue;
+        }
+        let raw = field.take();
+        *field = serde_json::json!({
+            "value": raw,
+            "confidence": null,
+            "evidence": null
+        });
+    }
+
+    if let Some(amount) = criminal
+        .get_mut("restitution_amount")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|wrapper| wrapper.get_mut("value"))
+    {
+        if let Some(raw) = amount.as_str() {
+            let normalized = raw.replace([',', '，'], "").trim().to_string();
+            if let Ok(parsed) = normalized.parse::<f64>() {
+                *amount = serde_json::json!(parsed);
+            }
+        }
+    }
 }
 
 /// 从 LLM 返回的内容里抽取出 JSON 对象部分,处理几种常见的包裹:
@@ -609,4 +720,136 @@ fn extract_json_from_content(content: &str) -> String {
         }
     }
     text.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn criminal_extract_accepts_wrapped_top_level_and_scalar_criminal_fields() {
+        let parsed = parse_extracted_fields(
+            r#"{
+                "case_type": {"value":"刑事","confidence":1.0,"evidence":"标题"},
+                "court": {"value":"某市公安局","confidence":0.9,"evidence":"印章"},
+                "cause": {"value":"盗窃罪","confidence":0.8,"evidence":"正文"},
+                "plaintiffs": {"value":[],"confidence":1.0,"evidence":null},
+                "defendants": [],
+                "third_parties": [],
+                "claim_amount": null,
+                "preservations": [],
+                "criminal": {
+                    "document_type": "取保候审决定书",
+                    "current_stage": null,
+                    "restitution_amount": "12,345.50",
+                    "charge_changes": [],
+                    "key_dates": []
+                }
+            }"#,
+        )
+        .expect("兼容格式应能解析");
+
+        assert_eq!(parsed.case_type.as_deref(), Some("刑事"));
+        assert_eq!(parsed.court.as_deref(), Some("某市公安局"));
+        let criminal = parsed.criminal.expect("应保留刑事对象");
+        assert_eq!(
+            criminal.document_type.value.as_deref(),
+            Some("取保候审决定书")
+        );
+        assert_eq!(criminal.current_stage.value, None);
+        assert_eq!(criminal.restitution_amount.value, Some(12_345.5));
+    }
+
+    #[test]
+    fn canonical_criminal_extract_format_remains_unchanged() {
+        let parsed = parse_extracted_fields(
+            r#"{
+                "case_type":"刑事",
+                "court":"某区人民检察院",
+                "plaintiffs":[],
+                "defendants":[],
+                "third_parties":[],
+                "preservations":[],
+                "criminal":{
+                    "document_type":{
+                        "value":"其他刑事材料",
+                        "confidence":0.7,
+                        "evidence":"材料标题"
+                    }
+                }
+            }"#,
+        )
+        .expect("标准格式应继续解析");
+
+        let document_type = parsed.criminal.expect("应保留刑事对象").document_type;
+        assert_eq!(document_type.value.as_deref(), Some("其他刑事材料"));
+        assert_eq!(document_type.confidence, Some(0.7));
+        assert_eq!(document_type.evidence.as_deref(), Some("材料标题"));
+    }
+
+    #[test]
+    fn normalization_only_changes_shape_and_does_not_invent_missing_facts() {
+        let parsed = parse_extracted_fields(
+            r#"{
+                "case_type":{"value":"刑事","confidence":0.6,"evidence":"文首"},
+                "plaintiffs":{"value":[],"confidence":1.0,"evidence":null},
+                "defendants":[],
+                "third_parties":[],
+                "preservations":[],
+                "criminal":{
+                    "document_type":"其他刑事材料",
+                    "suspected_charge":null,
+                    "restitution_amount":null
+                }
+            }"#,
+        )
+        .expect("只做结构归一的兼容格式应能解析");
+
+        assert_eq!(parsed.case_type.as_deref(), Some("刑事"));
+        assert_eq!(parsed.court, None, "缺失的顶层事实不得补写");
+        assert_eq!(parsed.cause, None, "缺失的顶层事实不得补写");
+        let criminal = parsed.criminal.expect("应保留刑事对象");
+        assert_eq!(criminal.suspected_charge.value, None);
+        assert_eq!(
+            criminal.restitution_amount.value, None,
+            "未载明金额不得被猜测"
+        );
+        assert_eq!(
+            criminal.document_type.confidence, None,
+            "标量包装时不得伪造识别置信度"
+        );
+        assert_eq!(
+            criminal.document_type.evidence, None,
+            "标量包装时不得伪造证据摘录"
+        );
+    }
+
+    #[test]
+    fn non_criminal_wrapped_top_level_fields_remain_rejected() {
+        for case_type in ["民事", "非诉"] {
+            let payload = serde_json::json!({
+                "case_type": {
+                    "value": case_type,
+                    "confidence": 0.9,
+                    "evidence": "示例标题"
+                },
+                "court": {
+                    "value": "示例机构",
+                    "confidence": 0.8,
+                    "evidence": "示例落款"
+                },
+                "plaintiffs": [],
+                "defendants": [],
+                "third_parties": [],
+                "preservations": []
+            });
+
+            let result = parse_extracted_fields(&payload.to_string());
+
+            assert!(
+                result.is_err(),
+                "无 criminal 对象的{case_type}包装型顶层字段不得被刑事兼容层放宽"
+            );
+        }
+    }
 }
