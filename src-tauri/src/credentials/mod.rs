@@ -71,6 +71,7 @@ impl CredentialLocator {
         &self.0
     }
 
+    #[cfg(target_os = "windows")]
     pub(crate) fn target_name(&self) -> String {
         format!("{SERVICE}/{}", self.0)
     }
