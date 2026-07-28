@@ -117,7 +117,7 @@ export function ModuleTabs({
         <button
           type="button"
           onClick={onGoHome}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="surface-interactive inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground"
           title="回到今日工作台"
           aria-label="回到今日工作台"
         >
@@ -125,7 +125,11 @@ export function ModuleTabs({
           <span className="hidden font-medium min-[420px]:inline">工作台</span>
         </button>
 
-        <div className="min-w-0 flex-1 overflow-x-auto">
+        <div
+          className="horizontal-scroll min-w-0 flex-1 overflow-x-auto"
+          role="group"
+          aria-label="业务模块导航"
+        >
           <div className="relative flex min-w-max items-center gap-1 pr-2">
             {/* 核心 tab + 私人「独立」tab */}
             {allTabs.map((m, index) => {
@@ -141,7 +145,7 @@ export function ModuleTabs({
                   onClick={() => onSwitch(m.id)}
                   title={m.title ?? m.label}
                   className={cn(
-                    "relative flex items-center gap-1.5 px-2.5 py-3 text-sm transition-colors sm:px-3 lg:px-4",
+                    "surface-interactive relative flex items-center gap-1.5 rounded-sm px-2.5 py-3 text-sm sm:px-3 lg:px-4",
                     groupBreak && "ml-2 border-l border-border pl-3 sm:ml-3 sm:pl-4",
                     isActive
                       ? "text-foreground"
