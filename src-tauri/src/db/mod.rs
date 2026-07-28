@@ -91,6 +91,35 @@ fn project_data_dir(app_name: &str) -> Result<PathBuf, DbError> {
     Ok(proj.data_dir().to_path_buf())
 }
 
+/// Returns the default current/legacy data directories only when no explicit
+/// override is active. Callers must treat `None` as a hard boundary and never
+/// inspect either default directory.
+pub(crate) fn default_data_dirs_if_unoverridden() -> Result<Option<(PathBuf, PathBuf)>, DbError> {
+    let override_value = std::env::var_os(CASEBOARD_DATA_DIR_ENV);
+    if override_value.is_some() {
+        return default_data_dirs_from_paths(override_value, None, None);
+    }
+    default_data_dirs_from_paths(
+        None,
+        Some(project_data_dir(APP_NAME)?),
+        Some(project_data_dir(LEGACY_APP_NAME)?),
+    )
+}
+
+fn default_data_dirs_from_paths(
+    override_value: Option<OsString>,
+    current: Option<PathBuf>,
+    legacy: Option<PathBuf>,
+) -> Result<Option<(PathBuf, PathBuf)>, DbError> {
+    if override_value.is_some() {
+        return Ok(None);
+    }
+    Ok(Some((
+        current.ok_or(DbError::HomeDirNotFound)?,
+        legacy.ok_or(DbError::HomeDirNotFound)?,
+    )))
+}
+
 fn app_data_dir_from_paths(
     override_value: Option<OsString>,
     current: Option<PathBuf>,
@@ -380,5 +409,14 @@ mod tests {
         assert_eq!(actual, override_dir);
         assert!(!actual.join("caseboard.db").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn override_hides_default_settings_directories() {
+        let hidden =
+            default_data_dirs_from_paths(Some(OsString::from("override-is-active")), None, None)
+                .expect("override boundary");
+
+        assert!(hidden.is_none());
     }
 }
