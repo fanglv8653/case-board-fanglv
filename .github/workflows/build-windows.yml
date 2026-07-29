@@ -52,7 +52,7 @@ jobs:
       - name: Rust check and tests
         run: |
           cargo check --workspace --all-targets --locked
-          cargo test --workspace --locked
+          pwsh -NoProfile -File scripts/run-windows-rust-tests.ps1
 
       - name: Require updater signing secrets
         shell: pwsh
