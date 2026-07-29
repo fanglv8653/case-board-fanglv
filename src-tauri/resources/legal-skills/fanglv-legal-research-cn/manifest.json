@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "slug": "fanglv-legal-research-cn",
+  "title": "法律检索与依据核验",
+  "version": "1.0.0",
+  "description": "法律法规、司法解释、案例和本地知识库材料的分层检索及核验方法。",
+  "legal_domains": ["legal_research"],
+  "task_types": ["free_chat", "compile_legal_basis", "find_similar_cases", "verify_my_draft"],
+  "required_capabilities": ["legal_sources", "citation_traceability", "lawyer_review"],
+  "requested_tools": ["search_local_kb", "semantic_search_local_kb", "read_kb_file", "search_laws", "get_law_article", "search_regulations", "get_regulation_detail", "law_vector_search", "search_cases_normal", "search_cases_authority", "get_case_detail", "case_vector_search", "verify_legal_citations", "ask_user", "save_artifact"],
+  "default_enabled": true,
+  "author": "方律",
+  "license": "internal"
+}

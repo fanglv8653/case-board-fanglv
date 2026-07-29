@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "slug": "fanglv-civil-litigation-cn",
+  "title": "民事争议分析",
+  "version": "1.0.0",
+  "description": "民事诉讼请求权、抗辩、证据、程序和诉讼策略的方律分析方法。",
+  "legal_domains": ["civil"],
+  "task_types": ["free_chat", "compile_legal_basis", "find_similar_cases", "verify_my_draft", "simulate_opposition", "deep_analysis"],
+  "required_capabilities": ["case_context", "confirmed_materials", "legal_sources", "lawyer_review"],
+  "requested_tools": ["list_case_docs", "read_case_doc", "find_in_document", "semantic_search_case_docs", "search_laws", "get_law_article", "search_cases_normal", "search_cases_authority", "get_case_detail", "ask_user", "save_artifact", "edit_artifact"],
+  "default_enabled": true,
+  "author": "方律",
+  "license": "internal"
+}

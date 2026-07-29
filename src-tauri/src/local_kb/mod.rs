@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod experience;
+pub mod guide;
 pub mod hash;
 pub mod init;
 pub mod relocation;

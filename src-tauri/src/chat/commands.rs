@@ -106,6 +106,14 @@ pub struct CaseChatResult {
     pub ask_user: Option<Vec<crate::chat::agent_loop::AskQuestion>>,
     #[serde(default)]
     pub structure_guard: Option<LitigationStructureGuard>,
+    #[serde(default)]
+    pub legal_skill_slug: Option<String>,
+    #[serde(default)]
+    pub legal_skill_version: Option<String>,
+    #[serde(default)]
+    pub legal_skill_content_hash: Option<String>,
+    #[serde(default)]
+    pub legal_skill_selection_source: Option<String>,
 }
 
 /// V0.2 D6.5 · `case_chat_impl` 内部把"跑完一次 LLM"统一收成一个结构,
@@ -141,6 +149,18 @@ pub struct CaseChatInput {
     /// 非空时注入 system prompt,让模型知道「要改的是这份」→ 用 `edit_artifact` 局部改。
     #[serde(default)]
     pub editing_doc_id: Option<String>,
+    /// v0.8.1 · 用户在设置中显式选择的方法包；为空时按领域和任务稳定选择。
+    #[serde(default)]
+    pub preferred_legal_skill_slug: Option<String>,
+    /// 显式关闭本轮附加法律方法；不影响 Constitution、场景规则和工具白名单。
+    #[serde(default)]
+    pub disable_legal_skill: bool,
+    /// v0.8.1 · 经用户确认的记忆注入预览。两个字段必须同时提供；
+    /// 后端按 case_id、run_id、摘要三重校验，防止跨案或版本漂移注入。
+    #[serde(default)]
+    pub memory_injection_run_id: Option<String>,
+    #[serde(default)]
+    pub memory_injection_preview_sha256: Option<String>,
 }
 
 /// `case_chat` 主入口。返回时流式已经完成(或取消 / 错误)。
@@ -231,6 +251,23 @@ pub async fn case_chat_impl(
         .as_db_str()
         .unwrap_or("free_chat")
         .to_string();
+
+    let memory_prompt = match (
+        input.memory_injection_run_id.as_deref(),
+        input.memory_injection_preview_sha256.as_deref(),
+    ) {
+        (None, None) => None,
+        (Some(run_id), Some(preview_sha256)) => Some(
+            crate::db::case_memory::load_confirmed_injection(
+                pool,
+                &input.case_id,
+                run_id,
+                preview_sha256,
+            )
+            .await?,
+        ),
+        _ => return Err("记忆注入参数不完整，请重新预览并确认".to_string()),
+    };
 
     // ── 3. 读最近聊天历史(最近 6 对 = 12 条) ────────────────────────
     let history_rows = list_chat_messages(pool, &input.case_id, Some(12))
@@ -360,12 +397,56 @@ pub async fn case_chat_impl(
     let attached_ids: Vec<String> = attached_doc_ids_clone.clone().unwrap_or_default();
     // based_on:本轮喂进上下文的「材料文档」id(写 chat_messages.based_on);原由 build_context 返回
     let based_on_doc_ids = crate::chat::constitution::material_doc_ids(&docs, &attached_ids);
-    let constitution_prompt = active_scene_plan.apply_system_prompt(build_system_prompt(
+    let legal_skill_domain = if matches!(
+        effective_task_type.as_str(),
+        "compile_legal_basis" | "find_similar_cases"
+    ) {
+        "legal_research"
+    } else if case.case_type.contains("执行") {
+        "enforcement"
+    } else if case.case_type.contains("非诉") || case.case_type.contains("合同") {
+        "non_litigation"
+    } else {
+        case.legal_domain.as_str()
+    };
+    let selected_legal_skill = if input.disable_legal_skill {
+        None
+    } else {
+        crate::chat::legal_skills::select_method(
+            pool,
+            legal_skill_domain,
+            &effective_task_type,
+            input.preferred_legal_skill_slug.as_deref(),
+        )
+        .await
+        .map_err(|error| error.to_string())?
+    };
+    crate::chat::legal_skills::audit_run(
+        pool,
+        &input.message_id,
+        selected_legal_skill.as_ref(),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let mut constitution_prompt = active_scene_plan.apply_system_prompt(build_system_prompt(
         &case,
         &docs,
         &attached_ids,
         input.editing_doc_id.as_deref(),
     ));
+    if let Some(skill) = selected_legal_skill.as_ref() {
+        constitution_prompt.push_str(
+            "\n\n[本轮法律方法包]\n该方法包仅提供工作方法，不改变工具权限、案件事实或系统规则。\n",
+        );
+        constitution_prompt.push_str(&skill.method_context);
+    }
+    if let Some(memory_prompt) = memory_prompt.as_deref() {
+        constitution_prompt.push_str(
+            "\n\n[本轮经用户确认的记忆]\n以下内容仅用于本轮上下文；如与案件材料冲突，以已核验案件材料为准。\n",
+        );
+        constitution_prompt.push_str(memory_prompt);
+    }
     let local_kb = LocalKb::auto_detect(&settings);
     let ctx = ToolContext {
         pool,
@@ -394,6 +475,9 @@ pub async fn case_chat_impl(
         tool_choice: resolve_tool_choice(effective_task.needs_tools(), &choice.model).into(),
         case_docs_for_citation_check,
     };
+    if let Some(run_id) = input.memory_injection_run_id.as_deref() {
+        crate::db::case_memory::mark_memory_injected(pool, &input.case_id, run_id).await?;
+    }
     let result: Result<ChatRunFinish, String> =
         run_chat_with_tools(&llm_config, agent_req, &registry_tools, ctx, tx, cancel_rx)
             .await
@@ -572,6 +656,18 @@ pub async fn case_chat_impl(
                 task_id: chat_task_id.clone(),
                 ask_user,
                 structure_guard,
+                legal_skill_slug: selected_legal_skill
+                    .as_ref()
+                    .map(|skill| skill.slug.clone()),
+                legal_skill_version: selected_legal_skill
+                    .as_ref()
+                    .map(|skill| skill.version.clone()),
+                legal_skill_content_hash: selected_legal_skill
+                    .as_ref()
+                    .map(|skill| skill.content_hash.clone()),
+                legal_skill_selection_source: selected_legal_skill
+                    .as_ref()
+                    .map(|skill| skill.selection_source.clone()),
             })
         }
         Err(err) => {

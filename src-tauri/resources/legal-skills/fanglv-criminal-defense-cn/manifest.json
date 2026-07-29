@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "slug": "fanglv-criminal-defense-cn",
+  "title": "刑事辩护闭环",
+  "version": "1.0.0",
+  "description": "刑事案件材料、证据、程序、罪名分析、辩护策略与文书任务的统一方律方法。",
+  "legal_domains": ["criminal"],
+  "task_types": ["free_chat", "compile_legal_basis", "find_similar_cases", "verify_my_draft", "simulate_opposition", "criminal_deep_analysis"],
+  "required_capabilities": ["case_context", "confirmed_materials", "legal_sources", "lawyer_review"],
+  "requested_tools": ["list_case_docs", "read_case_doc", "find_in_document", "semantic_search_case_docs", "search_laws", "get_law_article", "search_cases_normal", "search_cases_authority", "get_case_detail", "ask_user", "save_artifact", "edit_artifact"],
+  "default_enabled": true,
+  "author": "方律",
+  "license": "internal"
+}

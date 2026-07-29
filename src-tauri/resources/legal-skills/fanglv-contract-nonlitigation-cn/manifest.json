@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "slug": "fanglv-contract-nonlitigation-cn",
+  "title": "合同审查与非诉工作",
+  "version": "1.0.0",
+  "description": "合同审查、合同起草、律师函等非诉任务的方律结构化方法。",
+  "legal_domains": ["non_litigation"],
+  "task_types": ["free_chat", "compile_legal_basis", "verify_my_draft"],
+  "required_capabilities": ["transaction_context", "attachments", "legal_sources", "lawyer_review"],
+  "requested_tools": ["list_case_docs", "read_case_doc", "find_in_document", "search_laws", "get_law_article", "search_regulations", "get_regulation_detail", "verify_legal_citations", "ask_user", "save_artifact", "edit_artifact"],
+  "default_enabled": true,
+  "author": "方律",
+  "license": "internal"
+}

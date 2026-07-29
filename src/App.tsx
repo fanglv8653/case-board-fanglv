@@ -10,6 +10,7 @@ import { OnboardingWizard } from "@/components/OnboardingWizard";
 import { DeepSeekBalanceChip } from "@/components/DeepSeekBalanceChip";
 import { FeedbackButton } from "@/components/FeedbackButton";
 import { ModuleTabs } from "@/components/ModuleTabs";
+import { MemoryView } from "@/components/memory/MemoryView";
 // 私人专属功能接缝(双轨发布模型):开源仓返回 [] → 无「独立」顶层 tab。
 import { getPrivateTopTabs } from "@/private";
 import { HomeView, type HomeStatusWarning, type HomeViewMode } from "@/components/HomeView";
@@ -1137,6 +1138,9 @@ function App() {
             sentencingPrefill={toolsRoute.sentencingPrefill}
             routeNonce={toolsRoute.nonce}
           />
+        )}
+        {activeModule === "memory" && (
+          <MemoryView cases={cases} initialCaseId={selectedId} />
         )}
         {activeModule === "team" && <TeamModule />}
         {activeModule === "settings" && (

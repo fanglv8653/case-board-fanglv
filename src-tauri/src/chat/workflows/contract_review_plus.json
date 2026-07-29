@@ -38,6 +38,7 @@
     "get_case_detail",
     "case_vector_search",
     "verify_legal_citations",
+    "propose_case_memory_candidate",
     "ask_user",
     "save_artifact",
     "edit_artifact"

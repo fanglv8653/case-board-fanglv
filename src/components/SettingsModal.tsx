@@ -22,6 +22,7 @@ import {
   User,
   ShieldCheck,
   Bell,
+  Palette,
 } from "lucide-react";
 import { open as dialogOpen, save as dialogSave } from "@tauri-apps/plugin-dialog";
 import { confirmDialog } from "@/lib/dialog";
@@ -40,6 +41,10 @@ import {
   type LocalKbRelocationProgress,
   type LocalKbRelocationResult,
 } from "@/components/settings/LocalKbRelocationCard";
+import { LocalKbGuideCard } from "@/components/settings/LocalKbGuideCard";
+import { YuandianBalanceCard } from "@/components/settings/YuandianBalanceCard";
+import { LegalSkillsSettingsCard } from "@/components/settings/LegalSkillsSettingsCard";
+import { DeviceSyncSettingsCard } from "@/components/settings/DeviceSyncSettingsCard";
 import {
   buildLocalKbSemanticIndex,
   createLocalKb,
@@ -76,6 +81,7 @@ import { cn } from "@/lib/utils";
 import { localDateKey } from "@/lib/localDate";
 import { FEATURE_FLAGS, useFeatureFlag } from "@/lib/featureFlags";
 import { FONT_SCALE, useFontScale } from "@/lib/uiScale";
+import { THEMES, useThemePreference } from "@/lib/theme";
 import {
   CRIMINAL_NOTIFICATION_SETTINGS_EVENT,
   disableCriminalNotifications,
@@ -213,6 +219,7 @@ function setStringSetting(
 
 /** 设置页底部标签页(按类型归拢散乱配置;详见 docs/设置页重构-分类方案-2026-06-16.md) */
 export type SettingsTab =
+  | "theme" // 主题:本机界面配色
   | "brain" // 大脑:对话大模型
   | "models" // 功能模型:OCR / Embedding 等调云端 API 的工具型模型
   | "kb" // 知识库:本地法律知识库 + 语义索引
@@ -222,6 +229,7 @@ export type SettingsTab =
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: typeof Brain }[] = [
   { id: "general", label: "通用", icon: User },
+  { id: "theme", label: "主题", icon: Palette },
   { id: "brain", label: "大脑", icon: Brain },
   { id: "models", label: "功能模型", icon: Wrench },
   { id: "kb", label: "知识库", icon: BookText },
@@ -799,6 +807,18 @@ export function SettingsModal({
             >
               {/* ── 通用:界面字号(放最前,字小问题最常见)── */}
               {tab === "general" && <FontScaleCard />}
+
+              {tab === "general" && (
+                <Section
+                  title="我的设备同步"
+                  desc="通过 NAS 挂载目录进行端到端加密备份与双向同步；支持两台电脑无缝衔接。"
+                  fill
+                >
+                  <DeviceSyncSettingsCard />
+                </Section>
+              )}
+
+              {tab === "theme" && <ThemeCard />}
 
               {/* ── 通用:个人信息 ── */}
               {tab === "general" && (
@@ -1622,6 +1642,12 @@ export function SettingsModal({
 
               {/* ── 知识库:法律向量检索维护(法条+案例+企业语义索引)── */}
               {tab === "kb" && (
+                <LocalKbGuideCard configuredRoot={settings.local_kb_root ?? null} />
+              )}
+
+              {tab === "brain" && <LegalSkillsSettingsCard />}
+
+              {tab === "kb" && (
               <KbSemanticIndexCard
                 embeddingConfigured={credentialConfigured(CREDENTIAL_LOCATORS.embedding)}
                 autoIndex={settings.kb_semantic_auto_index !== false}
@@ -1632,6 +1658,8 @@ export function SettingsModal({
               {/* 快递100 配置已迁到「法律工具 → 快递查询」页内,就近配置(2026-06-16)。 */}
 
               {/* ── 数据源:元典本地估算 + 识别服务本地用量 ── */}
+              {tab === "datasource" && <YuandianBalanceCard />}
+
               {tab === "datasource" && (
               <IntegratedUsageDashboard onValidateConnection={handleVerifyYuandian} />
               )}
@@ -2082,16 +2110,15 @@ function CriminalNotificationSettingsCard() {
 /**
  * 2026-06-16 · 首页功能开关卡(「功能开关」tab)。
  * 作者偏好清爽首页:新功能默认关,想用再开,逐设备生效(localStorage)。
- * 以后首页新增模块 → 在 src/lib/featureFlags.ts 的 FEATURE_FLAGS 加一条,这里自动出现开关。
- * 只渲染 location==="settings" 的开关;location==="feature" 的(如滴答待办)由对应功能页自己放。
+ * 只注册并渲染已有真实控制对象的开关；缺失能力不得先放空开关。
  */
 function FeatureFlagsCard() {
-  const flags = FEATURE_FLAGS.filter((f) => f.location === "settings");
+  const flags = FEATURE_FLAGS;
   if (flags.length === 0) return null;
   return (
     <Section
-      title="首页功能开关"
-      desc="作者偏好清爽首页:这些首页模块默认关闭,想用哪个再开。只影响这台机器的界面,不动数据。"
+      title="界面功能开关"
+      desc="只列出已经接入真实界面的功能。切换即时生效，仅保存在这台机器，不改案件数据。"
     >
       <div className="space-y-1">
         {flags.map((f) => (
@@ -2116,6 +2143,9 @@ function FeatureFlagToggle({
         <p className="mt-0.5 text-xs text-muted-foreground">
           {meta.description}
         </p>
+        <p className="mt-1 text-label font-medium text-muted-foreground">
+          {on ? "已开启并即时生效" : "已关闭"}
+        </p>
       </div>
       <button
         type="button"
@@ -2124,8 +2154,8 @@ function FeatureFlagToggle({
         aria-label={meta.title}
         onClick={() => setOn(!on)}
         className={cn(
-          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
-          on ? "bg-sky-600" : "bg-muted",
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+          on ? "bg-primary" : "bg-muted",
         )}
       >
         <span
@@ -2136,6 +2166,75 @@ function FeatureFlagToggle({
         />
       </button>
     </div>
+  );
+}
+
+function ThemeCard() {
+  const [theme, setTheme] = useThemePreference();
+  return (
+    <section className="lg:col-span-2" aria-labelledby="settings-theme-title">
+      <div className="mb-3">
+        <h3 id="settings-theme-title" className="text-sm font-semibold text-foreground">
+          界面主题
+        </h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          即时生效并保存在本机，不依赖页面底部“保存”，也不会进入设备同步。
+        </p>
+      </div>
+      <div className="grid gap-3 rounded-lg border border-border bg-background/50 p-4 md:grid-cols-2">
+        {THEMES.map((item) => {
+          const selected = theme === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => setTheme(item.id)}
+              className={cn(
+                "surface-interactive rounded-lg border p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                selected
+                  ? "border-primary bg-accent/70 shadow-sm"
+                  : "border-border bg-card/70 hover:border-primary/40",
+              )}
+            >
+              <span className="flex items-start justify-between gap-3">
+                <span>
+                  <span className="flex gap-1.5" aria-hidden="true">
+                    {item.swatches.map((color) => (
+                      <span
+                        key={color}
+                        className="size-5 rounded-full border border-black/10"
+                        style={{ backgroundColor: color }}
+                      />
+                    ))}
+                  </span>
+                  <span className="mt-3 block text-sm font-semibold text-foreground">
+                    {item.label}
+                  </span>
+                </span>
+                <span
+                  className={cn(
+                    "mt-0.5 inline-flex size-5 items-center justify-center rounded-full border text-xs",
+                    selected
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border text-transparent",
+                  )}
+                  aria-hidden="true"
+                >
+                  ✓
+                </span>
+              </span>
+              <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">
+                {item.description}
+              </span>
+            </button>
+          );
+        })}
+        <p className="text-label text-muted-foreground md:col-span-2">
+          暗色模式继续使用方律当前暗色配色；“墨绿象牙”仅调整亮色界面。
+        </p>
+      </div>
+    </section>
   );
 }
 

@@ -7,6 +7,7 @@ pub mod court_sms;
 pub mod db;
 pub mod deepseek;
 pub mod demand_letter;
+pub mod device_sync;
 pub mod diagnostic_log;
 pub mod doc_search;
 pub mod docx_extract;
@@ -373,7 +374,17 @@ async fn verify_deepseek_key(endpoint: Option<String>) -> verify::VerifyResult {
 #[tauri::command]
 async fn verify_yuandian_key() -> verify::VerifyResult {
     match credentials::resolve_static(credentials::StaticCredential::Yuandian) {
-        Ok(Some(secret)) => verify::verify_yuandian_key(secret.expose()).await,
+        Ok(Some(secret)) => match yuandian::balance::verify_api_key(secret.expose()).await {
+            Ok(_) => verify::VerifyResult {
+                ok: true,
+                message: String::new(),
+            },
+            Err(code) => verify::VerifyResult::fail(match code.as_str() {
+                "YUANDIAN_BALANCE_AUTH_FAILED" => "元典凭据无效或已失效",
+                "YUANDIAN_BALANCE_RESPONSE_INVALID" => "元典余额响应格式暂时无法识别",
+                _ => "暂时无法连接元典官方余额服务",
+            }),
+        },
         _ => verify::VerifyResult::fail("元典凭据尚未安全保存"),
     }
 }
@@ -554,6 +565,350 @@ async fn list_income_records(
     filter: db::income_records::IncomeRecordFilter,
 ) -> Result<Vec<db::income_records::IncomeRecord>, String> {
     db::income_records::list(pool.inner(), filter).await
+}
+
+// ── v0.8.1 案件隔离记忆 ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn list_case_memories(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    include_deleted: Option<bool>,
+) -> Result<Vec<db::case_memory::CaseMemory>, String> {
+    db::case_memory::list_case_memories(&pool, &case_id, include_deleted.unwrap_or(false)).await
+}
+
+#[tauri::command]
+async fn create_case_memory_draft(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    input: db::case_memory::CreateMemoryInput,
+) -> Result<db::case_memory::CaseMemory, String> {
+    db::case_memory::create_case_memory_draft(&pool, &case_id, input, "local-user").await
+}
+
+#[tauri::command]
+async fn confirm_case_memory(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    memory_id: String,
+    expected_revision: i64,
+) -> Result<db::case_memory::CaseMemory, String> {
+    db::case_memory::confirm_case_memory(
+        &pool,
+        &case_id,
+        &memory_id,
+        expected_revision,
+        "local-user",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn revise_case_memory(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    memory_id: String,
+    input: db::case_memory::ReviseMemoryInput,
+) -> Result<db::case_memory::CaseMemory, String> {
+    db::case_memory::revise_case_memory(&pool, &case_id, &memory_id, input, "local-user").await
+}
+
+#[tauri::command]
+async fn set_case_memory_status(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    memory_id: String,
+    status: String,
+    reason: Option<String>,
+) -> Result<db::case_memory::CaseMemory, String> {
+    db::case_memory::set_case_memory_status(
+        &pool,
+        &case_id,
+        &memory_id,
+        &status,
+        "local-user",
+        reason.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_memory_candidates(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::case_memory::MemoryCandidate>, String> {
+    db::case_memory::list_memory_candidates(&pool, &case_id).await
+}
+
+#[tauri::command]
+async fn accept_memory_candidate(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    candidate_id: String,
+    input: db::case_memory::AcceptCandidateInput,
+) -> Result<db::case_memory::CaseMemory, String> {
+    db::case_memory::accept_memory_candidate(
+        &pool,
+        &case_id,
+        &candidate_id,
+        input,
+        "local-user",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reject_memory_candidate(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    candidate_id: String,
+    reason: Option<String>,
+) -> Result<(), String> {
+    db::case_memory::reject_memory_candidate(
+        &pool,
+        &case_id,
+        &candidate_id,
+        "local-user",
+        reason.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_user_memory_preferences(
+    pool: tauri::State<'_, SqlitePool>,
+    include_deleted: Option<bool>,
+) -> Result<Vec<db::case_memory::UserMemoryPreference>, String> {
+    db::case_memory::list_user_memory_preferences(&pool, include_deleted.unwrap_or(false)).await
+}
+
+#[tauri::command]
+async fn create_user_memory_preference(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_memory::CreatePreferenceInput,
+) -> Result<db::case_memory::UserMemoryPreference, String> {
+    db::case_memory::create_user_memory_preference(&pool, input, "local-user").await
+}
+
+#[tauri::command]
+async fn confirm_user_memory_preference(
+    pool: tauri::State<'_, SqlitePool>,
+    preference_id: String,
+    expected_revision: i64,
+) -> Result<db::case_memory::UserMemoryPreference, String> {
+    db::case_memory::confirm_user_memory_preference(
+        &pool,
+        &preference_id,
+        expected_revision,
+        "local-user",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn preview_memory_injection(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    task_type: Option<String>,
+    selected_memory_ids: Vec<String>,
+    selected_preference_ids: Vec<String>,
+) -> Result<db::case_memory::MemoryInjectionPreview, String> {
+    db::case_memory::preview_memory_injection(
+        &pool,
+        &case_id,
+        task_type,
+        selected_memory_ids,
+        selected_preference_ids,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn confirm_memory_injection(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    run_id: String,
+    preview_sha256: String,
+) -> Result<(), String> {
+    db::case_memory::confirm_memory_injection(
+        &pool,
+        &case_id,
+        &run_id,
+        &preview_sha256,
+        "local-user",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_yuandian_balance(
+    pool: tauri::State<'_, SqlitePool>,
+    refresh: Option<bool>,
+) -> Result<Option<yuandian::balance::YuandianBalanceView>, String> {
+    if refresh.unwrap_or(false) {
+        yuandian::balance::refresh_balance(pool.inner())
+            .await
+            .map(Some)
+    } else {
+        yuandian::balance::cached_balance(pool.inner()).await
+    }
+}
+
+#[tauri::command]
+async fn get_local_kb_guide() -> Result<local_kb::guide::LocalKbGuide, String> {
+    let settings = settings::read_settings().unwrap_or_default();
+    let root = settings
+        .local_kb_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    Ok(local_kb::guide::build_local_kb_guide(root.as_deref()))
+}
+
+#[tauri::command]
+async fn list_legal_skill_packages(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<Vec<chat::legal_skills::LegalSkillPackageRecord>, String> {
+    chat::legal_skills::list_packages(pool.inner())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_legal_skill_package(
+    pool: tauri::State<'_, SqlitePool>,
+    files: Vec<chat::legal_skills::LegalSkillFile>,
+) -> Result<chat::legal_skills::LegalSkillRegistration, String> {
+    let package =
+        chat::legal_skills::validate_package_files(files).map_err(|error| error.to_string())?;
+    chat::legal_skills::register_package(pool.inner(), package, "imported", false)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn import_legal_skill_archive(
+    pool: tauri::State<'_, SqlitePool>,
+    file_name: String,
+    archive_bytes: Vec<u8>,
+) -> Result<chat::legal_skills::LegalSkillRegistration, String> {
+    let package = chat::legal_skills::validate_package_archive(&file_name, &archive_bytes)
+        .map_err(|error| error.to_string())?;
+    chat::legal_skills::register_package(pool.inner(), package, "imported", false)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_legal_skill_versions(
+    pool: tauri::State<'_, SqlitePool>,
+    slug: String,
+) -> Result<chat::legal_skills::LegalSkillVersionHistory, String> {
+    chat::legal_skills::list_package_versions(pool.inner(), &slug)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn preview_legal_skill_diff(
+    pool: tauri::State<'_, SqlitePool>,
+    current_skill_id: String,
+    target_skill_id: String,
+) -> Result<chat::legal_skills::LegalSkillDiffPreview, String> {
+    chat::legal_skills::preview_package_diff(
+        pool.inner(),
+        &current_skill_id,
+        &target_skill_id,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn upgrade_legal_skill_package(
+    pool: tauri::State<'_, SqlitePool>,
+    current_skill_id: String,
+    target_skill_id: String,
+    confirmed: bool,
+) -> Result<chat::legal_skills::LegalSkillPackageRecord, String> {
+    chat::legal_skills::require_explicit_confirmation(confirmed, "升级")
+        .map_err(|error| error.to_string())?;
+    chat::legal_skills::switch_package_version(
+        pool.inner(),
+        &current_skill_id,
+        &target_skill_id,
+        "upgrade",
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn rollback_legal_skill_package(
+    pool: tauri::State<'_, SqlitePool>,
+    current_skill_id: String,
+    target_skill_id: String,
+    confirmed: bool,
+) -> Result<chat::legal_skills::LegalSkillPackageRecord, String> {
+    chat::legal_skills::require_explicit_confirmation(confirmed, "回滚")
+        .map_err(|error| error.to_string())?;
+    chat::legal_skills::switch_package_version(
+        pool.inner(),
+        &current_skill_id,
+        &target_skill_id,
+        "rollback",
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn export_legal_skill_package(
+    pool: tauri::State<'_, SqlitePool>,
+    skill_id: String,
+) -> Result<chat::legal_skills::LegalSkillArchiveExport, String> {
+    chat::legal_skills::export_package_archive(pool.inner(), &skill_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn delete_legal_skill_package(
+    pool: tauri::State<'_, SqlitePool>,
+    skill_id: String,
+    confirmed: bool,
+) -> Result<(), String> {
+    chat::legal_skills::require_explicit_confirmation(confirmed, "删除导入包")
+        .map_err(|error| error.to_string())?;
+    chat::legal_skills::delete_imported_package(pool.inner(), &skill_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_legal_skill_package_enabled(
+    pool: tauri::State<'_, SqlitePool>,
+    skill_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    chat::legal_skills::set_package_status(pool.inner(), &skill_id, enabled)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn bind_default_legal_skill(
+    pool: tauri::State<'_, SqlitePool>,
+    skill_id: String,
+    legal_domain: String,
+    task_type: String,
+) -> Result<(), String> {
+    chat::legal_skills::bind_default(pool.inner(), &skill_id, &legal_domain, &task_type)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -5836,6 +6191,13 @@ pub fn run() {
             let pool = tauri::async_runtime::block_on(db::init_pool(&db_path)).map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("初始化数据库失败: {}", e))
             })?;
+            tauri::async_runtime::block_on(chat::legal_skills::seed_builtin_packages(&pool))
+                .map_err(|e| {
+                    Box::<dyn std::error::Error>::from(format!(
+                        "初始化内置法律方法包失败: {}",
+                        e
+                    ))
+                })?;
 
             // V0.2 D5.5 · 启动时把上次崩溃前没收尾的 chat_tasks 标 failed,
             // 让前端展示「重试」按钮。阈值 5 分钟,跟实施计划 § 6.9 对齐。
@@ -5848,6 +6210,12 @@ pub fn run() {
                     if n > 0 {
                         crate::dlog!("[startup] resume_orphaned_chat_tasks 标记 {} 个 orphan", n);
                     }
+                });
+            }
+            {
+                let sync_pool = pool.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = device_sync::scheduler::start(sync_pool).await;
                 });
             }
 
@@ -5942,6 +6310,32 @@ pub fn run() {
             add_payment,
             list_payments,
             delete_payment,
+            list_case_memories,
+            create_case_memory_draft,
+            confirm_case_memory,
+            revise_case_memory,
+            set_case_memory_status,
+            list_memory_candidates,
+            accept_memory_candidate,
+            reject_memory_candidate,
+            list_user_memory_preferences,
+            create_user_memory_preference,
+            confirm_user_memory_preference,
+            preview_memory_injection,
+            confirm_memory_injection,
+            get_yuandian_balance,
+            get_local_kb_guide,
+            list_legal_skill_packages,
+            import_legal_skill_package,
+            import_legal_skill_archive,
+            list_legal_skill_versions,
+            preview_legal_skill_diff,
+            upgrade_legal_skill_package,
+            rollback_legal_skill_package,
+            export_legal_skill_package,
+            delete_legal_skill_package,
+            set_legal_skill_package_enabled,
+            bind_default_legal_skill,
             list_income_records,
             get_income_record,
             upsert_income_record,
@@ -6149,6 +6543,23 @@ pub fn run() {
             team_view,
             team_submit_edit,
             team_revert_edit,
+            device_sync::commands::get_device_sync_status,
+            device_sync::commands::validate_device_sync_nas_path,
+            device_sync::commands::create_device_sync_group,
+            device_sync::commands::set_device_sync_paused,
+            device_sync::commands::run_device_sync,
+            device_sync::commands::create_device_sync_invite,
+            device_sync::commands::create_device_sync_join_request,
+            device_sync::commands::approve_device_sync_join,
+            device_sync::commands::complete_device_sync_join,
+            device_sync::commands::list_device_sync_members,
+            device_sync::commands::revoke_device_sync_member,
+            device_sync::commands::list_device_sync_conflicts,
+            device_sync::commands::resolve_device_sync_conflict,
+            device_sync::commands::create_device_sync_snapshot,
+            device_sync::commands::list_device_sync_snapshots,
+            device_sync::commands::preview_device_sync_restore,
+            device_sync::commands::preview_device_sync_recovery,
             // V0.2 D7 · 本地知识库 + 元典积分
             detect_kb_status,
             create_local_kb,

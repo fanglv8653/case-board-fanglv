@@ -39,6 +39,8 @@
     "get_case_detail",
     "case_vector_search",
     "verify_legal_citations",
+    "get_local_kb_guide",
+    "propose_case_memory_candidate",
     "ask_user",
     "save_artifact",
     "edit_artifact"
@@ -46,6 +48,8 @@
   "optional_tools": [
     "search_local_kb",
     "semantic_search_local_kb",
+    "get_local_kb_guide",
+    "propose_case_memory_candidate",
     "verify_legal_citations"
   ],
   "blocked_tools": [

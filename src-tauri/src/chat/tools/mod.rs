@@ -31,8 +31,10 @@ pub mod cases;
 pub mod companies;
 pub mod docs;
 pub mod kb;
+pub mod kb_guide;
 pub mod law_fulltext;
 pub mod laws;
+pub mod memory_candidate;
 pub mod reextract;
 pub mod save_kb;
 pub mod semantic;
@@ -190,6 +192,9 @@ impl ToolRegistry {
             Box::new(kb::SearchLocalKb),
             Box::new(semantic_kb::SemanticSearchLocalKb),
             Box::new(kb::ReadKbFile),
+            Box::new(kb_guide::GetLocalKbGuide),
+            // 记忆候选：串行写 pending 候选，不创建、确认或启用案件记忆
+            Box::new(memory_candidate::ProposeCaseMemoryCandidate),
             // 写作工具 2(V0.3 M1 + ADR-0003):文书生产 + 局部编辑(均 mutating)
             Box::new(artifact::SaveArtifact),
             Box::new(artifact::EditArtifact),

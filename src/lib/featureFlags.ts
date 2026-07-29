@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback } from "react";
  *
  * 作者偏好「清清爽爽的界面」:首页新功能默认关闭,用户想要再去设置 / 对应功能里打开。
  * 约定:以后首页新增模块 → 在 FEATURE_FLAGS 注册表里加一条即可:
- *   - 设置页「界面 / 首页」分区会自动渲染 location==="settings" 的开关;
+ *   - 设置页「功能开关」分区只渲染此注册表里确有真实控制对象的开关;
  *   - 首页组件用 useFeatureFlag(name) 条件渲染;
  *   - 无需改后端 settings(纯前端 UI 偏好)。
  *
@@ -30,8 +30,8 @@ export interface FeatureFlagMeta {
   description: string;
   /** 默认值(作者偏好:一律默认关,保持清爽) */
   defaultValue: boolean;
-  /** 开关 UI 主要放在哪:settings=设置页分区渲染;feature=对应功能页自己放 */
-  location: "settings" | "feature";
+  /** 真实控制对象所在界面，用于设置页说明，不影响统一设置入口。 */
+  target: "home" | "case" | "tool";
 }
 
 /** 注册表:所有首页功能开关。**新增首页功能 → 在这里加一条。** */
@@ -42,14 +42,14 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
     description:
       "显示首页的排序 / 筛选 / 列表视图 / 多选工具栏。关闭则回到清爽的纯案件卡片网格。",
     defaultValue: false,
-    location: "settings",
+    target: "home",
   },
   {
     name: "home_ticktick",
     title: "首页滴答清单待办",
     description: "在首页显示滴答清单同步的待办汇总。关闭则首页不显示待办块。",
     defaultValue: false,
-    location: "feature",
+    target: "home",
   },
   {
     name: "case_court_filing",
@@ -57,7 +57,7 @@ export const FEATURE_FLAGS: FeatureFlagMeta[] = [
     description:
       "在案件详情页底部显示「辅助在线立案」区(实验性,依赖本机 Python 运行时)。默认关闭,保持详情页清爽;需要时在此打开。",
     defaultValue: false,
-    location: "feature",
+    target: "case",
   },
 ];
 

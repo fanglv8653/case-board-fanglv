@@ -1925,3 +1925,371 @@ export type DocOcrStatusEvent = Extract<
   ProgressEvent,
   { stage: "doc_ocr_status" }
 >;
+
+/* ------------------------------------------------------------------ */
+/* V0.8.1 记忆：默认归档、逐轮人工选择与确认                            */
+/* ------------------------------------------------------------------ */
+
+export type MemoryType =
+  | "fact"
+  | "procedure"
+  | "strategy"
+  | "client_instruction"
+  | "risk_warning";
+export type MemoryVerificationStatus =
+  | "unverified"
+  | "verified"
+  | "disputed"
+  | "stale";
+export type MemoryInjectionMode = "archive_only" | "manual_each_turn";
+export type MemoryStatus = "draft" | "active" | "disabled" | "deleted";
+
+export interface MemorySourceInput {
+  source_type:
+    | "manual_assertion"
+    | "document"
+    | "chat_user"
+    | "chat_assistant"
+    | "tool_result"
+    | "case_field";
+  document_id?: string | null;
+  chat_message_id?: string | null;
+  locator?: string | null;
+  excerpt?: string | null;
+  external_ref?: string | null;
+  verification_status?: MemoryVerificationStatus | null;
+}
+
+export interface CaseMemory {
+  id: string;
+  case_id: string;
+  memory_type: MemoryType;
+  status: MemoryStatus;
+  verification_status: MemoryVerificationStatus;
+  injection_mode: MemoryInjectionMode;
+  current_revision_no: number;
+  active_revision_no: number | null;
+  title: string;
+  content: string;
+  revision_no: number;
+  source_count: number;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateMemoryInput {
+  memory_type: MemoryType;
+  title: string;
+  content: string;
+  verification_status?: MemoryVerificationStatus;
+  injection_mode?: MemoryInjectionMode;
+  change_reason?: string;
+  source?: MemorySourceInput;
+}
+
+export interface ReviseMemoryInput {
+  expected_revision: number;
+  title: string;
+  content: string;
+  change_reason: string;
+  source?: MemorySourceInput;
+}
+
+export interface MemoryCandidate {
+  id: string;
+  case_id: string;
+  proposed_type: MemoryType;
+  proposed_title: string;
+  proposed_content: string;
+  proposed_by_type: string;
+  source_message_id: string | null;
+  status: "pending" | "accepted" | "rejected" | "expired";
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+  accepted_memory_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AcceptCandidateInput {
+  title: string;
+  content: string;
+  memory_type: MemoryType;
+  verification_status?: MemoryVerificationStatus;
+  source?: MemorySourceInput;
+}
+
+export interface UserMemoryPreference {
+  id: string;
+  title: string;
+  content: string;
+  status: MemoryStatus;
+  injection_mode: MemoryInjectionMode;
+  current_revision_no: number;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePreferenceInput {
+  title: string;
+  content: string;
+  injection_mode?: MemoryInjectionMode;
+}
+
+export interface InjectionPreviewEntry {
+  scope: string;
+  id: string;
+  revision_no: number;
+  title: string;
+  content: string;
+  verification_status: MemoryVerificationStatus | null;
+  char_count: number;
+  selected: boolean;
+  omitted_reason: string | null;
+}
+
+export interface MemoryInjectionPreview {
+  id: string;
+  case_id: string;
+  task_type: string | null;
+  entries: InjectionPreviewEntry[];
+  case_used_chars: number;
+  preference_used_chars: number;
+  preview_sha256: string;
+  prompt_markdown: string;
+  status: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* V0.8.1 我的设备同步（NAS 挂载目录、端到端加密、双向同步）             */
+/* ------------------------------------------------------------------ */
+
+export interface DeviceSyncStatus {
+  group_id: string;
+  connector_root: string;
+  local_device_id: string;
+  key_epoch: number;
+  paused: boolean;
+  pending_upload: number;
+  conflicts: number;
+  quarantined: number;
+}
+
+export interface DeviceSyncRunResult {
+  exported_operations: number;
+  imported_operations: number;
+  conflicts_created: number;
+  duplicate_operations: number;
+  quarantined_packages: number;
+}
+
+export interface DeviceSyncMember {
+  device_id: string;
+  display_name: string;
+  signing_public_key: string;
+  exchange_public_key: string;
+  fingerprint: string;
+  key_epoch: number;
+  status: string;
+}
+
+export interface DeviceSyncInvite {
+  group_id: string;
+  invite_id: string;
+  pairing_code: string;
+  expires_at: string;
+}
+
+export interface DeviceSyncJoinRequest {
+  request_id: string;
+  invite_id: string;
+  group_id: string;
+  device_id: string;
+  display_name: string;
+  signing_public_key: string;
+  exchange_public_key: string;
+  fingerprint: string;
+  expires_at: string;
+  proof_hash: string;
+  request_signature: string;
+}
+
+export interface DeviceSyncJoinCompletion {
+  group_id: string;
+  device_id: string;
+  key_epoch: number;
+  trusted_member_count: number;
+}
+
+export interface DeviceSyncConflict {
+  id: string;
+  operation_id: string;
+  group_id: string;
+  entity_type: string;
+  entity_id: string;
+  case_id: string | null;
+  field_key: string;
+  local_value_json: string | null;
+  remote_value_json: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface DeviceSyncSnapshot {
+  snapshot_id: string;
+  encrypted_path: string;
+  manifest_hash: string;
+  entity_counts: Record<string, number>;
+}
+
+export interface DeviceSyncRestorePreview {
+  snapshot_id: string;
+  entity_counts: Record<string, number>;
+  new_entities: Record<string, number>;
+  existing_entities: Record<string, number>;
+  plaintext_sha256: string;
+  formal_database_unchanged: boolean;
+}
+
+export interface DeviceSyncRecoveryPreview {
+  group_id: string;
+  latest_key_epoch: number;
+  historical_key_epochs: number[];
+  trusted_members: DeviceSyncMember[];
+  formal_database_unchanged: boolean;
+}
+
+export interface DeviceSyncCreatedGroup {
+  identity: {
+    group_id: string;
+    device_id: string;
+    display_name: string;
+    signing_public_key: string;
+    exchange_public_key: string;
+    fingerprint: string;
+    key_epoch: number;
+  };
+  recovery: {
+    path: string;
+    group_id: string;
+    key_epochs: number[];
+  };
+}
+
+export interface YuandianBalanceView {
+  point_balance: number;
+  count_balance: number;
+  fetched_at: string;
+  cached: boolean;
+  previous_point_balance: number | null;
+  previous_fetched_at: string | null;
+  official_spent_since_previous: number | null;
+  local_recorded_since_previous: number | null;
+  local_api_calls_since_previous: number | null;
+  difference: number | null;
+  balance_increased_since_previous: number | null;
+  comparison_status: string;
+  refresh_error_code: string | null;
+  refresh_error: string | null;
+}
+
+export interface LegalSkillFile {
+  relative_path: string;
+  content: string;
+}
+
+export interface LegalSkillPackageRecord {
+  id: string;
+  slug: string;
+  title: string;
+  version: string;
+  description: string;
+  origin: "builtin" | "imported" | string;
+  status: "enabled" | "disabled" | "quarantined" | string;
+  manifest_json: string;
+  package_content_json: string;
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LegalSkillRegistration {
+  package: LegalSkillPackageRecord;
+  created: boolean;
+}
+
+export interface LegalSkillRevisionRecord {
+  id: string;
+  skill_id: string;
+  slug: string;
+  version: string;
+  content_hash: string;
+  manifest_json: string;
+  package_content_json: string;
+  revision_action: string;
+  created_at: string;
+}
+
+export interface LegalSkillVersionHistory {
+  packages: LegalSkillPackageRecord[];
+  revisions: LegalSkillRevisionRecord[];
+}
+
+export interface LegalSkillFileDiff {
+  path: string;
+  change: "added" | "removed" | "modified" | string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface LegalSkillDiffPreview {
+  slug: string;
+  from_skill_id: string;
+  from_version: string;
+  from_hash: string;
+  to_skill_id: string;
+  to_version: string;
+  to_hash: string;
+  files: LegalSkillFileDiff[];
+}
+
+export interface LegalSkillArchiveExport {
+  file_name: string;
+  bytes: number[];
+}
+
+export interface LocalKbGuide {
+  schema_version: number;
+  mode: "read_only";
+  configured_root: string | null;
+  root_available: boolean;
+  keyword_search: {
+    scope: string;
+    extensions: string[];
+    max_file_bytes: number;
+    excluded_root_prefixes: string[];
+    excluded_segments: string[];
+    sorting: string[];
+  };
+  semantic_search: {
+    scope: string;
+    requires_embedding_credential: boolean;
+    requires_prebuilt_matching_index: boolean;
+    query_builds_or_updates_index: boolean;
+    mismatch_behavior: string;
+  };
+  file_read: {
+    path_kind: string;
+    canonical_root_boundary: boolean;
+    max_file_bytes: number;
+    rejects_binary_nul: boolean;
+    default_max_chars: number;
+  };
+  maintenance_boundaries: string[];
+  internal_ai_tools: string[];
+}

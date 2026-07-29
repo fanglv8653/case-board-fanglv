@@ -108,6 +108,33 @@ import type {
   MaterialDecisionInput,
   MaterialPreflight,
   MaterialProcessingBatch,
+  AcceptCandidateInput,
+  CaseMemory,
+  CreateMemoryInput,
+  CreatePreferenceInput,
+  MemoryCandidate,
+  MemoryInjectionPreview,
+  ReviseMemoryInput,
+  UserMemoryPreference,
+  DeviceSyncConflict,
+  DeviceSyncCreatedGroup,
+  DeviceSyncInvite,
+  DeviceSyncJoinCompletion,
+  DeviceSyncJoinRequest,
+  DeviceSyncMember,
+  DeviceSyncRecoveryPreview,
+  DeviceSyncRestorePreview,
+  DeviceSyncRunResult,
+  DeviceSyncSnapshot,
+  DeviceSyncStatus,
+  YuandianBalanceView,
+  LegalSkillFile,
+  LegalSkillPackageRecord,
+  LegalSkillRegistration,
+  LegalSkillArchiveExport,
+  LegalSkillDiffPreview,
+  LegalSkillVersionHistory,
+  LocalKbGuide,
   CommitMaterialPreflightResult,
   ScannedDoc,
   CredentialStatus,
@@ -115,6 +142,325 @@ import type {
   UpdateInfo,
   VerifyResult,
 } from "./types";
+
+/* V0.8.1 我的设备同步：命令契约集中在此，便于与 Tauri 注册层一一核对。 */
+export function getDeviceSyncStatus(): Promise<DeviceSyncStatus | null> {
+  return invoke("get_device_sync_status");
+}
+
+export function validateDeviceSyncNasPath(
+  connectorRoot: string,
+): Promise<{ connector_root: string; writable: boolean }> {
+  return invoke("validate_device_sync_nas_path", { connectorRoot });
+}
+
+export function createDeviceSyncGroup(input: {
+  connector_root: string;
+  display_name: string;
+  recovery_destination: string;
+  recovery_passphrase: string;
+}): Promise<DeviceSyncCreatedGroup> {
+  return invoke("create_device_sync_group", { input });
+}
+
+export function setDeviceSyncPaused(groupId: string, paused: boolean): Promise<DeviceSyncStatus> {
+  return invoke("set_device_sync_paused", { groupId, paused });
+}
+
+export function runDeviceSync(groupId: string): Promise<DeviceSyncRunResult> {
+  return invoke("run_device_sync", { groupId });
+}
+
+export function createDeviceSyncInvite(groupId: string): Promise<DeviceSyncInvite> {
+  return invoke("create_device_sync_invite", { groupId });
+}
+
+export function createDeviceSyncJoinRequest(input: {
+  connector_root: string;
+  pairing_code: string;
+  display_name: string;
+}): Promise<DeviceSyncJoinRequest> {
+  return invoke("create_device_sync_join_request", { input });
+}
+
+export function approveDeviceSyncJoin(
+  groupId: string,
+  requestPath: string,
+  expectedFingerprint: string,
+): Promise<{ completion_path: string }> {
+  return invoke("approve_device_sync_join", { groupId, requestPath, expectedFingerprint });
+}
+
+export function completeDeviceSyncJoin(input: {
+  connector_root: string;
+  request_path: string;
+  completion_path: string;
+  pairing_code: string;
+}): Promise<DeviceSyncJoinCompletion> {
+  return invoke("complete_device_sync_join", { input });
+}
+
+export function listDeviceSyncMembers(groupId: string): Promise<DeviceSyncMember[]> {
+  return invoke("list_device_sync_members", { groupId });
+}
+
+export function revokeDeviceSyncMember(
+  groupId: string,
+  deviceId: string,
+): Promise<DeviceSyncStatus> {
+  return invoke("revoke_device_sync_member", { groupId, deviceId });
+}
+
+export function listDeviceSyncConflicts(groupId: string): Promise<DeviceSyncConflict[]> {
+  return invoke("list_device_sync_conflicts", { groupId });
+}
+
+export function resolveDeviceSyncConflict(
+  operationId: string,
+  resolution: "keep_local" | "keep_remote",
+): Promise<number> {
+  return invoke("resolve_device_sync_conflict", { operationId, resolution });
+}
+
+export function createDeviceSyncSnapshot(
+  groupId: string,
+  snapshotKind: "manual" | "daily" | "monthly" = "manual",
+): Promise<DeviceSyncSnapshot> {
+  return invoke("create_device_sync_snapshot", { groupId, snapshotKind });
+}
+
+export function listDeviceSyncSnapshots(groupId: string): Promise<DeviceSyncSnapshot[]> {
+  return invoke("list_device_sync_snapshots", { groupId });
+}
+
+export function previewDeviceSyncRestore(
+  groupId: string,
+  snapshotPath: string,
+): Promise<DeviceSyncRestorePreview> {
+  return invoke("preview_device_sync_restore", { groupId, snapshotPath });
+}
+
+export function previewDeviceSyncRecovery(
+  packagePath: string,
+  passphrase: string,
+): Promise<DeviceSyncRecoveryPreview> {
+  return invoke("preview_device_sync_recovery", { packagePath, passphrase });
+}
+
+export function listCaseMemories(
+  caseId: string,
+  includeDeleted = false,
+): Promise<CaseMemory[]> {
+  return invoke("list_case_memories", { caseId, includeDeleted });
+}
+
+export function createCaseMemoryDraft(
+  caseId: string,
+  input: CreateMemoryInput,
+): Promise<CaseMemory> {
+  return invoke("create_case_memory_draft", { caseId, input });
+}
+
+export function confirmCaseMemory(
+  caseId: string,
+  memoryId: string,
+  expectedRevision: number,
+): Promise<CaseMemory> {
+  return invoke("confirm_case_memory", {
+    caseId,
+    memoryId,
+    expectedRevision,
+  });
+}
+
+export function reviseCaseMemory(
+  caseId: string,
+  memoryId: string,
+  input: ReviseMemoryInput,
+): Promise<CaseMemory> {
+  return invoke("revise_case_memory", { caseId, memoryId, input });
+}
+
+export function setCaseMemoryStatus(
+  caseId: string,
+  memoryId: string,
+  status: "disabled" | "deleted",
+  reason: string,
+): Promise<CaseMemory> {
+  return invoke("set_case_memory_status", {
+    caseId,
+    memoryId,
+    status,
+    reason,
+  });
+}
+
+export function listMemoryCandidates(caseId: string): Promise<MemoryCandidate[]> {
+  return invoke("list_memory_candidates", { caseId });
+}
+
+export function acceptMemoryCandidate(
+  caseId: string,
+  candidateId: string,
+  input: AcceptCandidateInput,
+): Promise<CaseMemory> {
+  return invoke("accept_memory_candidate", {
+    caseId,
+    candidateId,
+    input,
+  });
+}
+
+export function rejectMemoryCandidate(
+  caseId: string,
+  candidateId: string,
+  reason: string,
+): Promise<void> {
+  return invoke("reject_memory_candidate", {
+    caseId,
+    candidateId,
+    reason,
+  });
+}
+
+export function listUserMemoryPreferences(
+  includeDeleted = false,
+): Promise<UserMemoryPreference[]> {
+  return invoke("list_user_memory_preferences", { includeDeleted });
+}
+
+export function createUserMemoryPreference(
+  input: CreatePreferenceInput,
+): Promise<UserMemoryPreference> {
+  return invoke("create_user_memory_preference", { input });
+}
+
+export function confirmUserMemoryPreference(
+  preferenceId: string,
+  expectedRevision: number,
+): Promise<UserMemoryPreference> {
+  return invoke("confirm_user_memory_preference", {
+    preferenceId,
+    expectedRevision,
+  });
+}
+
+export function previewMemoryInjection(
+  caseId: string,
+  taskType: string | null,
+  selectedMemoryIds: string[],
+  selectedPreferenceIds: string[],
+): Promise<MemoryInjectionPreview> {
+  return invoke("preview_memory_injection", {
+    caseId,
+    taskType,
+    selectedMemoryIds,
+    selectedPreferenceIds,
+  });
+}
+
+export function confirmMemoryInjection(
+  caseId: string,
+  runId: string,
+  previewSha256: string,
+): Promise<void> {
+  return invoke("confirm_memory_injection", {
+    caseId,
+    runId,
+    previewSha256,
+  });
+}
+
+export function getYuandianBalance(
+  refresh = false,
+): Promise<YuandianBalanceView | null> {
+  return invoke("get_yuandian_balance", { refresh });
+}
+
+export function getLocalKbGuide(): Promise<LocalKbGuide> {
+  return invoke("get_local_kb_guide");
+}
+
+export function listLegalSkillPackages(): Promise<LegalSkillPackageRecord[]> {
+  return invoke("list_legal_skill_packages");
+}
+
+export function importLegalSkillPackage(
+  files: LegalSkillFile[],
+): Promise<LegalSkillRegistration> {
+  return invoke("import_legal_skill_package", { files });
+}
+
+export function importLegalSkillArchive(
+  fileName: string,
+  archiveBytes: number[],
+): Promise<LegalSkillRegistration> {
+  return invoke("import_legal_skill_archive", { fileName, archiveBytes });
+}
+
+export function listLegalSkillVersions(
+  slug: string,
+): Promise<LegalSkillVersionHistory> {
+  return invoke("list_legal_skill_versions", { slug });
+}
+
+export function previewLegalSkillDiff(
+  currentSkillId: string,
+  targetSkillId: string,
+): Promise<LegalSkillDiffPreview> {
+  return invoke("preview_legal_skill_diff", { currentSkillId, targetSkillId });
+}
+
+export function upgradeLegalSkillPackage(
+  currentSkillId: string,
+  targetSkillId: string,
+): Promise<LegalSkillPackageRecord> {
+  return invoke("upgrade_legal_skill_package", {
+    currentSkillId,
+    targetSkillId,
+    confirmed: true,
+  });
+}
+
+export function rollbackLegalSkillPackage(
+  currentSkillId: string,
+  targetSkillId: string,
+): Promise<LegalSkillPackageRecord> {
+  return invoke("rollback_legal_skill_package", {
+    currentSkillId,
+    targetSkillId,
+    confirmed: true,
+  });
+}
+
+export function exportLegalSkillPackage(
+  skillId: string,
+): Promise<LegalSkillArchiveExport> {
+  return invoke("export_legal_skill_package", { skillId });
+}
+
+export function deleteLegalSkillPackage(skillId: string): Promise<void> {
+  return invoke("delete_legal_skill_package", { skillId, confirmed: true });
+}
+
+export function setLegalSkillPackageEnabled(
+  skillId: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke("set_legal_skill_package_enabled", { skillId, enabled });
+}
+
+export function bindDefaultLegalSkill(
+  skillId: string,
+  legalDomain: string,
+  taskType: string,
+): Promise<void> {
+  return invoke("bind_default_legal_skill", {
+    skillId,
+    legalDomain,
+    taskType,
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* 扫描 / 导入                                                        */
@@ -1800,6 +2146,10 @@ export interface CaseChatResult {
   ask_user: AskQuestion[] | null;
   /** FL-E3: 诉讼场景最小结构托底结果，仅在诉讼分析命中时返回 */
   structure_guard: LitigationStructureGuard | null;
+  legal_skill_slug: string | null;
+  legal_skill_version: string | null;
+  legal_skill_content_hash: string | null;
+  legal_skill_selection_source: string | null;
 }
 
 export interface CaseChatInput {
@@ -1818,6 +2168,13 @@ export interface CaseChatInput {
    * 非空时后端注入 system prompt,让模型知道「要改的是这份」→ 局部 edit_artifact。
    */
   editing_doc_id?: string | null;
+  /** V0.8.1：本轮人工选择的全局法律 Skill；空值表示不指定。 */
+  preferred_legal_skill_slug?: string | null;
+  /** 显式关闭本轮附加法律方法；系统规则和场景策略仍生效。 */
+  disable_legal_skill?: boolean;
+  /** V0.8.1：已人工确认的记忆注入预览运行记录；必须与摘要哈希同时提交。 */
+  memory_injection_run_id?: string | null;
+  memory_injection_preview_sha256?: string | null;
 }
 
 /**

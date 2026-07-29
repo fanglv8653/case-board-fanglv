@@ -26,6 +26,7 @@ pub mod commands;
 pub mod constitution;
 pub mod context;
 pub mod hooks;
+pub mod legal_skills;
 pub mod loop_guard;
 pub mod mcp_bridge;
 pub mod mcp_credentials;

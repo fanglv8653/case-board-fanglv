@@ -35,6 +35,8 @@
     "search_local_kb",
     "semantic_search_local_kb",
     "read_kb_file",
+    "get_local_kb_guide",
+    "propose_case_memory_candidate",
     "verify_legal_citations",
     "ask_user",
     "save_artifact"

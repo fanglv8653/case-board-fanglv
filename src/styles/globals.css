@@ -68,6 +68,54 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/*
+ * v0.8.1 可选主题：只在亮色模式覆盖语义 token。
+ * 当根节点同时有 .dark 时继续使用下方方律既有暗色变量，避免产生未经设计的墨绿暗色版。
+ */
+:root[data-theme="emerald_ivory"]:not(.dark) {
+  color-scheme: light;
+  --surface-raised: oklch(0.992 0.008 88 / 96%);
+  --surface-subtle: oklch(0.958 0.02 98);
+  --surface-hover: oklch(0.925 0.03 145);
+  --shadow-surface: 0 1px 2px oklch(0.25 0.035 150 / 8%);
+  --status-success: oklch(0.48 0.13 155);
+  --status-success-surface: oklch(0.95 0.04 150);
+  --status-warning: oklch(0.55 0.13 75);
+  --status-warning-surface: oklch(0.955 0.05 85);
+  --status-danger: oklch(0.54 0.19 27);
+  --status-danger-surface: oklch(0.955 0.04 27);
+  --status-info: oklch(0.48 0.12 245);
+  --status-info-surface: oklch(0.95 0.035 245);
+  --status-paused: oklch(0.47 0.045 150);
+  --status-paused-surface: oklch(0.945 0.025 145);
+  --background: oklch(0.975 0.014 88);
+  --foreground: oklch(0.245 0.035 155);
+  --card: oklch(0.993 0.007 88);
+  --card-foreground: oklch(0.245 0.035 155);
+  --popover: oklch(0.993 0.007 88);
+  --popover-foreground: oklch(0.245 0.035 155);
+  --primary: oklch(0.39 0.095 155);
+  --primary-foreground: oklch(0.985 0.008 88);
+  --secondary: oklch(0.94 0.025 98);
+  --secondary-foreground: oklch(0.31 0.055 155);
+  --muted: oklch(0.94 0.02 98);
+  --muted-foreground: oklch(0.48 0.035 150);
+  --accent: oklch(0.91 0.04 145);
+  --accent-foreground: oklch(0.3 0.065 155);
+  --destructive: oklch(0.56 0.21 27);
+  --border: oklch(0.84 0.035 120);
+  --input: oklch(0.84 0.035 120);
+  --ring: oklch(0.52 0.09 155);
+  --sidebar: oklch(0.955 0.022 95);
+  --sidebar-foreground: oklch(0.245 0.035 155);
+  --sidebar-primary: oklch(0.39 0.095 155);
+  --sidebar-primary-foreground: oklch(0.985 0.008 88);
+  --sidebar-accent: oklch(0.91 0.04 145);
+  --sidebar-accent-foreground: oklch(0.3 0.065 155);
+  --sidebar-border: oklch(0.84 0.035 120);
+  --sidebar-ring: oklch(0.52 0.09 155);
+}
+
 .dark {
   color-scheme: dark;
   --surface-raised: oklch(0.215 0.008 255 / 94%);

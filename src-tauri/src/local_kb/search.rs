@@ -15,8 +15,18 @@ use walkdir::WalkDir;
 
 use super::KbError;
 
-const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
+pub(crate) const MAX_FILE_SIZE: u64 = 5 * 1024 * 1024;
 const BINARY_PEEK_BYTES: usize = 512;
+pub(crate) const KEYWORD_FILE_EXTENSIONS: &[&str] = &["md", "txt"];
+pub(crate) const KEYWORD_EXCLUDED_ROOT_PREFIX: &str = "raw/yuandian-cache";
+pub(crate) const KEYWORD_EXCLUDED_SEGMENTS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "__MACOSX",
+    ".DS_Store",
+];
 
 #[derive(Debug, Clone, Copy)]
 pub enum KbScope {
@@ -144,7 +154,7 @@ pub fn search_kb_files(
             let ext_ok = p
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| matches!(e.to_lowercase().as_str(), "md" | "txt"))
+                .map(|e| KEYWORD_FILE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
                 .unwrap_or(false);
             if !ext_ok {
                 continue;
@@ -170,15 +180,13 @@ fn should_skip_root_search_path(root_canonical: &Path, path: &Path) -> bool {
         .strip_prefix(root_canonical)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
-    if rel == "raw/yuandian-cache" || rel.starts_with("raw/yuandian-cache/") {
+    if rel == KEYWORD_EXCLUDED_ROOT_PREFIX
+        || rel.starts_with(&format!("{KEYWORD_EXCLUDED_ROOT_PREFIX}/"))
+    {
         return true;
     }
-    rel.split('/').any(|seg| {
-        matches!(
-            seg,
-            ".git" | "node_modules" | "target" | "dist" | "__MACOSX" | ".DS_Store"
-        )
-    })
+    rel.split('/')
+        .any(|seg| KEYWORD_EXCLUDED_SEGMENTS.contains(&seg))
 }
 
 fn try_match_file(

@@ -10,6 +10,7 @@
 
 import { useLayoutEffect, useRef, useState, type ComponentType } from "react";
 import {
+  BrainCircuit,
   Briefcase,
   CircleDollarSign,
   FileQuestion,
@@ -35,6 +36,7 @@ export type ModuleId =
   | "income"
   | "transaction"
   | "tools"
+  | "memory"
   | "team"
   | "settings";
 
@@ -59,6 +61,13 @@ const MODULES: {
   { id: "income", label: "收入", icon: CircleDollarSign, group: "work" },
   { id: "transaction", label: "非诉", icon: FileQuestion, group: "work" },
   { id: "tools", label: "工具", icon: Wrench, group: "work" },
+  {
+    id: "memory",
+    label: "记忆",
+    icon: BrainCircuit,
+    group: "system",
+    title: "经人工确认、逐轮选择的案件记忆",
+  },
   // 2026-06-10 团队版 Phase 1:LAN 接力同步团队看板(未入团显示引导页)
   { id: "team", label: "团队", icon: Users, group: "system" },
   { id: "settings", label: "设置", icon: SettingsIcon, group: "system" },

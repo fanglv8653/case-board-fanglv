@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "slug": "fanglv-enforcement-recovery-cn",
+  "title": "执行与回款管理",
+  "version": "1.0.0",
+  "description": "执行依据、财产线索、执行措施、异议救济及回款核算的方律工作方法。",
+  "legal_domains": ["enforcement"],
+  "task_types": ["free_chat", "compile_legal_basis", "find_similar_cases", "verify_my_draft", "simulate_opposition"],
+  "required_capabilities": ["case_context", "authorized_finance_records", "legal_sources", "lawyer_review"],
+  "requested_tools": ["list_case_docs", "read_case_doc", "find_in_document", "search_laws", "get_law_article", "search_cases_normal", "get_case_detail", "ask_user", "save_artifact", "edit_artifact"],
+  "default_enabled": true,
+  "author": "方律",
+  "license": "internal"
+}

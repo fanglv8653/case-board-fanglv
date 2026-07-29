@@ -48,8 +48,18 @@ import {
   clearChatHistory,
   getCaseWithDocs,
   listChatHistory,
+  listLegalSkillPackages,
 } from "@/lib/api";
-import type { Citation, Document, ToolCallRecord } from "@/lib/types";
+import {
+  consumeConfirmedMemoryInjection,
+  readConfirmedMemoryInjection,
+} from "@/lib/memoryInjection";
+import type {
+  Citation,
+  Document,
+  LegalSkillPackageRecord,
+  ToolCallRecord,
+} from "@/lib/types";
 import { confirmDialog } from "@/lib/dialog";
 
 import { AskUserCard } from "./AskUserCard";
@@ -223,6 +233,14 @@ export function CaseChatPanel({
   const [activeStrategy, setActiveStrategy] = useState<string | null>(null);
   const [activeStructureGuard, setActiveStructureGuard] =
     useState<LitigationStructureGuard | null>(null);
+  const [legalSkillMode, setLegalSkillMode] = useState("auto");
+  const [legalSkills, setLegalSkills] = useState<LegalSkillPackageRecord[]>([]);
+  const [activeLegalSkill, setActiveLegalSkill] = useState<{
+    slug: string;
+    version: string;
+    contentHash: string;
+    source: string;
+  } | null>(null);
   // 2026-05-31 · 流式状态来自模块级 registry(跨面板卸载存活)。forceRerender 强制重渲染。
   const [, forceRerender] = useState(0);
   const run = getRun(caseId);
@@ -263,6 +281,12 @@ export function CaseChatPanel({
 
   // localStorage 持久化折叠状态 + 广播事件给 FeedbackButton 避让
   useEffect(() => {
+    void listLegalSkillPackages()
+      .then((items) => setLegalSkills(items.filter((item) => item.status === "enabled")))
+      .catch(() => setLegalSkills([]));
+  }, []);
+
+  useEffect(() => {
     try {
       localStorage.setItem(
         CHAT_PANEL_COLLAPSED_KEY,
@@ -289,6 +313,7 @@ export function CaseChatPanel({
     setPendingAsk(null);
     setActiveStrategy(null);
     setActiveStructureGuard(null);
+    setActiveLegalSkill(null);
     if (!caseId || collapsed) return;
     let abort = false;
     setHistoryLoading(true);
@@ -375,6 +400,7 @@ export function CaseChatPanel({
       /* flush 失败不阻断发送(最坏 AI 在稍旧版本上改,后续 reload 会拉回磁盘真值) */
     }
 
+    const confirmedMemory = readConfirmedMemoryInjection(caseId);
     try {
       const result = await caseChat({
         case_id: caseId,
@@ -383,13 +409,32 @@ export function CaseChatPanel({
         message_id: messageId,
         attached_doc_ids: attachedSnapshot,
         editing_doc_id: editingDocId ?? null,
+        preferred_legal_skill_slug:
+          legalSkillMode === "auto" || legalSkillMode === "none"
+            ? null
+            : legalSkillMode,
+        disable_legal_skill: legalSkillMode === "none",
+        memory_injection_run_id: confirmedMemory?.runId ?? null,
+        memory_injection_preview_sha256:
+          confirmedMemory?.previewSha256 ?? null,
       });
+      if (confirmedMemory) consumeConfirmedMemoryInjection(caseId);
       finishRun(caseId);
       // 拿最新历史(后端已经 INSERT 完两条);registry 的 done 订阅也会刷,这里立即刷一次
       const fresh = await listChatHistory(caseId);
       setHistory(fresh);
       setActiveStrategy(result.strategy ?? null);
       setActiveStructureGuard(result.structure_guard ?? null);
+      setActiveLegalSkill(
+        result.legal_skill_slug && result.legal_skill_version
+          ? {
+              slug: result.legal_skill_slug,
+              version: result.legal_skill_version,
+              contentHash: result.legal_skill_content_hash ?? "",
+              source: result.legal_skill_selection_source ?? "automatic",
+            }
+          : null,
+      );
       // V0.3 · 模型这轮发起了选项式追问 → 末尾渲染选项卡片,等用户点选/填写
       setPendingAsk(result.ask_user ?? null);
       // V0.3 · **只有「写文书」(save_artifact)才自动进编辑器**。分析类任务(类案检索/法律依据
@@ -411,6 +456,7 @@ export function CaseChatPanel({
       );
       if (calledEditArtifact) onArtifactEdited?.();
     } catch (e) {
+      if (confirmedMemory) consumeConfirmedMemoryInjection(caseId);
       const msg = formatError(e);
       setError(msg);
       finishRun(caseId, msg);
@@ -733,6 +779,34 @@ export function CaseChatPanel({
 
       {/* 输入区 */}
       <div className="border-t border-border bg-background/30 p-3">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+          <label htmlFor={`legal-skill-${caseId}`} className="text-muted-foreground">
+            本轮法律方法
+          </label>
+          <select
+            id={`legal-skill-${caseId}`}
+            value={legalSkillMode}
+            onChange={(event) => setLegalSkillMode(event.target.value)}
+            disabled={isStreaming}
+            className="max-w-[240px] rounded-md border border-border bg-background px-2 py-1 text-xs"
+          >
+            <option value="auto">自动选择（推荐）</option>
+            <option value="none">不使用附加方法</option>
+            {legalSkills.map((skill) => (
+              <option key={skill.id} value={skill.slug}>
+                {skill.title} · v{skill.version}
+              </option>
+            ))}
+          </select>
+          {activeLegalSkill && (
+            <span
+              className="rounded-full bg-muted px-2 py-1 text-muted-foreground"
+              title={`hash ${activeLegalSkill.contentHash || "未返回"} · ${activeLegalSkill.source}`}
+            >
+              上轮实际：{activeLegalSkill.slug} · v{activeLegalSkill.version}
+            </span>
+          )}
+        </div>
         <div className="flex items-end gap-2">
           {/* V0.2 D6-D7 · 📎 引用文档按钮 */}
           <Button
