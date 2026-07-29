@@ -10,7 +10,9 @@ use super::crypto::{generate_device_keys, generate_group_key, DeviceKeyMaterial}
 use super::nas_folder::MountedFolder;
 use super::SyncError;
 
+#[cfg(target_os = "windows")]
 const CREDENTIAL_PREFIX: &str = "FanglvCaseBoard/device-sync";
+#[cfg(target_os = "windows")]
 const MAX_CREDENTIAL_BLOB_BYTES: usize = 2560;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +238,7 @@ fn credential_account(group_id: &str, device_id: &str, kind: &str) -> String {
     format!("{group_id}/{device_id}/{kind}")
 }
 
+#[cfg(target_os = "windows")]
 fn credential_target(account: &str) -> String {
     format!("{CREDENTIAL_PREFIX}/{account}")
 }
