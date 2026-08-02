@@ -46,10 +46,12 @@ import {
 /** 源文件区视图模式:原文件夹结构 / 分阶段(AI 分类)/ 整理视图 */
 type ViewMode = "folder" | "stage" | "organize";
 
-const PARTY_SIDES = ["原告", "被告", "第三人"] as const;
+const CIVIL_PARTY_SIDES = ["原告", "被告", "第三人"] as const;
+const CRIMINAL_PARTY_SIDES = ["犯罪嫌疑人/被告人", "被害人", "委托人", "其他"] as const;
 
 /** 标记回调签名(文件级单个 / 文件夹级批量都用 docIds 数组) */
 export interface MarkHandlers {
+  partySides: readonly string[];
   markMap: DocMarkMap;
   onMarkImportance: (docIds: string[], value: Importance | null) => void;
   onMarkPartySide: (docIds: string[], value: string, enabled: boolean) => void;
@@ -139,6 +141,7 @@ export function SourceFilesSection({
     [sourceDocs, sourceFolder],
   );
   const marks: MarkHandlers = {
+    partySides: domain === "criminal" ? CRIMINAL_PARTY_SIDES : CIVIL_PARTY_SIDES,
     markMap,
     onMarkImportance,
     onMarkPartySide,
@@ -670,7 +673,7 @@ function FolderTreeView({
             清除重要度
           </button>
           <span className="mx-1 text-border">|</span>
-          {PARTY_SIDES.map((p) => (
+          {marks.partySides.map((p) => (
             <button
               key={p}
               type="button"
@@ -725,6 +728,7 @@ function FolderTreeView({
           y={menu.y}
           label={menu.label}
           mark={menu.mark}
+          partySides={marks.partySides}
           onImportance={(v) => marks.onMarkImportance(menu.docIds, v)}
           onParty={(v, en) => marks.onMarkPartySide(menu.docIds, v, en)}
           onCategory={
@@ -918,6 +922,7 @@ function DocRow({
       {mark && marks && (
         <MarkControls
           mark={mark}
+          partySides={marks.partySides}
           onImportance={(v) => marks.onMarkImportance([doc.id], v)}
           onParty={(v, en) => marks.onMarkPartySide([doc.id], v, en)}
         />
@@ -1094,6 +1099,7 @@ function OrganizeView({
           y={menu.y}
           label={menu.label}
           mark={menu.mark}
+          partySides={marks.partySides}
           onImportance={(v) => marks.onMarkImportance([menu.doc.id], v)}
           onParty={(v, en) => marks.onMarkPartySide([menu.doc.id], v, en)}
           onCategory={(v) => marks.onMarkCategory(menu.doc.id, v)}
@@ -1119,6 +1125,7 @@ function MarkContextMenu({
   y,
   label,
   mark,
+  partySides,
   onImportance,
   onParty,
   onCategory,
@@ -1130,6 +1137,7 @@ function MarkContextMenu({
   label: string;
   /** 单文件传入其当前标记(显示勾选态);文件夹不传 */
   mark?: DocMark;
+  partySides: readonly string[];
   onImportance: (v: Importance | null) => void;
   onParty: (v: string, enabled: boolean) => void;
   /** 仅单文件提供 → 显示「归类」分区(批量不支持改分类) */
@@ -1214,7 +1222,7 @@ function MarkContextMenu({
       </button>
       <div className="my-1 border-t border-border" />
       <div className="px-2 py-0.5 text-[11px] text-muted-foreground">当事人侧</div>
-      {PARTY_SIDES.map((p) => {
+      {partySides.map((p) => {
         const on = mark?.parties.includes(p);
         return (
           <button
@@ -1365,10 +1373,12 @@ function RenameDialog({
 /** Phase 3:文件行内标记控件 —— 重要/忽略(单选,再点取消) + 原/被/三(多选)。 */
 function MarkControls({
   mark,
+  partySides,
   onImportance,
   onParty,
 }: {
   mark: DocMark;
+  partySides: readonly string[];
   onImportance: (v: Importance | null) => void;
   onParty: (v: string, enabled: boolean) => void;
 }) {
@@ -1404,7 +1414,7 @@ function MarkControls({
         忽略
       </button>
       <span className="mx-0.5 text-border">·</span>
-      {PARTY_SIDES.map((p) => {
+      {partySides.map((p) => {
         const on = mark.parties.includes(p);
         return (
           <button

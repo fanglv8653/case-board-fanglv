@@ -278,7 +278,7 @@ export function ToolsModule({
     );
   }
 
-  // ──────────── 飞书连接：案件只读预演 + 日历设置 ────────────
+// ──────────── 飞书连接：案件受控同步 + 日历设置 ────────────
   if (activeTool === "feishu") {
     return (
       <main className="flex h-full w-full flex-col bg-background">
@@ -443,7 +443,7 @@ export function ToolsModule({
               <LegalToolCard
                 icon={CalendarClock}
                 title="飞书连接"
-                desc="只读查看在办案件同步预演，并管理飞书日历设置"
+          desc="预演在办案件差异，逐项确认受控双向同步，并管理飞书日历设置"
                 onClick={() => setActiveTool("feishu")}
               />
             </div>

@@ -37,11 +37,17 @@ test("criminal identity fields remain separate and stage-aware", () => {
   assert.doesNotMatch(panel, /client_name[^\n]*(plaintiffs|defendants|prosecutionAgency)/);
 });
 
-test("legacy snapshot keeps editable basics only inside the information tab", () => {
+test("legacy snapshot keeps civil-only fields out of criminal details", () => {
   assert.match(snapshot, /contentMode\?: "full" \| "basic" \| "supplemental"/);
   assert.match(snapshot, /contentMode !== "supplemental" \? \[TITLES\.BASIC\]/);
-  assert.match(snapshot, /contentMode !== "basic" \? \[TITLES\.FEE, TITLES\.TIMELINE\]/);
+  assert.match(snapshot, /!isCriminal \? \[TITLES\.TIMELINE\] : \[\]/);
   assert.match(snapshot, /!isCriminal && \([\s\S]*?label="案由"/);
   assert.match(snapshot, /!isCriminal && <FactRow label="案件类型"/);
-  assert.match(snapshot, /label="案件状态"[\s\S]*?edit\("agg_status_text"\)/);
+  assert.match(
+    snapshot,
+    /isCriminal \? \([\s\S]*?label="管理状态"[\s\S]*?: \([\s\S]*?label="案件状态"[\s\S]*?edit\("agg_status_text"\)/,
+  );
+  assert.match(snapshot, /contentMode === "full" && !isCriminal/);
+  assert.match(panel, /value=\{currentAgency \|\| "待核实"\}/);
+  assert.doesNotMatch(panel, /value=\{caseData\.agg_court \|\| caseData\.court/);
 });

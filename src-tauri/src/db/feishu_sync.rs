@@ -1,6 +1,6 @@
-//! 飞书案件管理同步的只读预览。
+//! 飞书案件管理同步预演与逐项人工复核。
 //!
-//! 本模块只查询 0049/0050 迁移产生的预演表，不联网、不修改飞书，也不写入案件表。
+//! 预演本身不修改业务字段；只有显式选择“采用飞书”时才写本地业务字段。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -291,6 +291,9 @@ async fn complete_pull_internal(
         .begin()
         .await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法开始预演事务".to_string())?;
+    sqlx::query("UPDATE feishu_sync_field_previews SET review_status='superseded',resolved_at=datetime('now') WHERE review_status='pending'")
+        .execute(&mut *tx).await
+        .map_err(|e| format!("FEISHU_DB_PREVIEW_WRITE_FAILED: 无法结束旧的字段候选: {e}"))?;
     let mut bound_count = 0usize;
     let mut pending_count = 0usize;
     let mut proposed_change_count = 0usize;
@@ -406,15 +409,26 @@ async fn complete_pull_internal(
                 .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 保存只读快照失败".to_string())?;
 
             let local: LocalCaseComparison = sqlx::query_as(
-                r#"SELECT COALESCE(NULLIF(display_name_override,''),name) AS display_name,
-                          legal_domain,
-                          COALESCE(NULLIF(agg_case_no,''),case_no) AS case_no,
-                          management_status,
-                          COALESCE(NULLIF(stage,''),NULL) AS stage,
-                          COALESCE(NULLIF(agg_cause,''),cause) AS cause,
-                          COALESCE(NULLIF(agg_court,''),court) AS authority,
-                          CASE WHEN legal_domain='criminal' THEN json_extract(agg_defendants,'$[0]') ELSE json_extract(agg_plaintiffs,'$[0]') END AS party
-                   FROM cases WHERE id=?1"#,
+                r#"SELECT COALESCE(NULLIF(c.display_name_override,''),c.name) AS display_name,
+                          c.legal_domain,
+                          CASE WHEN c.legal_domain='criminal'
+                            THEN NULLIF(c.case_no,'')
+                            ELSE COALESCE(NULLIF(c.agg_case_no,''),c.case_no) END AS case_no,
+                          c.management_status,
+                          CASE WHEN c.legal_domain='criminal'
+                            THEN p.current_stage ELSE NULLIF(c.stage,'') END AS stage,
+                          CASE WHEN c.legal_domain='criminal'
+                            THEN p.suspected_charge ELSE COALESCE(NULLIF(c.agg_cause,''),c.cause) END AS cause,
+                          CASE WHEN c.legal_domain='criminal' THEN (
+                            SELECT ac.agency_name FROM case_agency_contacts ac
+                            WHERE ac.case_id=c.id AND ac.deleted_at IS NULL AND ac.agency_name IS NOT NULL
+                            ORDER BY ac.updated_at DESC LIMIT 1
+                          ) ELSE COALESCE(NULLIF(c.agg_court,''),c.court) END AS authority,
+                          CASE WHEN c.legal_domain='criminal'
+                            THEN p.suspect_or_defendant_name ELSE json_extract(c.agg_plaintiffs,'$[0]') END AS party
+                   FROM cases c
+                   LEFT JOIN criminal_case_profiles p ON p.case_id=c.id
+                   WHERE c.id=?1"#,
             ).bind(case_id).fetch_one(&mut *tx).await
             .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 读取本地案件用于比对失败".to_string())?;
             let comparisons = [
@@ -496,7 +510,7 @@ async fn complete_pull_internal(
         }
     }
     let entity_counts = if let Some(bundle) = management {
-        crate::db::feishu_entities::import_management_records(
+        crate::db::feishu_entities::preview_management_records(
             &mut tx, run_id, app_token, table_id, bundle,
         )
         .await?
@@ -683,6 +697,18 @@ pub struct FeishuSyncChangePreview {
     pub feishu_value_json: Option<String>,
     pub classification: String,
     pub proposed_action: String,
+    pub review_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FeishuSyncEntityPreview {
+    pub id: String,
+    pub case_name: String,
+    pub entity_type: String,
+    pub change_kind: String,
+    pub local_value_json: Option<String>,
+    pub feishu_value_json: Option<String>,
+    pub review_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -716,6 +742,7 @@ pub struct FeishuSyncPreview {
     pub ignored_cases: Vec<FeishuSyncInboxPreview>,
     pub available_local_cases: Vec<FeishuLocalCaseOption>,
     pub proposed_changes: Vec<FeishuSyncChangePreview>,
+    pub entity_changes: Vec<FeishuSyncEntityPreview>,
     pub conflicts: Vec<FeishuSyncConflictPreview>,
     pub recent_runs: Vec<FeishuSyncRunPreview>,
 }
@@ -831,7 +858,8 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
                            COALESCE(c.agg_cause, c.cause), c.name,
                            l.local_entity_id, '未绑定案件') AS case_name,
                   ch.field_key, ch.field_label, ch.local_value_json,
-                  ch.feishu_value_json, ch.classification, ch.proposed_action
+                   ch.feishu_value_json, ch.classification, ch.proposed_action,
+                   ch.review_status
            FROM feishu_sync_field_previews ch
            LEFT JOIN feishu_sync_links l ON ch.link_id = l.id
            LEFT JOIN cases c ON l.entity_type = 'case' AND c.id = l.local_entity_id
@@ -841,12 +869,26 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
                WHERE mode IN ('readonly_preflight','pull')
                  AND status IN ('succeeded','partial')
                ORDER BY started_at DESC LIMIT 1
-           ) AND ch.proposed_action <> 'none'
+            ) AND ch.proposed_action <> 'none' AND ch.review_status='pending'
            ORDER BY ch.created_at DESC, case_name COLLATE NOCASE, ch.field_key"#,
     )
     .fetch_all(pool)
     .await
     .map_err(|e| format!("读取拟更新字段失败: {e}"))?;
+
+    let entity_changes = sqlx::query_as::<_, FeishuSyncEntityPreview>(
+        r#"SELECT id,case_name,entity_type,change_kind,local_value_json,
+                  feishu_value_json,review_status
+           FROM feishu_sync_entity_previews
+           WHERE run_id=(SELECT id FROM feishu_sync_runs
+             WHERE mode IN ('readonly_preflight','pull') AND status IN ('succeeded','partial')
+             ORDER BY started_at DESC LIMIT 1)
+             AND review_status='pending'
+           ORDER BY created_at DESC,case_name COLLATE NOCASE,entity_type"#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("读取飞书明细候选失败: {e}"))?;
 
     let conflicts = sqlx::query_as::<_, FeishuSyncConflictPreview>(
         r#"SELECT cf.id,
@@ -899,9 +941,547 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
         ignored_cases,
         available_local_cases,
         proposed_changes,
+        entity_changes,
         conflicts,
         recent_runs,
     })
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct FeishuFieldResolutionPlan {
+    pub preview_id: String,
+    pub link_id: String,
+    pub case_id: String,
+    pub legal_domain: String,
+    pub app_token: String,
+    pub table_id: String,
+    pub record_id: String,
+    pub field_key: String,
+    pub local_value_json: Option<String>,
+    pub feishu_value_json: Option<String>,
+    pub review_status: String,
+}
+
+fn json_text(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value else { return Ok(None) };
+    let parsed: Value = serde_json::from_str(value)
+        .map_err(|_| "FEISHU_REVIEW_INVALID: 字段预演值不是有效 JSON".to_string())?;
+    Ok(match parsed {
+        Value::Null => None,
+        Value::String(text) => clean(text),
+        other => clean(other.to_string()),
+    })
+}
+
+pub async fn get_field_resolution_plan(
+    pool: &SqlitePool,
+    preview_id: &str,
+) -> Result<FeishuFieldResolutionPlan, String> {
+    sqlx::query_as::<_, FeishuFieldResolutionPlan>(
+        r#"SELECT p.id AS preview_id,p.link_id,l.local_entity_id AS case_id,
+                  COALESCE(c.legal_domain,'unknown') AS legal_domain,
+                  l.app_token,l.table_id,l.record_id,p.field_key,
+                  p.local_value_json,p.feishu_value_json,p.review_status
+           FROM feishu_sync_field_previews p
+           JOIN feishu_sync_links l ON l.id=p.link_id AND l.entity_type='case' AND l.status='active'
+           JOIN cases c ON c.id=l.local_entity_id
+           WHERE p.id=?1"#,
+    )
+    .bind(preview_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("FEISHU_REVIEW_READ_FAILED: {e}"))?
+    .ok_or_else(|| "FEISHU_REVIEW_NOT_FOUND: 找不到待复核字段".to_string())
+}
+
+pub async fn ensure_field_preview_fresh(
+    pool: &SqlitePool,
+    plan: &FeishuFieldResolutionPlan,
+) -> Result<(), String> {
+    let local: LocalCaseComparison = sqlx::query_as(
+        r#"SELECT COALESCE(NULLIF(c.display_name_override,''),c.name) AS display_name,
+                  c.legal_domain,
+                  CASE WHEN c.legal_domain='criminal' THEN NULLIF(c.case_no,'')
+                    ELSE COALESCE(NULLIF(c.agg_case_no,''),c.case_no) END AS case_no,
+                  c.management_status,
+                  CASE WHEN c.legal_domain='criminal' THEN p.current_stage ELSE NULLIF(c.stage,'') END AS stage,
+                  CASE WHEN c.legal_domain='criminal' THEN p.suspected_charge
+                    ELSE COALESCE(NULLIF(c.agg_cause,''),c.cause) END AS cause,
+                  CASE WHEN c.legal_domain='criminal' THEN (
+                    SELECT ac.agency_name FROM case_agency_contacts ac
+                    WHERE ac.case_id=c.id AND ac.deleted_at IS NULL AND ac.agency_name IS NOT NULL
+                    ORDER BY ac.updated_at DESC LIMIT 1
+                  ) ELSE COALESCE(NULLIF(c.agg_court,''),c.court) END AS authority,
+                  CASE WHEN c.legal_domain='criminal' THEN p.suspect_or_defendant_name
+                    ELSE json_extract(c.agg_plaintiffs,'$[0]') END AS party
+           FROM cases c LEFT JOIN criminal_case_profiles p ON p.case_id=c.id WHERE c.id=?1"#,
+    ).bind(&plan.case_id).fetch_one(pool).await
+        .map_err(|e|format!("FEISHU_REVIEW_READ_FAILED: {e}"))?;
+    let value = match plan.field_key.as_str() {
+        "display_name" => local.display_name.as_deref(),
+        "legal_domain" => local.legal_domain.as_deref(),
+        "case_no" => local.case_no.as_deref(),
+        "management_status" => local.management_status.as_deref(),
+        "stage" => local.stage.as_deref(),
+        "cause" => local.cause.as_deref(),
+        "authority" => local.authority.as_deref(),
+        "party" => local.party.as_deref(),
+        _ => return Err("FEISHU_REVIEW_UNSUPPORTED: 不支持的案件字段".into()),
+    };
+    if json_value(value) != plan.local_value_json {
+        return Err("FEISHU_REVIEW_STALE: 本地字段在预演后已变化，请刷新后重新复核".into());
+    }
+    Ok(())
+}
+
+pub fn ensure_remote_field_snapshot(
+    plan: &FeishuFieldResolutionPlan,
+    record: &FeishuRemoteCaseRecord,
+) -> Result<(), String> {
+    let remote = map_remote(record)
+        .map_err(|_| "FEISHU_REVIEW_STALE: 飞书字段在预演后已变化，请重新获取预演".to_string())?;
+    let value = match plan.field_key.as_str() {
+        "display_name" => clean(remote.display_name),
+        "legal_domain" => remote.legal_domain,
+        "case_no" => remote.case_no,
+        "management_status" => Some("active".into()),
+        "stage" => remote.stage,
+        "cause" => remote.cause,
+        "authority" => remote.authority,
+        "party" => remote.party,
+        _ => return Err("FEISHU_REVIEW_UNSUPPORTED: 不支持的案件字段".into()),
+    };
+    if json_value(value.as_deref()) != plan.feishu_value_json {
+        return Err("FEISHU_REVIEW_STALE: 飞书字段在预演后已变化，请重新获取预演".into());
+    }
+    Ok(())
+}
+
+pub fn local_value_for_feishu(plan: &FeishuFieldResolutionPlan) -> Result<(String, Value), String> {
+    let value = json_text(plan.local_value_json.as_deref())?;
+    let text = value.clone().unwrap_or_default();
+    let mapped = match plan.field_key.as_str() {
+        "display_name" => ("案件名称", Value::String(text)),
+        "legal_domain" => (
+            "类型",
+            Value::String(match text.as_str() {
+                "criminal" => "刑事".into(),
+                "civil" => "民事".into(),
+                "other" => "执行".into(),
+                _ => return Err("FEISHU_REVIEW_UNSUPPORTED: 未确认案件领域不能写入飞书".into()),
+            }),
+        ),
+        "case_no" => ("案号", Value::String(text)),
+        "management_status" => (
+            "☑状态",
+            Value::String(match text.as_str() {
+                "active" => "在办".into(),
+                "negotiating" => "洽谈".into(),
+                "closed" => "结案".into(),
+                _ => return Err("FEISHU_REVIEW_UNSUPPORTED: 未确认管理状态不能写入飞书".into()),
+            }),
+        ),
+        "cause" => ("案由", Value::String(text)),
+        "authority" => ("管辖法院", Value::String(text)),
+        "party" => ("当事人", Value::String(text)),
+        "stage" => return Err("FEISHU_REVIEW_UNSUPPORTED: 程序阶段须通过阶段表同步".into()),
+        _ => {
+            return Err(format!(
+                "FEISHU_REVIEW_UNSUPPORTED: 不支持字段 {}",
+                plan.field_key
+            ))
+        }
+    };
+    Ok((mapped.0.to_string(), mapped.1))
+}
+
+pub async fn apply_feishu_value_to_local(
+    pool: &SqlitePool,
+    plan: &FeishuFieldResolutionPlan,
+) -> Result<(), String> {
+    if plan.review_status != "pending" {
+        return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该字段已处理".to_string());
+    }
+    ensure_field_preview_fresh(pool, plan).await?;
+    let value = json_text(plan.feishu_value_json.as_deref())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    match plan.field_key.as_str() {
+        "display_name" => {
+            sqlx::query("UPDATE cases SET display_name_override=?2,updated_at=datetime('now') WHERE id=?1")
+                .bind(&plan.case_id).bind(&value).execute(&mut *tx).await
+        }
+        "legal_domain" => {
+            let domain = value.as_deref().filter(|v| matches!(*v, "criminal"|"civil"|"other"|"unknown"))
+                .ok_or_else(|| "FEISHU_REVIEW_INVALID: 飞书案件领域无法识别".to_string())?;
+            sqlx::query("UPDATE cases SET legal_domain=?2,domain_source='feishu',updated_at=datetime('now') WHERE id=?1")
+                .bind(&plan.case_id).bind(domain).execute(&mut *tx).await
+        }
+        "case_no" => sqlx::query("UPDATE cases SET case_no=?2,updated_at=datetime('now') WHERE id=?1")
+            .bind(&plan.case_id).bind(&value).execute(&mut *tx).await,
+        "management_status" => {
+            let status = value.as_deref().filter(|v| matches!(*v, "active"|"negotiating"|"closed"|"unknown"))
+                .ok_or_else(|| "FEISHU_REVIEW_INVALID: 飞书管理状态无法识别".to_string())?;
+            sqlx::query("UPDATE cases SET management_status=?2,management_status_source='feishu',updated_at=datetime('now') WHERE id=?1")
+                .bind(&plan.case_id).bind(status).execute(&mut *tx).await
+        }
+        "stage" if plan.legal_domain == "criminal" => {
+            let stage = crate::db::criminal_cases::canonical_criminal_stage(value.as_deref())?
+                .ok_or_else(|| "FEISHU_REVIEW_INVALID: 刑事程序阶段不能为空".to_string())?;
+            sqlx::query("INSERT INTO criminal_case_profiles(case_id,current_stage) VALUES(?1,?2) ON CONFLICT(case_id) DO UPDATE SET current_stage=excluded.current_stage,updated_at=datetime('now')")
+                .bind(&plan.case_id).bind(stage).execute(&mut *tx).await
+        }
+        "stage" => sqlx::query("UPDATE cases SET stage=?2,updated_at=datetime('now') WHERE id=?1")
+            .bind(&plan.case_id).bind(&value).execute(&mut *tx).await,
+        "cause" if plan.legal_domain == "criminal" => sqlx::query("INSERT INTO criminal_case_profiles(case_id,suspected_charge) VALUES(?1,?2) ON CONFLICT(case_id) DO UPDATE SET suspected_charge=excluded.suspected_charge,updated_at=datetime('now')")
+            .bind(&plan.case_id).bind(&value).execute(&mut *tx).await,
+        "cause" => sqlx::query("UPDATE cases SET cause=?2,updated_at=datetime('now') WHERE id=?1")
+            .bind(&plan.case_id).bind(&value).execute(&mut *tx).await,
+        "authority" if plan.legal_domain == "criminal" => sqlx::query("INSERT INTO case_agency_contacts(id,case_id,agency_name,source,external_source,external_record_id,external_slot_key) VALUES(?1,?2,?3,'feishu','feishu',?4,'master_authority') ON CONFLICT DO UPDATE SET agency_name=excluded.agency_name,updated_at=datetime('now'),deleted_at=NULL")
+            .bind(Uuid::new_v4().to_string()).bind(&plan.case_id).bind(&value).bind(&plan.record_id).execute(&mut *tx).await,
+        "authority" => sqlx::query("UPDATE cases SET court=?2,updated_at=datetime('now') WHERE id=?1")
+            .bind(&plan.case_id).bind(&value).execute(&mut *tx).await,
+        "party" if plan.legal_domain == "criminal" => sqlx::query("INSERT INTO criminal_case_profiles(case_id,suspect_or_defendant_name) VALUES(?1,?2) ON CONFLICT(case_id) DO UPDATE SET suspect_or_defendant_name=excluded.suspect_or_defendant_name,updated_at=datetime('now')")
+            .bind(&plan.case_id).bind(&value).execute(&mut *tx).await,
+        "party" => {
+            let parties = value.as_ref().map(|v| json!([v]).to_string());
+            sqlx::query("UPDATE cases SET agg_plaintiffs=?2,updated_at=datetime('now') WHERE id=?1")
+                .bind(&plan.case_id).bind(parties).execute(&mut *tx).await
+        }
+        _ => return Err(format!("FEISHU_REVIEW_UNSUPPORTED: 不支持字段 {}", plan.field_key)),
+    }.map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    resolve_preview_and_audit(
+        &mut tx,
+        plan,
+        "applied_feishu",
+        "feishu_to_local",
+        plan.feishu_value_json.as_deref(),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))
+}
+
+async fn resolve_preview_and_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    plan: &FeishuFieldResolutionPlan,
+    review_status: &str,
+    direction: &str,
+    after_value: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query("UPDATE feishu_sync_field_previews SET review_status=?2,resolution_value_json=?3,resolved_at=datetime('now') WHERE id=?1 AND review_status='pending'")
+        .bind(&plan.preview_id).bind(review_status).bind(after_value).execute(&mut **tx).await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    sqlx::query("INSERT INTO feishu_sync_operation_audits(id,preview_id,link_id,entity_type,field_key,direction,status,before_value_json,after_value_json) VALUES(?1,?2,?3,'case',?4,?5,'succeeded',?6,?7)")
+        .bind(Uuid::new_v4().to_string()).bind(&plan.preview_id).bind(&plan.link_id)
+        .bind(&plan.field_key).bind(direction).bind(&plan.local_value_json).bind(after_value)
+        .execute(&mut **tx).await.map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    Ok(())
+}
+
+pub async fn finish_local_to_feishu(
+    pool: &SqlitePool,
+    plan: &FeishuFieldResolutionPlan,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    resolve_preview_and_audit(
+        &mut tx,
+        plan,
+        "applied_local",
+        "local_to_feishu",
+        plan.local_value_json.as_deref(),
+    )
+    .await?;
+    sqlx::query("UPDATE feishu_sync_links SET last_local_updated_at=datetime('now'),last_synced_at=datetime('now'),updated_at=datetime('now') WHERE id=?1")
+        .bind(&plan.link_id).execute(&mut *tx).await.map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))
+}
+
+pub async fn dismiss_field_preview(pool: &SqlitePool, preview_id: &str) -> Result<(), String> {
+    let plan = get_field_resolution_plan(pool, preview_id).await?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    resolve_preview_and_audit(&mut tx, &plan, "dismissed", "dismiss", None).await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct FeishuEntityResolutionPlan {
+    pub preview_id: String,
+    pub link_id: String,
+    pub entity_type: String,
+    pub local_entity_id: Option<String>,
+    pub app_token: String,
+    pub table_id: String,
+    pub record_id: String,
+    pub slot_key: String,
+    pub case_id: String,
+    pub local_value_json: Option<String>,
+    pub feishu_value_json: Option<String>,
+    pub mapped_value_json: Option<String>,
+    pub review_status: String,
+}
+
+pub async fn get_entity_resolution_plan(
+    pool: &SqlitePool,
+    preview_id: &str,
+) -> Result<FeishuEntityResolutionPlan, String> {
+    sqlx::query_as::<_, FeishuEntityResolutionPlan>(
+        "SELECT id AS preview_id,link_id,entity_type,local_entity_id,app_token,table_id,record_id,slot_key,case_id,
+                local_value_json,feishu_value_json,mapped_value_json,review_status
+         FROM feishu_sync_entity_previews WHERE id=?1",
+    ).bind(preview_id).fetch_optional(pool).await
+        .map_err(|e| format!("FEISHU_REVIEW_READ_FAILED: {e}"))?
+        .ok_or_else(|| "FEISHU_REVIEW_NOT_FOUND: 找不到待复核明细".to_string())
+}
+
+pub async fn ensure_entity_preview_fresh(
+    pool: &SqlitePool,
+    plan: &FeishuEntityResolutionPlan,
+) -> Result<(), String> {
+    let current:Option<String>=match plan.entity_type.as_str(){
+        "work_item"=>sqlx::query_scalar("SELECT json_object('occurred_at',occurred_at,'work_type',work_type,'title',title,'content',content,'duration_minutes',duration_minutes) FROM case_work_items WHERE id=?1")
+            .bind(plan.local_entity_id.as_deref().unwrap_or("")).fetch_optional(pool).await,
+        "stage"=>sqlx::query_scalar("SELECT json_object('major_stage',major_stage,'stage_label',stage_label,'status',status,'started_at',started_at,'due_at',due_at,'reminder_at',reminder_at) FROM case_stage_items WHERE id=?1")
+            .bind(plan.local_entity_id.as_deref().unwrap_or("")).fetch_optional(pool).await,
+        "contact"=>sqlx::query_scalar("SELECT json_object('stage_scope',stage_scope,'agency_name',agency_name,'contact_role',contact_role,'contact_name',contact_name,'case_no',case_no,'query_code',query_code,'notes',notes) FROM case_agency_contacts WHERE id=?1")
+            .bind(plan.local_entity_id.as_deref().unwrap_or("")).fetch_optional(pool).await,
+        _=>return Err("FEISHU_REVIEW_UNSUPPORTED: 不支持的明细类型".into()),
+    }.map_err(|e|format!("FEISHU_REVIEW_READ_FAILED: {e}"))?;
+    let same = match (current.as_deref(), plan.local_value_json.as_deref()) {
+        (None, None) => true,
+        (Some(current), Some(snapshot)) => {
+            serde_json::from_str::<Value>(current).ok()
+                == serde_json::from_str::<Value>(snapshot).ok()
+        }
+        _ => false,
+    };
+    if !same {
+        return Err("FEISHU_REVIEW_STALE: 本地明细在预演后已变化，请刷新后重新复核".into());
+    }
+    Ok(())
+}
+
+pub fn ensure_remote_entity_snapshot(
+    plan: &FeishuEntityResolutionPlan,
+    record: &FeishuRemoteCaseRecord,
+) -> Result<(), String> {
+    let snapshot: Value = serde_json::from_str(
+        plan.feishu_value_json
+            .as_deref()
+            .ok_or_else(|| "FEISHU_REVIEW_INVALID: 飞书明细快照缺失".to_string())?,
+    )
+    .map_err(|e| format!("FEISHU_REVIEW_INVALID: 飞书明细快照无效: {e}"))?;
+    if snapshot != record.fields {
+        return Err("FEISHU_REVIEW_STALE: 飞书明细在预演后已变化，请重新获取预演".into());
+    }
+    Ok(())
+}
+
+fn entity_json(_plan: &FeishuEntityResolutionPlan, source: Option<&str>) -> Result<Value, String> {
+    serde_json::from_str(source.ok_or_else(|| "FEISHU_REVIEW_INVALID: 明细候选值为空".to_string())?)
+        .map_err(|e| format!("FEISHU_REVIEW_INVALID: 明细候选 JSON 无效: {e}"))
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn datetime_millis(value: Option<String>) -> Value {
+    value
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(&text).ok())
+        .map(|date| Value::Number(date.timestamp_millis().into()))
+        .unwrap_or(Value::Null)
+}
+
+pub fn local_entity_fields_for_feishu(
+    plan: &FeishuEntityResolutionPlan,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let local = entity_json(plan, plan.local_value_json.as_deref())?;
+    let mut fields = serde_json::Map::new();
+    match plan.entity_type.as_str() {
+        "work_item" => {
+            fields.insert(
+                "进度日期".into(),
+                datetime_millis(json_string(&local, "occurred_at")),
+            );
+            fields.insert(
+                "进展类型".into(),
+                Value::String(json_string(&local, "title").unwrap_or_else(|| "其他".into())),
+            );
+            fields.insert(
+                "进度填写区".into(),
+                Value::String(json_string(&local, "content").unwrap_or_default()),
+            );
+            let minutes = local
+                .get("duration_minutes")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            fields.insert("小时".into(), Value::Number((minutes / 60).into()));
+            fields.insert("分钟".into(), Value::Number((minutes % 60).into()));
+        }
+        "stage" => {
+            fields.insert(
+                "程序".into(),
+                Value::String(json_string(&local, "stage_label").unwrap_or_default()),
+            );
+            fields.insert(
+                "阶段".into(),
+                Value::String(json_string(&local, "major_stage").unwrap_or_default()),
+            );
+            fields.insert(
+                "开始时间".into(),
+                datetime_millis(json_string(&local, "started_at")),
+            );
+            fields.insert(
+                "程序结束时间".into(),
+                datetime_millis(json_string(&local, "due_at")),
+            );
+            fields.insert(
+                "提醒时间".into(),
+                datetime_millis(json_string(&local, "reminder_at")),
+            );
+        }
+        "contact" => {
+            fields.insert(
+                plan.slot_key.clone(),
+                Value::String(json_string(&local, "contact_name").unwrap_or_default()),
+            );
+            if let Some(name) = json_string(&local, "agency_name") {
+                let key = match json_string(&local, "stage_scope").as_deref() {
+                    Some("investigation") => "侦查机关",
+                    Some("prosecution") => "审查起诉",
+                    _ => "审判机关",
+                };
+                fields.insert(key.into(), Value::String(name));
+            }
+            if let Some(value) = json_string(&local, "case_no") {
+                fields.insert("案号".into(), Value::String(value));
+            }
+            if let Some(value) = json_string(&local, "query_code") {
+                fields.insert("案件查询码/备注".into(), Value::String(value));
+            }
+            if let Some(value) = json_string(&local, "notes") {
+                fields.insert("备注".into(), Value::String(value));
+            }
+        }
+        _ => return Err("FEISHU_REVIEW_UNSUPPORTED: 不支持的明细类型".into()),
+    }
+    Ok(fields)
+}
+
+async fn finish_entity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    plan: &FeishuEntityResolutionPlan,
+    review_status: &str,
+    direction: &str,
+) -> Result<(), String> {
+    let changed=sqlx::query("UPDATE feishu_sync_entity_previews SET review_status=?2,resolved_at=datetime('now') WHERE id=?1 AND review_status='pending'")
+        .bind(&plan.preview_id).bind(review_status).execute(&mut **tx).await
+        .map_err(|e|format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    if changed.rows_affected() != 1 {
+        return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该明细已处理".into());
+    }
+    sqlx::query("INSERT INTO feishu_sync_operation_audits(id,preview_id,link_id,entity_type,field_key,direction,status,before_value_json,after_value_json)
+                 VALUES(?1,NULL,?2,?3,?4,?5,'succeeded',?6,?7)")
+        .bind(Uuid::new_v4().to_string()).bind(&plan.link_id).bind(&plan.entity_type)
+        .bind(format!("{}:{}",plan.entity_type,plan.record_id)).bind(direction)
+        .bind(&plan.local_value_json).bind(&plan.feishu_value_json).execute(&mut **tx).await
+        .map_err(|e|format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    Ok(())
+}
+
+pub async fn apply_feishu_entity_to_local(
+    pool: &SqlitePool,
+    plan: &FeishuEntityResolutionPlan,
+) -> Result<(), String> {
+    if plan.review_status != "pending" {
+        return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该明细已处理".into());
+    }
+    ensure_entity_preview_fresh(pool, plan).await?;
+    let wrapper = entity_json(plan, plan.mapped_value_json.as_deref())?;
+    let values = wrapper
+        .get("values")
+        .ok_or_else(|| "FEISHU_REVIEW_INVALID: 明细映射值缺失".to_string())?;
+    let raw = json_string(&wrapper, "raw_payload_json");
+    let external_updated = json_string(&wrapper, "external_updated_at");
+    let id = plan
+        .local_entity_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    match plan.entity_type.as_str(){
+        "work_item"=>{
+            sqlx::query("INSERT INTO case_work_items(id,case_id,occurred_at,work_type,title,content,duration_minutes,source,external_source,external_record_id,external_updated_at,raw_payload_json,external_status,external_last_seen_at)
+                VALUES(?1,?2,?3,?4,?5,?6,?7,'feishu','feishu',?8,?9,?10,'active',datetime('now'))
+                ON CONFLICT(id) DO UPDATE SET case_id=excluded.case_id,occurred_at=excluded.occurred_at,work_type=excluded.work_type,title=excluded.title,content=excluded.content,duration_minutes=excluded.duration_minutes,external_updated_at=excluded.external_updated_at,raw_payload_json=excluded.raw_payload_json,external_status='active',external_last_seen_at=datetime('now'),deleted_at=NULL,updated_at=datetime('now')")
+                .bind(&id).bind(&plan.case_id).bind(json_string(values,"occurred_at")).bind(json_string(values,"work_type"))
+                .bind(json_string(values,"title")).bind(json_string(values,"content")).bind(values.get("duration_minutes").and_then(Value::as_i64).unwrap_or(0))
+                .bind(&plan.record_id).bind(external_updated).bind(raw).execute(&mut *tx).await
+        }
+        "stage"=>{
+            let domain=json_string(&wrapper,"domain").ok_or_else(||"FEISHU_REVIEW_INVALID: 阶段领域缺失".to_string())?;
+            sqlx::query("INSERT INTO case_stage_items(id,case_id,domain,major_stage,stage_label,status,started_at,due_at,reminder_at,source,external_source,external_record_id,external_updated_at,raw_payload_json,external_status,external_last_seen_at)
+                VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'feishu','feishu',?10,?11,?12,'active',datetime('now'))
+                ON CONFLICT(id) DO UPDATE SET case_id=excluded.case_id,domain=excluded.domain,major_stage=excluded.major_stage,stage_label=excluded.stage_label,status=excluded.status,started_at=excluded.started_at,due_at=excluded.due_at,reminder_at=excluded.reminder_at,external_updated_at=excluded.external_updated_at,raw_payload_json=excluded.raw_payload_json,external_status='active',external_last_seen_at=datetime('now'),deleted_at=NULL,updated_at=datetime('now')")
+                .bind(&id).bind(&plan.case_id).bind(domain).bind(json_string(values,"major_stage")).bind(json_string(values,"stage_label"))
+                .bind(json_string(values,"status")).bind(json_string(values,"started_at")).bind(json_string(values,"due_at")).bind(json_string(values,"reminder_at"))
+                .bind(&plan.record_id).bind(external_updated).bind(raw).execute(&mut *tx).await
+        }
+        "contact"=>sqlx::query("INSERT INTO case_agency_contacts(id,case_id,stage_scope,agency_type,agency_name,contact_role,contact_name,case_no,query_code,notes,source,external_source,external_record_id,external_slot_key,external_updated_at,external_last_seen_at,external_status,raw_payload_json)
+                VALUES(?1,?2,?3,?3,?4,?5,?6,?7,?8,?9,'feishu','feishu',?10,?11,?12,datetime('now'),'active',?13)
+                ON CONFLICT(id) DO UPDATE SET case_id=excluded.case_id,stage_scope=excluded.stage_scope,agency_type=excluded.agency_type,agency_name=excluded.agency_name,contact_role=excluded.contact_role,contact_name=excluded.contact_name,case_no=excluded.case_no,query_code=excluded.query_code,notes=excluded.notes,external_updated_at=excluded.external_updated_at,external_last_seen_at=datetime('now'),external_status='active',raw_payload_json=excluded.raw_payload_json,deleted_at=NULL,updated_at=datetime('now')")
+                .bind(&id).bind(&plan.case_id).bind(json_string(values,"stage_scope")).bind(json_string(values,"agency_name"))
+                .bind(json_string(values,"contact_role")).bind(json_string(values,"contact_name")).bind(json_string(values,"case_no"))
+                .bind(json_string(values,"query_code")).bind(json_string(values,"notes")).bind(&plan.record_id).bind(&plan.slot_key)
+                .bind(external_updated).bind(raw).execute(&mut *tx).await,
+        _=>return Err("FEISHU_REVIEW_UNSUPPORTED: 不支持的明细类型".into()),
+    }.map_err(|e|format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    finish_entity(&mut tx, plan, "applied_feishu", "feishu_to_local").await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))
+}
+
+pub async fn finish_local_entity_to_feishu(
+    pool: &SqlitePool,
+    plan: &FeishuEntityResolutionPlan,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    finish_entity(&mut tx, plan, "applied_local", "local_to_feishu").await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))
+}
+
+pub async fn dismiss_entity_preview(pool: &SqlitePool, preview_id: &str) -> Result<(), String> {
+    let plan = get_entity_resolution_plan(pool, preview_id).await?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    finish_entity(&mut tx, &plan, "dismissed", "dismiss").await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))
 }
 
 pub async fn bind_case(pool: &SqlitePool, inbox_id: &str, case_id: &str) -> Result<(), String> {
@@ -1085,6 +1665,9 @@ mod tests {
     fn management_bundle(include_children: bool) -> FeishuCaseManagementRecords {
         let mut bundle = FeishuCaseManagementRecords {
             cases: vec![active_case_record()],
+            progress_table_id: "tbl-progress".into(),
+            stage_table_id: "tbl-stage".into(),
+            contact_table_id: "tbl-contact".into(),
             progress: Vec::new(),
             stages: Vec::new(),
             contacts: Vec::new(),
@@ -1142,7 +1725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbound_entities_are_idempotent_and_manual_rows_are_preserved() {
+    async fn inbound_entities_only_create_review_candidates_and_preserve_business_rows() {
         let pool = inbound_fixture().await;
         for _ in 0..2 {
             let run_id = start_pull_run(&pool).await.unwrap();
@@ -1181,23 +1764,29 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let unchanged_audits: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM feishu_sync_entity_audits WHERE action='unchanged'",
+        let pending_previews: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM feishu_sync_entity_previews WHERE review_status='pending'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((work_count, stage_count, contact_count), (2, 1, 2));
+        let superseded_previews: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM feishu_sync_entity_previews WHERE review_status='superseded'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((work_count, stage_count, contact_count), (1, 0, 0));
         assert_eq!(manual_content, "不得覆盖");
         assert_eq!(
             case_fields,
             ("20260721陈某诈骗案".into(), "陈某诈骗案".into())
         );
-        assert_eq!(unchanged_audits, 4);
+        assert_eq!((pending_previews, superseded_previews), (4, 4));
     }
 
     #[tokio::test]
-    async fn missing_remote_entities_are_soft_archived() {
+    async fn missing_remote_entities_never_auto_archive_local_business_rows() {
         let pool = inbound_fixture().await;
         let first = start_pull_run(&pool).await.unwrap();
         complete_pull_with_entities(&pool, &first, "app", "table", management_bundle(true))
@@ -1210,7 +1799,7 @@ mod tests {
                 .unwrap();
         let visible_remote: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM case_work_items WHERE external_source='feishu' AND deleted_at IS NULL) + (SELECT count(*) FROM case_stage_items WHERE external_source='feishu' AND deleted_at IS NULL) + (SELECT count(*) FROM case_agency_contacts WHERE external_source='feishu' AND deleted_at IS NULL)")
             .fetch_one(&pool).await.unwrap();
-        assert_eq!(result.archived_entity_count, 4);
+        assert_eq!(result.archived_entity_count, 0);
         assert_eq!(visible_remote, 0);
     }
 

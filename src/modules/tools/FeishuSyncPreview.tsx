@@ -22,19 +22,22 @@ import {
   getFeishuSyncPreview,
   ignoreFeishuSyncCase,
   pullFeishuSyncPreview,
+  resolveFeishuSyncField,
+  resolveFeishuSyncEntity,
   restoreFeishuSyncCase,
   unbindFeishuSyncCase,
 } from "@/lib/api";
 import type { FeishuConnectionStatus, FeishuSyncPreview as PreviewData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Section = "bound" | "pending" | "ignored" | "changes" | "conflicts" | "runs";
+type Section = "bound" | "pending" | "ignored" | "changes" | "entities" | "conflicts" | "runs";
 
 const SECTIONS: Array<{ id: Section; label: string }> = [
   { id: "bound", label: "已绑定案件" },
   { id: "pending", label: "待绑定案件" },
   { id: "ignored", label: "已忽略案件" },
   { id: "changes", label: "拟更新字段" },
+  { id: "entities", label: "明细复核" },
   { id: "conflicts", label: "冲突字段" },
   { id: "runs", label: "最近同步状态" },
 ];
@@ -79,8 +82,9 @@ function pullErrorMessage(error: unknown): string {
   if (
     message.includes("FEISHU_PERMISSION_DENIED")
     || message.includes("FEISHU_OAUTH_MISSING_READONLY_SCOPE")
+    || message.includes("FEISHU_OAUTH_MISSING_READWRITE_SCOPE")
   ) {
-    return "当前连接缺少多维表格只读权限，请补充授权后重试。";
+    return "当前连接缺少多维表格读写权限，请补充授权后重试。";
   }
   if (
     message.includes("FEISHU_TABLE_SCHEMA_MISMATCH")
@@ -150,7 +154,7 @@ export function FeishuSyncPreview({
       const result = await pullFeishuSyncPreview();
       const next = await getFeishuSyncPreview();
       setData(next);
-      const message = `飞书单向同步完成：读取 ${result.remote_count} 件在办案件；同步进展 ${result.work_item_count} 条、阶段 ${result.stage_count} 条、联系人 ${result.contact_count} 条${result.archived_entity_count > 0 ? `，归档失效记录 ${result.archived_entity_count} 条` : ""}。待绑定 ${result.pending_count} 件。`;
+      const message = `飞书预演完成：读取 ${result.remote_count} 件在办案件；生成进展候选 ${result.work_item_count} 条、阶段候选 ${result.stage_count} 条、联系人候选 ${result.contact_count} 条。待绑定 ${result.pending_count} 件；尚未写入任何一端。`;
       setLiveMessage(message);
       toast(message, "info");
       void getFeishuConnectionStatus().then(onConnectionStatusChange).catch(() => {});
@@ -170,6 +174,7 @@ export function FeishuSyncPreview({
     pending: data?.pending_cases.length ?? 0,
     ignored: data?.ignored_cases.length ?? 0,
     changes: data?.proposed_changes.length ?? 0,
+    entities: data?.entity_changes.length ?? 0,
     conflicts: data?.conflicts.length ?? 0,
     runs: data?.recent_runs.length ?? 0,
   }), [data]);
@@ -197,6 +202,67 @@ export function FeishuSyncPreview({
     }
   };
 
+  const runFieldAction = async (
+    id: string,
+    resolution: "local" | "feishu" | "dismiss",
+  ) => {
+    setActingId(id);
+    try {
+      await resolveFeishuSyncField(id, resolution);
+      await reload();
+      const message = resolution === "local"
+        ? "已保留本地值并写入飞书。"
+        : resolution === "feishu"
+          ? "已采用飞书值并更新本地案件。"
+          : "已暂不处理该字段；下次预演若仍有差异会再次提示。";
+      toast(message, "info");
+      setLiveMessage(message);
+    } catch (error) {
+      const code = String(error).toUpperCase();
+      const message = code.includes("MISSING_READWRITE_SCOPE")
+        ? "当前仍是旧只读授权，请断开后重新连接飞书。"
+        : code.includes("FEISHU_REVIEW_STALE")
+          ? "本地或飞书值在预演后已经变化，请先获取最新预演再复核。"
+        : code.includes("FEISHU_REVIEW_ALREADY_RESOLVED")
+          ? "该字段已由另一操作处理，请刷新查看。"
+          : code.includes("FEISHU_REVIEW_UNSUPPORTED")
+            ? "该字段须在对应的阶段或通讯录中处理，不能从案件总表直接写入。"
+            : "字段处理失败，未执行静默覆盖；请检查权限或刷新后重试。";
+      toast(message, "error");
+      setLiveMessage(message);
+    } finally {
+      setActingId(null);
+    }
+  };
+
+  const runEntityAction = async (id: string, resolution: "local" | "feishu" | "dismiss") => {
+    setActingId(id);
+    try {
+      await resolveFeishuSyncEntity(id, resolution);
+      await reload();
+      const message = resolution === "local"
+        ? "已保留本地明细并写入飞书。"
+        : resolution === "feishu"
+          ? "已采用飞书明细并更新本地。"
+          : "已暂不处理该明细。";
+      toast(message, "info");
+      setLiveMessage(message);
+    } catch (error) {
+      const code = String(error).toUpperCase();
+      const message = code.includes("MISSING_READWRITE_SCOPE")
+        ? "当前授权不能写入飞书，请重新连接并授予多维表格读写权限。"
+        : code.includes("FEISHU_REVIEW_STALE")
+          ? "本地或飞书明细在预演后已经变化，请先获取最新预演再复核。"
+        : code.includes("FEISHU_REVIEW_UNSUPPORTED")
+          ? "该候选目前没有可写回的本地明细，请采用飞书或暂不处理。"
+          : "明细处理失败，未执行静默覆盖。请刷新后重试。";
+      toast(message, "error");
+      setLiveMessage(message);
+    } finally {
+      setActingId(null);
+    }
+  };
+
   if (loading && !data) {
     return <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />正在读取本地预演结果…</div>;
   }
@@ -212,10 +278,10 @@ export function FeishuSyncPreview({
         <div className="flex items-start gap-3">
           <ShieldCheck className="mt-0.5 size-5 shrink-0 text-sky-700 dark:text-sky-300" />
           <div>
-            <p className="text-sm font-semibold text-sky-950 dark:text-sky-100">飞书只读预演 · 仅“在办”案件</p>
-        <p className="mt-1 text-xs leading-relaxed text-sky-800 dark:text-sky-200">已连接时会在启动、回到应用及每 30 分钟自动刷新；只更新本地预演记录，不会写入飞书，也不会修改本地案件业务数据。</p>
+            <p className="text-sm font-semibold text-sky-950 dark:text-sky-100">飞书受控双向同步 · 仅“在办”案件</p>
+        <p className="mt-1 text-xs leading-relaxed text-sky-800 dark:text-sky-200">后台刷新仍只生成预演，不会自动写入任何一端。只有点击字段后的确认按钮，才会执行一次明确方向的更新。</p>
             <button type="button" onClick={onOpenConnection} className="mt-2 text-xs font-medium text-sky-900 underline-offset-2 hover:underline dark:text-sky-100">
-              {connected ? "已连接 · 只读权限" : needsReauthorization ? "授权已失效，前往重新连接" : "未连接，前往连接飞书"}
+              {connected ? (connectionStatus?.write_enabled ? "已连接 · 读写权限" : "已连接 · 旧只读权限，需重新授权") : needsReauthorization ? "授权已失效，前往重新连接" : "未连接，前往连接飞书"}
             </button>
           </div>
         </div>
@@ -271,7 +337,18 @@ export function FeishuSyncPreview({
           {active === "ignored" && ((data?.ignored_cases.length ?? 0) === 0
             ? <EmptyState text="没有已忽略案件。" />
             : <table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["飞书案件", "类型 / 案号", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.ignored_cases.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.display_name || "未命名案件"}</td><td className="px-3 py-3 text-muted-foreground">{[item.legal_type, item.case_no].filter(Boolean).join(" · ") || "—"}</td><td className="px-3 py-3"><Button variant="outline" size="sm" disabled={actingId === item.id} onClick={() => void runBindingAction(item.id, () => restoreFeishuSyncCase(item.id), "已恢复为待绑定案件。")}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <RotateCcw />}恢复</Button></td></tr>)}</tbody></table>)}
-          {active === "changes" && <SimpleTable headers={["案件", "字段", "本地值", "", "飞书值", "处理"]} rows={(data?.proposed_changes ?? []).map((item) => [item.case_name, item.field_label || item.field_key, showValue(item.local_value_json), "→", showValue(item.feishu_value_json), item.proposed_action === "review" ? "需人工复核" : "拟填充本地空值"])} empty="最近一次预演没有可建议更新的字段。" />}
+          {active === "changes" && ((data?.proposed_changes.length ?? 0) === 0
+            ? <EmptyState text="最近一次预演没有可建议更新的字段。" />
+            : <table className="w-full min-w-[980px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["案件", "字段", "本地值", "飞书值", "处理"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.proposed_changes.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.case_name}</td><td className="px-3 py-3 text-muted-foreground">{item.field_label || item.field_key}</td><td className="max-w-56 px-3 py-3 text-foreground"><span className="line-clamp-3 break-words">{showValue(item.local_value_json)}</span></td><td className="max-w-56 px-3 py-3 text-foreground"><span className="line-clamp-3 break-words">{showValue(item.feishu_value_json)}</span></td><td className="px-3 py-3"><div className="flex min-w-72 flex-wrap gap-2"><Button size="sm" disabled={actingId === item.id} onClick={() => {
+              if (!window.confirm(`确认采用飞书值并更新本地“${item.case_name}”的“${item.field_label || item.field_key}”？`)) return;
+              void runFieldAction(item.id, "feishu");
+            }}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <ArrowRight />}采用飞书</Button><Button variant="outline" size="sm" disabled={actingId === item.id || connectionStatus?.write_enabled !== true} title={connectionStatus?.write_enabled ? "将本地值写入飞书" : "需重新授权飞书读写权限"} onClick={() => {
+              if (!window.confirm(`确认保留本地值，并写入飞书“${item.field_label || item.field_key}”？`)) return;
+              void runFieldAction(item.id, "local");
+            }}>保留本地并写飞书</Button><Button variant="ghost" size="sm" disabled={actingId === item.id} onClick={() => void runFieldAction(item.id, "dismiss")}>暂不处理</Button></div></td></tr>)}</tbody></table>)}
+          {active === "entities" && ((data?.entity_changes.length ?? 0) === 0
+            ? <EmptyState text="最近一次预演没有待复核的进展、阶段或联系人。" />
+            : <table className="w-full min-w-[980px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["案件", "明细类型", "变化", "本地值", "飞书值", "处理"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.entity_changes.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.case_name}</td><td className="px-3 py-3 text-muted-foreground">{({ work_item: "进展", stage: "阶段", contact: "联系人" } as Record<string, string>)[item.entity_type] ?? item.entity_type}</td><td className="px-3 py-3 text-muted-foreground">{({ create: "新增", update: "更新", restore: "恢复", archive: "归档" } as Record<string, string>)[item.change_kind] ?? item.change_kind}</td><td className="max-w-56 px-3 py-3"><span className="line-clamp-3 break-words">{showValue(item.local_value_json)}</span></td><td className="max-w-56 px-3 py-3"><span className="line-clamp-3 break-words">{showValue(item.feishu_value_json)}</span></td><td className="px-3 py-3"><div className="flex min-w-72 flex-wrap gap-2"><Button size="sm" disabled={actingId === item.id} onClick={() => { if (window.confirm(`确认采用飞书中的${item.entity_type === "work_item" ? "进展" : item.entity_type === "stage" ? "阶段" : "联系人"}并更新本地？`)) void runEntityAction(item.id, "feishu"); }}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <ArrowRight />}采用飞书</Button><Button variant="outline" size="sm" disabled={actingId === item.id || connectionStatus?.write_enabled !== true || !item.local_value_json} onClick={() => { if (window.confirm("确认保留本地明细并写入飞书？")) void runEntityAction(item.id, "local"); }}>保留本地并写飞书</Button><Button variant="ghost" size="sm" disabled={actingId === item.id} onClick={() => void runEntityAction(item.id, "dismiss")}>暂不处理</Button></div></td></tr>)}</tbody></table>)}
           {active === "conflicts" && <SimpleTable headers={["案件", "字段", "本地值", "飞书值", "状态"]} rows={(data?.conflicts ?? []).map((item) => [item.case_name, item.field_key, showValue(item.local_value_json), showValue(item.feishu_value_json), "待人工处理"])} empty="没有待处理的字段冲突。" />}
           {active === "runs" && <SimpleTable headers={["状态", "模式", "案件范围", "开始时间", "完成时间"]} rows={(data?.recent_runs ?? []).map((item) => [runLabel(item.status), item.mode === "readonly_preflight" ? "只读预演" : item.mode, `状态=${item.active_case_filter}`, showTime(item.started_at), showTime(item.completed_at)])} empty="尚无同步预演记录。" />}
         </div>

@@ -160,6 +160,9 @@ export interface Case {
    * 全局抽不再用 LLM 值覆盖(修「结案/手设状态被重新分析刷新掉」)。
    */
   workflow_status_locked: number;
+  /** 跨领域管理状态，与民事 workflow_status / 刑事程序阶段分离。 */
+  management_status: "negotiating" | "active" | "closed" | "unknown" | string;
+  management_status_source: "manual" | "feishu" | "legacy" | string;
 }
 
 /**
@@ -1353,6 +1356,17 @@ export interface FeishuSyncChangePreview {
   feishu_value_json: string | null;
   classification: string;
   proposed_action: "pull_to_local" | "review" | "none" | string;
+  review_status: "pending" | "applied_feishu" | "applied_local" | "dismissed" | string;
+}
+
+export interface FeishuSyncEntityPreview {
+  id: string;
+  case_name: string;
+  entity_type: "work_item" | "stage" | "contact" | string;
+  change_kind: "create" | "update" | "restore" | "archive" | string;
+  local_value_json: string | null;
+  feishu_value_json: string | null;
+  review_status: "pending" | "applied_feishu" | "applied_local" | "dismissed" | string;
 }
 
 export interface FeishuSyncConflictPreview {
@@ -1383,6 +1397,7 @@ export interface FeishuSyncPreview {
   ignored_cases: FeishuSyncInboxPreview[];
   available_local_cases: FeishuLocalCaseOption[];
   proposed_changes: FeishuSyncChangePreview[];
+  entity_changes: FeishuSyncEntityPreview[];
   conflicts: FeishuSyncConflictPreview[];
   recent_runs: FeishuSyncRunPreview[];
 }
@@ -1394,6 +1409,7 @@ export interface FeishuConnectionStatus {
   access_expires_at: number | null;
   refresh_expires_at: number | null;
   reauthorization_required: boolean;
+  write_enabled: boolean;
 }
 
 export interface FeishuConnectionInput {

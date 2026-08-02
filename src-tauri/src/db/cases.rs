@@ -121,6 +121,10 @@ pub struct Case {
     /// 1 = 用户在卡片右上角手动选过 workflow_status → 全局抽不再用 LLM 值覆盖;
     /// 0 = 走自动推断。修「结案/手设状态被重新分析刷新掉」的 bug。
     pub workflow_status_locked: i64,
+
+    /// 跨领域管理状态，与民事 workflow_status / 刑事程序阶段分离。
+    pub management_status: String,
+    pub management_status_source: String,
 }
 
 /// 仅取用户在详情页确认/纠正的我方立场(user_overrides_json.fields.agg_our_side)。空返回 None。
@@ -343,16 +347,50 @@ pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error>
 /// `status = Some("closed"|"intake"|"filing"|"awaiting_hearing"|"trial"|
 ///                 "appeal_window"|"appeal"|"execution")` → 用户手工覆盖,优先级最高
 ///
-/// 不校验 status 字面值(由前端的枚举类型约束),DB 层只做透传。
+/// 后端同时校验领域与枚举；刑事案件只能写刑事程序阶段，不能写本字段。
 ///
 /// 2026-06-13:同时维护 `workflow_status_locked` —— 用户手设(status=Some)→ 锁=1,
 /// 全局抽不再用 LLM 值覆盖;设回自动(status=None)→ 锁=0,恢复自动推断。
 /// 修「结案/手设状态被重新分析刷新掉」(胡彬律师反馈)。
+pub const CIVIL_WORKFLOW_STATUSES: [&str; 11] = [
+    "intake",
+    "filing",
+    "arbitration",
+    "awaiting_hearing",
+    "trial",
+    "mediated",
+    "appeal_window",
+    "appeal",
+    "retrial",
+    "execution",
+    "closed",
+];
+
 pub async fn update_workflow_status(
     pool: &SqlitePool,
     id: &str,
     status: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), String> {
+    let legal_domain: Option<String> =
+        sqlx::query_scalar("SELECT legal_domain FROM cases WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("CASE_WORKFLOW_STATUS_READ_FAILED: {e}"))?;
+    let legal_domain = legal_domain.ok_or_else(|| "CASE_NOT_FOUND: 案件不存在".to_string())?;
+    if legal_domain == "criminal" && status.is_some() {
+        return Err(
+            "CASE_WORKFLOW_DOMAIN_MISMATCH: 刑事案件必须使用刑事程序阶段，不能写入民事状态"
+                .to_string(),
+        );
+    }
+    if let Some(status) = status {
+        if !CIVIL_WORKFLOW_STATUSES.contains(&status) {
+            return Err(format!(
+                "CASE_WORKFLOW_STATUS_INVALID: 不支持的民事工作流状态 {status}"
+            ));
+        }
+    }
     let locked: i64 = if status.is_some() { 1 } else { 0 };
     sqlx::query(
         "UPDATE cases SET workflow_status = ?, workflow_status_locked = ?, \
@@ -362,7 +400,8 @@ pub async fn update_workflow_status(
     .bind(locked)
     .bind(id)
     .execute(pool)
-    .await?;
+    .await
+    .map_err(|e| format!("CASE_WORKFLOW_STATUS_WRITE_FAILED: {e}"))?;
     Ok(())
 }
 
@@ -515,5 +554,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with("INVALID_LEGAL_DOMAIN:"));
+    }
+
+    #[tokio::test]
+    async fn civil_workflow_status_rejects_criminal_cases_and_unknown_values() {
+        let pool = crate::db::init_pool(":memory:").await.unwrap();
+        let criminal = create_case(
+            &pool,
+            NewCase {
+                name: "刑事测试案件".into(),
+                case_type: "criminal".into(),
+                source_folder: format!("D:/tmp/{}", Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
+        let error = update_workflow_status(&pool, &criminal.id, Some("trial"))
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("CASE_WORKFLOW_DOMAIN_MISMATCH:"));
+
+        let civil = create_case(
+            &pool,
+            NewCase {
+                name: "买卖合同纠纷".into(),
+                case_type: "civil".into(),
+                source_folder: format!("D:/tmp/{}", Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
+        update_workflow_status(&pool, &civil.id, Some("trial"))
+            .await
+            .unwrap();
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT workflow_status FROM cases WHERE id = ?")
+                .bind(&civil.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some("trial"));
+        let error = update_workflow_status(&pool, &civil.id, Some("侦查"))
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("CASE_WORKFLOW_STATUS_INVALID:"));
     }
 }

@@ -11,13 +11,86 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use uuid::Uuid;
 
-const DEFAULT_DOMAIN: &str = "criminal";
 const DEFAULT_STAGE_STATUS: &str = "pending";
 const DEFAULT_RECORD_SOURCE: &str = "manual";
 const DEFAULT_DEADLINE_PRIORITY: &str = "normal";
 const DEFAULT_DEADLINE_STATUS: &str = "pending";
 const DEFAULT_DEADLINE_SOURCE_TYPE: &str = "manual";
 const AUTO_DEADLINE_SOURCE_TYPE: &str = "auto";
+
+pub const CRIMINAL_PROCEDURE_STAGES: [&str; 9] = [
+    "收案委托",
+    "侦查",
+    "审查逮捕",
+    "审查起诉",
+    "一审",
+    "上诉及二审",
+    "再审/审判监督",
+    "执行",
+    "待确认",
+];
+
+pub fn canonical_criminal_stage(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if CRIMINAL_PROCEDURE_STAGES.contains(&raw) {
+        return Ok(Some(raw.to_string()));
+    }
+    let normalized = raw
+        .to_ascii_lowercase()
+        .replace([' ', '_', '-', '/', '（', '）', '(', ')'], "");
+    let stage = if normalized.contains("审查逮捕")
+        || normalized.contains("批捕")
+        || normalized.contains("arrestreview")
+    {
+        "审查逮捕"
+    } else if normalized.contains("审查起诉")
+        || normalized.contains("检察院审查")
+        || normalized.contains("prosecution")
+    {
+        "审查起诉"
+    } else if normalized.contains("再审")
+        || normalized.contains("审判监督")
+        || normalized.contains("retrial")
+    {
+        "再审/审判监督"
+    } else if normalized.contains("二审")
+        || normalized.contains("上诉")
+        || normalized.contains("secondinstance")
+        || normalized.contains("appeal")
+    {
+        "上诉及二审"
+    } else if normalized.contains("一审") || normalized.contains("firstinstance") {
+        "一审"
+    } else if normalized.contains("侦查") || normalized.contains("investigation") {
+        "侦查"
+    } else if normalized.contains("执行") || normalized == "execution" {
+        "执行"
+    } else if normalized.contains("收案")
+        || normalized.contains("委托")
+        || normalized.contains("engagement")
+        || normalized.contains("intake")
+    {
+        "收案委托"
+    } else if normalized.contains("待确认") || normalized == "unknown" {
+        "待确认"
+    } else {
+        return Err(format!(
+            "CRIMINAL_STAGE_INVALID: 无法识别的刑事程序阶段 {raw}"
+        ));
+    };
+    Ok(Some(stage.to_string()))
+}
+
+async fn case_legal_domain(pool: &SqlitePool, case_id: &str) -> Result<String, String> {
+    sqlx::query_scalar("SELECT legal_domain FROM cases WHERE id = ?")
+        .bind(case_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("CASE_DOMAIN_READ_FAILED: {e}"))?
+        .ok_or_else(|| "CASE_NOT_FOUND: 案件不存在".to_string())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct CriminalCaseProfile {
@@ -987,6 +1060,53 @@ pub async fn get_criminal_case_profile(
         .map_err(|e| e.to_string())
 }
 
+pub async fn update_criminal_case_stage(
+    pool: &SqlitePool,
+    case_id: &str,
+    stage: &str,
+) -> Result<CriminalCaseProfile, String> {
+    let case_id = required_text(case_id.to_string(), "case_id")?;
+    let legal_domain = case_legal_domain(pool, &case_id).await?;
+    if legal_domain != "criminal" {
+        return Err(format!(
+            "CRIMINAL_STAGE_DOMAIN_MISMATCH: 案件领域为 {legal_domain}，不能写入刑事程序阶段"
+        ));
+    }
+    let stage = canonical_criminal_stage(Some(stage))?
+        .ok_or_else(|| "CRIMINAL_STAGE_INVALID: 刑事程序阶段不能为空".to_string())?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("CRIMINAL_STAGE_WRITE_FAILED: {e}"))?;
+    sqlx::query(
+        "INSERT INTO criminal_case_profiles (case_id,current_stage)
+         VALUES (?,?)
+         ON CONFLICT(case_id) DO UPDATE SET
+           current_stage=excluded.current_stage,
+           updated_at=datetime('now')",
+    )
+    .bind(&case_id)
+    .bind(&stage)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("CRIMINAL_STAGE_WRITE_FAILED: {e}"))?;
+    sqlx::query(
+        "UPDATE cases
+         SET workflow_status=NULL,workflow_status_locked=0,updated_at=datetime('now')
+         WHERE id=?",
+    )
+    .bind(&case_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("CRIMINAL_STAGE_WRITE_FAILED: {e}"))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("CRIMINAL_STAGE_WRITE_FAILED: {e}"))?;
+    get_criminal_case_profile(pool, &case_id)
+        .await?
+        .ok_or_else(|| "CRIMINAL_STAGE_WRITE_FAILED: 写入后未找到刑事画像".to_string())
+}
+
 pub async fn upsert_criminal_case_profile(
     pool: &SqlitePool,
     input: UpsertCriminalCaseProfileInput,
@@ -1261,11 +1381,13 @@ pub async fn list_case_stage_items(
     pool: &SqlitePool,
     case_id: &str,
 ) -> Result<Vec<CaseStageItem>, String> {
+    let legal_domain = case_legal_domain(pool, case_id).await?;
     let sql = format!(
-        "{STAGE_SELECT} WHERE case_id = ? AND deleted_at IS NULL ORDER BY sort_order IS NULL, sort_order ASC, started_at DESC, updated_at DESC"
+        "{STAGE_SELECT} WHERE case_id = ? AND domain = ? AND deleted_at IS NULL ORDER BY sort_order IS NULL, sort_order ASC, started_at DESC, updated_at DESC"
     );
     sqlx::query_as::<_, CaseStageItem>(&sql)
         .bind(case_id)
+        .bind(legal_domain)
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())
@@ -1287,7 +1409,9 @@ pub async fn upsert_case_stage_item(
     pool: &SqlitePool,
     input: UpsertCaseStageItemInput,
 ) -> Result<CaseStageItem, String> {
-    let computed = compute_case_stage_item_input(input)?;
+    let case_id = required_text(input.case_id.clone(), "case_id")?;
+    let legal_domain = case_legal_domain(pool, &case_id).await?;
+    let computed = compute_case_stage_item_input(input, &legal_domain)?;
     sqlx::query(
         "INSERT INTO case_stage_items (
             id, case_id, domain, major_stage, stage_label, status,
@@ -1347,6 +1471,7 @@ pub async fn reorder_case_stage_items(
     input: ReorderCaseStageItemsInput,
 ) -> Result<Vec<CaseStageItem>, String> {
     let case_id = required_text(input.case_id, "case_id")?;
+    let legal_domain = case_legal_domain(pool, &case_id).await?;
     let ordered_ids: Vec<String> = input
         .ordered_ids
         .into_iter()
@@ -1358,9 +1483,10 @@ pub async fn reorder_case_stage_items(
     }
 
     let active_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM case_stage_items WHERE case_id = ? AND deleted_at IS NULL",
+        "SELECT id FROM case_stage_items WHERE case_id = ? AND domain = ? AND deleted_at IS NULL",
     )
     .bind(&case_id)
+    .bind(&legal_domain)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1382,14 +1508,16 @@ pub async fn reorder_case_stage_items(
         .await
         .map_err(|e| e.to_string())?;
     }
-    sqlx::query(
-        "UPDATE criminal_case_profiles SET stage_sort_mode = 'manual', updated_at = datetime('now')
-         WHERE case_id = ?",
-    )
-    .bind(&case_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    if legal_domain == "criminal" {
+        sqlx::query(
+            "UPDATE criminal_case_profiles SET stage_sort_mode = 'manual', updated_at = datetime('now')
+             WHERE case_id = ?",
+        )
+        .bind(&case_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().await.map_err(|e| e.to_string())?;
     list_case_stage_items(pool, &case_id).await
 }
@@ -1749,7 +1877,7 @@ fn compute_criminal_case_profile_input(
     }
     Ok(ComputedCriminalCaseProfileInput {
         case_id: required_text(input.case_id, "case_id")?,
-        current_stage: normalize_opt(input.current_stage),
+        current_stage: canonical_criminal_stage(input.current_stage.as_deref())?,
         procedure_type: normalize_opt(input.procedure_type),
         case_subtype: normalize_opt(input.case_subtype),
         defense_role: normalize_opt(input.defense_role),
@@ -1801,14 +1929,21 @@ fn compute_criminal_case_profile_input(
 
 fn compute_case_stage_item_input(
     input: UpsertCaseStageItemInput,
+    case_domain: &str,
 ) -> Result<ComputedCaseStageItemInput, String> {
     if input.sort_order.is_some_and(|order| order < 0) {
         return Err("sort_order 不能为负数".to_string());
     }
+    let requested_domain = normalize_opt(input.domain).unwrap_or_else(|| case_domain.to_string());
+    if requested_domain != case_domain {
+        return Err(format!(
+            "CASE_STAGE_DOMAIN_MISMATCH: 案件领域为 {case_domain}，不能写入 {requested_domain} 阶段"
+        ));
+    }
     Ok(ComputedCaseStageItemInput {
         id: input.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
         case_id: required_text(input.case_id, "case_id")?,
-        domain: normalize_opt(input.domain).unwrap_or_else(|| DEFAULT_DOMAIN.to_string()),
+        domain: requested_domain,
         major_stage: normalize_opt(input.major_stage),
         stage_label: required_text(input.stage_label, "stage_label")?,
         status: normalize_opt(input.status).unwrap_or_else(|| DEFAULT_STAGE_STATUS.to_string()),
@@ -2125,6 +2260,77 @@ mod tests {
             ),
             NaiveDate::from_ymd_opt(2026, 4, 26)
         );
+    }
+
+    #[test]
+    fn criminal_stage_aliases_are_canonical_and_unknown_values_fail_closed() {
+        assert_eq!(
+            canonical_criminal_stage(Some("二审上诉"))
+                .unwrap()
+                .as_deref(),
+            Some("上诉及二审")
+        );
+        assert_eq!(
+            canonical_criminal_stage(Some("批捕")).unwrap().as_deref(),
+            Some("审查逮捕")
+        );
+        assert!(canonical_criminal_stage(Some("民事庭前准备"))
+            .unwrap_err()
+            .starts_with("CRIMINAL_STAGE_INVALID:"));
+    }
+
+    #[tokio::test]
+    async fn criminal_stage_writes_are_domain_scoped_and_clear_legacy_civil_status() {
+        let pool = crate::db::init_pool(":memory:")
+            .await
+            .expect("migrate database");
+        let criminal_id = test_case(&pool).await;
+        sqlx::query(
+            "UPDATE cases SET workflow_status='trial', workflow_status_locked=1 WHERE id=?",
+        )
+        .bind(&criminal_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let profile = update_criminal_case_stage(&pool, &criminal_id, "二审")
+            .await
+            .unwrap();
+        assert_eq!(profile.current_stage.as_deref(), Some("上诉及二审"));
+        let legacy: (Option<String>, i64) =
+            sqlx::query_as("SELECT workflow_status, workflow_status_locked FROM cases WHERE id=?")
+                .bind(&criminal_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(legacy, (None, 0));
+
+        let mismatch = upsert_case_stage_item(
+            &pool,
+            UpsertCaseStageItemInput {
+                case_id: criminal_id.clone(),
+                domain: Some("civil".into()),
+                stage_label: "庭前准备".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(mismatch.starts_with("CASE_STAGE_DOMAIN_MISMATCH:"));
+
+        let civil = crate::db::cases::create_case(
+            &pool,
+            crate::db::cases::NewCase {
+                name: "买卖合同纠纷".into(),
+                case_type: "civil".into(),
+                source_folder: format!("D:/test/civil/{}", Uuid::new_v4()),
+            },
+        )
+        .await
+        .unwrap();
+        let error = update_criminal_case_stage(&pool, &civil.id, "侦查")
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("CRIMINAL_STAGE_DOMAIN_MISMATCH:"));
     }
 
     #[tokio::test]

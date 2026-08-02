@@ -52,6 +52,9 @@ pub struct FeishuRemoteCaseRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeishuCaseManagementRecords {
     pub cases: Vec<FeishuRemoteCaseRecord>,
+    pub progress_table_id: String,
+    pub stage_table_id: String,
+    pub contact_table_id: String,
     pub progress: Vec<FeishuRemoteCaseRecord>,
     pub stages: Vec<FeishuRemoteCaseRecord>,
     pub contacts: Vec<FeishuRemoteCaseRecord>,
@@ -298,7 +301,7 @@ async fn read_bitable_response(response: reqwest::Response) -> Result<Value, Str
         return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
     }
     if status == reqwest::StatusCode::FORBIDDEN {
-        return Err("FEISHU_PERMISSION_DENIED: 应用没有多维表格只读权限".to_string());
+        return Err("FEISHU_PERMISSION_DENIED: 应用没有多维表格访问权限".to_string());
     }
     let bytes = response
         .bytes()
@@ -754,6 +757,33 @@ async fn batch_get_records(
     Ok(records)
 }
 
+/// 写入前重新读取单条记录，用于确认远端值未在预演后发生变化。
+pub async fn fetch_bitable_record(
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+    record_id: &str,
+) -> Result<FeishuRemoteCaseRecord, String> {
+    validate_bitable_id(app_token, "App Token")?;
+    validate_bitable_id(table_id, "Table ID")?;
+    validate_bitable_id(record_id, "Record ID")?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "FEISHU_NETWORK_ERROR: 无法初始化网络客户端".to_string())?;
+    let mut records = batch_get_records(
+        &client,
+        access_token,
+        app_token,
+        table_id,
+        &[record_id.to_string()],
+    )
+    .await?;
+    records
+        .pop()
+        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 写入前未读取到目标记录".to_string())
+}
+
 /// 通过飞书开放平台原生 HTTP API 拉取“状态=在办”的案件。
 ///
 /// access token 仅存在于 Rust 内存和 Windows 凭据管理器，绝不进入命令行、SQLite 或日志。
@@ -814,6 +844,93 @@ pub async fn fetch_active_case_records(
     }
 
     Err("FEISHU_RESPONSE_INVALID: 飞书记录分页超过安全上限".to_string())
+}
+
+/// 用户逐项确认后更新一条多维表格记录。调用方负责串行化写操作。
+pub async fn update_bitable_record_fields(
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+    record_id: &str,
+    fields: Value,
+) -> Result<(), String> {
+    validate_bitable_id(app_token, "App Token")?;
+    validate_bitable_id(table_id, "Table ID")?;
+    validate_bitable_id(record_id, "Record ID")?;
+    if access_token.trim().is_empty() {
+        return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
+    }
+    if !fields.is_object() {
+        return Err("FEISHU_WRITE_INVALID: fields 必须为对象".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "FEISHU_NETWORK_ERROR: 无法初始化网络客户端".to_string())?;
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
+    );
+    let response = client
+        .post(endpoint)
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({
+            "records": [{ "record_id": record_id, "fields": fields }]
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                "FEISHU_NETWORK_TIMEOUT: 更新飞书记录超时".to_string()
+            } else {
+                "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+            }
+        })?;
+    read_bitable_response(response).await?;
+    Ok(())
+}
+
+/// 用户确认“从本地新建”后新增一条多维表格记录，返回远端 record_id。
+pub async fn create_bitable_record(
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+    fields: Value,
+) -> Result<String, String> {
+    validate_bitable_id(app_token, "App Token")?;
+    validate_bitable_id(table_id, "Table ID")?;
+    if access_token.trim().is_empty() {
+        return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".to_string());
+    }
+    if !fields.is_object() {
+        return Err("FEISHU_WRITE_INVALID: fields 必须为对象".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "FEISHU_NETWORK_ERROR: 无法初始化网络客户端".to_string())?;
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    );
+    let response = client
+        .post(endpoint)
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({ "fields": fields }))
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                "FEISHU_NETWORK_TIMEOUT: 新增飞书记录超时".to_string()
+            } else {
+                "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+            }
+        })?;
+    let value = read_bitable_response(response).await?;
+    response_data(&value)
+        .get("record")
+        .and_then(|record| record.get("record_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "FEISHU_RESPONSE_INVALID: 新增记录响应缺少 record_id".to_string())
 }
 
 /// 只读抓取“在办案件 + 三张关联明细表”。
@@ -915,6 +1032,9 @@ pub async fn fetch_active_case_management_records(
 
     Ok(FeishuCaseManagementRecords {
         cases,
+        progress_table_id: table_ids.progress,
+        stage_table_id: table_ids.stages,
+        contact_table_id: table_ids.contacts,
         progress,
         stages,
         contacts,
@@ -1366,5 +1486,159 @@ mod tests {
                 .unwrap_err()
                 .starts_with("FEISHU_TABLE_SCHEMA_MISMATCH:")
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "creates a structure-only Feishu copy and writes one QA record"]
+    async fn live_copy_table_create_read_update_read_roundtrip() {
+        let current = crate::settings::read_settings().expect("read formal device settings");
+        let app_id = current
+            .feishu_oauth_app_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .expect("Feishu OAuth app id is configured");
+        let status = crate::feishu_oauth::connection_status(app_id)
+            .expect("read Feishu OAuth status from Windows Credential Manager");
+        assert!(
+            status.connected,
+            "Feishu OAuth is not connected on this device"
+        );
+        assert!(
+            status.write_enabled,
+            "Feishu OAuth must be reauthorized with bitable:app before live write verification"
+        );
+        let source_app_token = current
+            .feishu_app_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .expect("source Feishu Base is configured");
+
+        let token = crate::feishu_oauth::valid_access_token(app_id)
+            .await
+            .expect("obtain a valid Feishu access token");
+        let nonce = chrono::Utc::now().timestamp_millis();
+        let copy_name = format!("CaseBoard v0.8.2 双向同步隔离验收 {nonce}");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("build Feishu QA client");
+        let copy_response = client
+            .post(format!(
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/{source_app_token}/copy"
+            ))
+            .bearer_auth(token.expose())
+            .json(&serde_json::json!({
+                "name": copy_name,
+                "without_content": true,
+                "time_zone": "Asia/Shanghai"
+            }))
+            .send()
+            .await
+            .expect("send structure-only Base copy request");
+        let copy_value = read_bitable_response(copy_response)
+            .await
+            .expect("create structure-only Feishu Base copy");
+        let app_token = response_data(&copy_value)
+            .get("app")
+            .and_then(|app| app.get("app_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .expect("copy response contains app_token")
+            .to_string();
+        validate_bitable_id(&app_token, "copied App Token").expect("valid copied App Token");
+
+        let mut tables_value = None;
+        for _ in 0..30 {
+            let tables_response = client
+                .get(format!(
+                    "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables"
+                ))
+                .bearer_auth(token.expose())
+                .query(&[("page_size", "100")])
+                .send()
+                .await
+                .expect("list copied Base tables");
+            match read_bitable_response(tables_response).await {
+                Ok(value) => {
+                    tables_value = Some(value);
+                    break;
+                }
+                Err(error) if error.contains("code=1254036") => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(error) => panic!("read copied Base tables: {error}"),
+            }
+        }
+        let tables_value = tables_value.expect("copied Base becomes ready within 30 seconds");
+        let tables = response_data(&tables_value)
+            .get("items")
+            .and_then(Value::as_array)
+            .expect("copied Base table list contains items");
+        let mut writable_target: Option<(String, String)> = None;
+        for table in tables {
+            let Some(table_id) = table
+                .get("table_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            let fields = fetch_table_field_metadata(
+                &client,
+                token.expose(),
+                &app_token,
+                table_id,
+            )
+            .await
+            .expect("read copied table fields before writing");
+            if let Some(field) = fields.iter().find(|field| field.field_type == Some(1)) {
+                writable_target = Some((table_id.to_string(), field.field_name.clone()));
+                break;
+            }
+        }
+        let (table_id, field_name) =
+            writable_target.expect("copied Base contains a writable text field");
+
+        let initial = format!("CaseBoard-v0.8.2-live-{nonce}-initial");
+        let updated = format!("CaseBoard-v0.8.2-live-{nonce}-updated");
+        let record_id = create_bitable_record(
+            token.expose(),
+            &app_token,
+            &table_id,
+            serde_json::json!({ (field_name.clone()): initial }),
+        )
+        .await
+        .expect("create copy-table record through CaseBoard OAuth");
+
+        let created = fetch_bitable_record(token.expose(), &app_token, &table_id, &record_id)
+            .await
+            .expect("read newly created copy-table record");
+        assert_eq!(
+            created.fields.get(&field_name).and_then(Value::as_str),
+            Some(initial.as_str())
+        );
+
+        update_bitable_record_fields(
+            token.expose(),
+            &app_token,
+            &table_id,
+            &record_id,
+            serde_json::json!({ (field_name.clone()): updated }),
+        )
+        .await
+        .expect("update copy-table record through CaseBoard OAuth");
+        let reread = fetch_bitable_record(token.expose(), &app_token, &table_id, &record_id)
+            .await
+            .expect("read updated copy-table record");
+        assert_eq!(
+            reread.fields.get(&field_name).and_then(Value::as_str),
+            Some(updated.as_str())
+        );
+
+        println!("FEISHU_LIVE_ROUNDTRIP_OK copy_name={copy_name}");
     }
 }
