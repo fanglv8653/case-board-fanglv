@@ -1182,6 +1182,13 @@ export function getCriminalCaseProfile(
   });
 }
 
+export function updateCriminalCaseStage(
+  caseId: string,
+  stage: string,
+): Promise<CriminalCaseProfile> {
+  return invoke<CriminalCaseProfile>("update_criminal_case_stage", { caseId, stage });
+}
+
 export function upsertCriminalCaseProfile(
   input: CriminalCaseProfileUpsertInput,
 ): Promise<CriminalCaseProfile> {
@@ -1500,17 +1507,42 @@ export function restoreFeishuSyncCase(inboxId: string): Promise<void> {
   return invoke<void>("restore_feishu_sync_case", { inboxId });
 }
 
-/** 读取飞书案件同步的原生 OAuth 只读连接状态。 */
+/** 逐项确认字段差异；local 会写飞书，feishu 会写本地，dismiss 只关闭本次建议。 */
+export function resolveFeishuSyncField(
+  previewId: string,
+  resolution: "local" | "feishu" | "dismiss",
+): Promise<void> {
+  return invoke<void>("resolve_feishu_sync_field", {
+    input: { preview_id: previewId, resolution },
+  });
+}
+
+/** 逐项确认进展、阶段或联系人差异；不会执行批量覆盖或自动删除。 */
+export function resolveFeishuSyncEntity(
+  previewId: string,
+  resolution: "local" | "feishu" | "dismiss",
+): Promise<void> {
+  return invoke<void>("resolve_feishu_sync_entity", {
+    input: { preview_id: previewId, resolution },
+  });
+}
+
+/** 读取飞书案件受控双向同步的 OAuth 连接状态。 */
 export function getFeishuConnectionStatus(): Promise<FeishuConnectionStatus> {
   return invoke<FeishuConnectionStatus>("get_feishu_connection_status");
 }
 
-/** 建立飞书只读连接；App Secret 仅随本次命令提交，不写入前端设置。 */
+/** 建立飞书案件同步连接；App Secret 仅随本次命令提交，不写入前端设置。 */
 export function connectFeishuReadonly(input: FeishuConnectionInput): Promise<FeishuConnectionStatus> {
   return invoke<FeishuConnectionStatus>("connect_feishu_readonly", { input });
 }
 
-/** 删除本机保存的飞书只读连接凭据。 */
+/** 安全复用凭据库中的 App Secret，将旧只读授权升级为受控读写授权。 */
+export function reauthorizeFeishuSync(): Promise<FeishuConnectionStatus> {
+  return invoke<FeishuConnectionStatus>("reauthorize_feishu_sync");
+}
+
+/** 删除本机保存的飞书案件同步连接凭据。 */
 export function disconnectFeishuReadonly(): Promise<FeishuConnectionStatus> {
   return invoke<FeishuConnectionStatus>("disconnect_feishu_readonly");
 }

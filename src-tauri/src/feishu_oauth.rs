@@ -4,7 +4,7 @@
 //! - App Secret、access token、refresh token 只进入进程内存和 Windows Credential Manager；
 //! - SQLite、`settings.json`、公开 DTO、错误文本和日志均不得包含上述秘密；
 //! - OAuth 回调只监听 `127.0.0.1:3000`，并校验一次性高熵 `state`；
-//! - 仅申请案件同步所需的只读权限。
+//! - 仅申请案件同步所需的多维表格读写权限；所有写操作仍须前端逐项确认。
 
 use std::fmt;
 use std::time::Duration;
@@ -20,7 +20,9 @@ use zeroize::Zeroize;
 const AUTHORIZE_URL: &str = "https://accounts.feishu.cn/open-apis/authen/v1/authorize";
 const TOKEN_URL: &str = "https://open.feishu.cn/open-apis/authen/v2/oauth/token";
 pub const REDIRECT_URI: &str = "http://localhost:3000/callback";
-pub const READONLY_SCOPES: &str = "offline_access bitable:app:readonly auth:user.id:read";
+pub const SYNC_SCOPES: &str = "offline_access bitable:app auth:user.id:read";
+#[deprecated(note = "v0.8.2 起案件同步使用受控读写权限")]
+pub const READONLY_SCOPES: &str = SYNC_SCOPES;
 
 const CALLBACK_ADDR: &str = "127.0.0.1:3000";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
@@ -42,6 +44,7 @@ pub struct FeishuOAuthStatus {
     pub access_expires_at: Option<i64>,
     pub refresh_expires_at: Option<i64>,
     pub reauthorization_required: bool,
+    pub write_enabled: bool,
 }
 
 /// OAuth 模块对外只返回稳定分类和固定文案，绝不附带 HTTP body、请求头、
@@ -72,7 +75,7 @@ pub enum FeishuOAuthError {
     InvalidTokenResponse,
     #[error("飞书认证失败")]
     TokenRejected,
-    #[error("飞书只读权限不完整，需要重新授权")]
+    #[error("飞书多维表格读写权限不完整，需要重新授权")]
     MissingReadonlyScope,
     #[error("飞书授权已过期，需要重新授权")]
     ReauthorizationRequired,
@@ -262,6 +265,21 @@ where
     Ok(status_from_bundle(app_id, &bundle))
 }
 
+/// 使用凭据库中已验证的 App Secret 升级当前 OAuth 授权。
+///
+/// 仅在旧授权仍连接但缺少 `bitable:app` 时使用；新授权成功签发前不会覆盖旧凭据。
+pub(crate) async fn reauthorize_with_stored_secret<F>(
+    app_id: &str,
+    open_browser: F,
+) -> Result<FeishuOAuthStatus, FeishuOAuthError>
+where
+    F: FnOnce(&str) -> Result<(), ()>,
+{
+    validate_app_id(app_id)?;
+    let app_secret = load_app_secret(app_id)?.ok_or(FeishuOAuthError::MissingAppSecret)?;
+    authorize_readonly(app_id, app_secret.expose().to_string(), open_browser).await
+}
+
 /// 返回一个尚未过期的 access token；必要时使用 refresh token 自动刷新。
 /// 返回值只能在 Rust 后端内使用，不能序列化或返回前端。
 pub(crate) async fn valid_access_token(
@@ -297,6 +315,7 @@ pub fn connection_status(app_id: &str) -> Result<FeishuOAuthStatus, FeishuOAuthE
             access_expires_at: None,
             refresh_expires_at: None,
             reauthorization_required: true,
+            write_enabled: false,
         }),
     }
 }
@@ -334,7 +353,7 @@ fn build_authorization_url(app_id: &str, state: &str) -> Result<reqwest::Url, Fe
         .append_pair("client_id", app_id)
         .append_pair("redirect_uri", REDIRECT_URI)
         .append_pair("state", state)
-        .append_pair("scope", READONLY_SCOPES);
+        .append_pair("scope", SYNC_SCOPES);
     Ok(url)
 }
 
@@ -589,11 +608,7 @@ fn split_scopes(value: &str) -> Vec<String> {
 }
 
 fn ensure_readonly_scopes(scopes: &[String]) -> Result<(), FeishuOAuthError> {
-    let required = [
-        "offline_access",
-        "bitable:app:readonly",
-        "auth:user.id:read",
-    ];
+    let required = ["offline_access", "bitable:app", "auth:user.id:read"];
     if required
         .iter()
         .all(|required| scopes.iter().any(|scope| scope == required))
@@ -613,6 +628,7 @@ fn status_from_bundle(app_id: &str, bundle: &StoredTokenBundle) -> FeishuOAuthSt
         access_expires_at: Some(bundle.access_expires_at),
         refresh_expires_at: Some(bundle.refresh_expires_at),
         reauthorization_required: bundle.refresh_expires_at <= now,
+        write_enabled: bundle.scopes.iter().any(|scope| scope == "bitable:app"),
     }
 }
 
@@ -1025,6 +1041,52 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    #[ignore = "reads the current device Feishu OAuth metadata"]
+    fn live_current_device_oauth_is_connected_for_readwrite() {
+        let current = crate::settings::read_settings().expect("read current device settings");
+        let app_id = current
+            .feishu_oauth_app_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .expect("Feishu OAuth app id is configured");
+        let status = connection_status(app_id)
+            .expect("read Feishu OAuth metadata from Windows Credential Manager");
+        println!(
+            "FEISHU_OAUTH_STATUS connected={} write_enabled={} reauthorization_required={}",
+            status.connected, status.write_enabled, status.reauthorization_required
+        );
+        assert!(
+            status.connected,
+            "Feishu OAuth is not connected on this device"
+        );
+        assert!(
+            status.write_enabled,
+            "Feishu OAuth must be reauthorized with bitable:app"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "opens the browser and upgrades the current device OAuth grant"]
+    async fn live_reauthorize_current_device_with_stored_app_secret() {
+        let current = crate::settings::read_settings().expect("read current device settings");
+        let app_id = current
+            .feishu_oauth_app_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .expect("Feishu OAuth app id is configured");
+        let status = reauthorize_with_stored_secret(app_id, |url| {
+            tauri_plugin_opener::open_url(url, None::<&str>).map_err(|_| ())
+        })
+        .await
+        .expect("complete Feishu readwrite reauthorization");
+        assert!(status.connected);
+        assert!(status.write_enabled);
+        println!("FEISHU_OAUTH_REAUTHORIZATION_OK");
+    }
+
     #[derive(Default)]
     struct MemoryCredentialBackend {
         values: HashMap<String, String>,
@@ -1064,7 +1126,7 @@ mod tests {
             refresh_token: refresh.to_string(),
             access_expires_at: 10,
             refresh_expires_at: 20,
-            scopes: split_scopes(READONLY_SCOPES),
+            scopes: split_scopes(SYNC_SCOPES),
         }
     }
 
@@ -1084,10 +1146,7 @@ mod tests {
             Some(REDIRECT_URI)
         );
         assert_eq!(query.get("state").map(|v| v.as_ref()), Some(state));
-        assert_eq!(
-            query.get("scope").map(|v| v.as_ref()),
-            Some(READONLY_SCOPES)
-        );
+        assert_eq!(query.get("scope").map(|v| v.as_ref()), Some(SYNC_SCOPES));
         assert!(!url.as_str().contains("app_secret"));
         assert!(!url.as_str().contains("access_token"));
     }
@@ -1137,7 +1196,7 @@ mod tests {
             refresh_token: "refresh-secret-marker".to_string(),
             access_expires_at: 10,
             refresh_expires_at: 20,
-            scopes: split_scopes(READONLY_SCOPES),
+            scopes: split_scopes(SYNC_SCOPES),
         };
         let debug = format!("{bundle:?}");
         assert!(!debug.contains("access-secret-marker"));
@@ -1153,7 +1212,7 @@ mod tests {
             refresh_token: Some("refresh".to_string()),
             expires_in: Some(7200),
             refresh_token_expires_in: Some(604800),
-            scope: Some(READONLY_SCOPES.to_string()),
+            scope: Some(SYNC_SCOPES.to_string()),
         };
         let bundle = token_response_to_bundle(valid, None).expect("complete token response");
         assert!(bundle.scopes.iter().any(|scope| scope == "offline_access"));

@@ -16,6 +16,7 @@ import {
   connectFeishuReadonly,
   disconnectFeishuReadonly,
   getFeishuConnectionStatus,
+  reauthorizeFeishuSync,
 } from "@/lib/api";
 import type { FeishuConnectionStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -43,13 +44,13 @@ function connectionErrorMessage(error: unknown): string {
     return "App ID 或 App Secret 无效，请核对后重新连接。";
   }
   if (message.includes("FEISHU_OAUTH_MISSING_READONLY_SCOPE")) {
-    return "当前应用缺少多维表格只读权限，请在飞书开发者后台补充权限后重新连接。";
+    return "当前应用缺少多维表格读写权限，请在飞书开发者后台补充权限后重新连接。";
   }
   if (message.includes("FEISHU_OAUTH_REAUTHORIZATION_REQUIRED")) {
     return "飞书授权已失效，请重新连接。";
   }
   if (message.includes("FEISHU_OAUTH_ACCESS_DENIED")) {
-    return "未完成飞书授权，请在授权页面同意只读权限后重试。";
+    return "未完成飞书授权，请在授权页面同意多维表格读写权限后重试。";
   }
   if (message.includes("FEISHU_OAUTH_BROWSER_OPEN_FAILED")) {
     return "无法打开飞书授权页面，请检查默认浏览器后重试。";
@@ -89,7 +90,7 @@ export function FeishuTool() {
   return <div className="space-y-5">
     <div role="tablist" aria-label="飞书连接功能" className="inline-flex max-w-full overflow-x-auto rounded-lg border border-border bg-muted/30 p-1">
       <TabButton active={tab === "sync"} onClick={() => setTab("sync")} controls="feishu-sync-panel"><TableProperties />案件同步预览</TabButton>
-      <TabButton active={tab === "connection"} onClick={() => setTab("connection")} controls="feishu-connection-panel"><Link2 />只读连接</TabButton>
+      <TabButton active={tab === "connection"} onClick={() => setTab("connection")} controls="feishu-connection-panel"><Link2 />同步连接</TabButton>
       <TabButton active={tab === "calendar"} onClick={() => setTab("calendar")} controls="feishu-calendar-panel"><CalendarClock />日历设置</TabButton>
     </div>
     <div id={`feishu-${tab}-panel`} role="tabpanel">
@@ -137,7 +138,7 @@ function FeishuConnectionPanel({
     try {
       const next = await connectFeishuReadonly(input);
       onStatusChange(next);
-      toast("飞书只读连接已建立", "info");
+      toast("飞书读写连接已建立", "info");
     } catch (connectError) {
       setError(connectionErrorMessage(connectError));
     } finally {
@@ -151,9 +152,23 @@ function FeishuConnectionPanel({
     try {
       const next = await disconnectFeishuReadonly();
       onStatusChange(next);
-      toast("飞书只读连接已断开", "info");
+      toast("飞书同步连接已断开", "info");
     } catch (disconnectError) {
       setError(connectionErrorMessage(disconnectError));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpgradeAuthorization = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await reauthorizeFeishuSync();
+      onStatusChange(next);
+      toast("飞书授权已升级为读写权限", "info");
+    } catch (upgradeError) {
+      setError(connectionErrorMessage(upgradeError));
     } finally {
       setLoading(false);
     }
@@ -168,13 +183,13 @@ function FeishuConnectionPanel({
         <div>
           <div className="flex items-center gap-2">
             <KeyRound className="size-5 text-foreground" />
-            <h3 id="feishu-connection-title" className="text-base font-semibold text-foreground">飞书案件只读连接</h3>
+            <h3 id="feishu-connection-title" className="text-base font-semibold text-foreground">飞书案件同步连接</h3>
           </div>
-          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">只申请身份识别和多维表格只读权限。案件看板不会写入飞书；App Secret 提交后会立即从页面清空，不写入项目设置或案件数据库。</p>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">申请身份识别和多维表格读写权限。后台只读预演不会写入；只有你在差异列表逐项确认后才执行单次写入。App Secret 提交后立即从页面清空，不写入项目设置或案件数据库。</p>
         </div>
         <div role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium", connected ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-300" : "bg-muted text-muted-foreground")}>
           {checking ? <Loader2 className="size-3.5 animate-spin" /> : connected ? <CheckCircle2 className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
-          {checking ? "正在检查连接" : connected ? "已连接 · 只读权限" : needsReauthorization ? "授权已失效" : "未连接"}
+          {checking ? "正在检查连接" : connected ? (status?.write_enabled ? "已连接 · 读写权限" : "已连接 · 旧只读权限") : needsReauthorization ? "授权已失效" : "未连接"}
         </div>
       </div>
 
@@ -183,11 +198,16 @@ function FeishuConnectionPanel({
       {connected ? <div className="mt-5 space-y-4">
         <dl className="grid gap-3 rounded-lg bg-muted/25 p-4 text-sm sm:grid-cols-2">
           <div><dt className="text-xs text-muted-foreground">App ID</dt><dd className="mt-1 font-medium text-foreground">{status?.app_id || "—"}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">授权范围</dt><dd className="mt-1 font-medium text-foreground">多维表格只读</dd></div>
+          <div><dt className="text-xs text-muted-foreground">授权范围</dt><dd className="mt-1 font-medium text-foreground">{status?.write_enabled ? "多维表格读写" : "旧只读权限（请重新连接）"}</dd></div>
         </dl>
-        <Button type="button" variant="outline" onClick={handleDisconnect} disabled={loading}>
-          {loading ? <Loader2 className="animate-spin" /> : <LogOut />}断开只读连接
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          {!status?.write_enabled && <Button type="button" onClick={handleUpgradeAuthorization} disabled={loading}>
+            {loading ? <Loader2 className="animate-spin" /> : <Link2 />}{loading ? "等待浏览器授权…" : "升级为读写权限"}
+          </Button>}
+          <Button type="button" variant="outline" onClick={handleDisconnect} disabled={loading}>
+            {loading ? <Loader2 className="animate-spin" /> : <LogOut />}断开同步连接
+          </Button>
+        </div>
       </div> : <form className="mt-5 space-y-4" onSubmit={handleConnect}>
         <div className="space-y-1.5">
           <label htmlFor="feishu-oauth-app-id" className="text-sm font-medium text-foreground">App ID</label>

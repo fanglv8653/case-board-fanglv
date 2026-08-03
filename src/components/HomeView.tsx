@@ -44,15 +44,18 @@ import {
   addCalendarEvent,
   type CalendarEvent,
   deleteCalendarEvent,
+  getCriminalCaseProfile,
   getCaseWithDocs,
   getSettings,
   listCalendarEvents,
   listCriminalDeadlineCalendar,
   listCriminalTaskSummary,
+  listCaseAgencyContacts,
   listOpenTodos,
   type OpenTodoRow,
   updateHomeCaseOrder,
   updateTodo,
+  updateCriminalCaseStage,
   updateWorkflowStatus,
 } from "@/lib/api";
 import {
@@ -63,12 +66,28 @@ import {
   ttDeleteItem,
   type TickTickItem,
 } from "@/lib/ticktickApi";
-import type { Case, CriminalDeadlineCalendarRow, CriminalTaskSummaryRow, Document } from "@/lib/types";
+import type {
+  Case,
+  CaseAgencyContact,
+  CriminalCaseProfile,
+  CriminalDeadlineCalendarRow,
+  CriminalTaskSummaryRow,
+  Document,
+} from "@/lib/types";
 import { parseJsonArray } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useFeatureFlag } from "@/lib/featureFlags";
 import { isCriminalCase } from "@/lib/caseDomain";
 import { caseMatchesSearch, getCaseDisplayName } from "@/lib/caseIdentity";
+import {
+  buildCriminalCaseIdentity,
+  resolveCriminalDisplayName,
+} from "@/lib/criminalCaseIdentity";
+import {
+  CRIMINAL_STAGE_LIST,
+  resolveCriminalCaseStatus,
+  type CriminalStageId,
+} from "@/lib/criminalCaseStatus";
 import { CalendarBoard } from "./CalendarBoard";
 import { shouldMountFullCalendar } from "./homeCalendarVisibility";
 import {
@@ -116,8 +135,13 @@ export interface HomeViewProps {
 
 export type HomeViewMode = "workspace" | "civil" | "criminal";
 type ViewMode = "grid" | "list";
-type SortKey = "status" | "amount" | "filed_at" | "hearing";
+type SortKey = "status" | "amount" | "filed_at" | "hearing" | "stage_date" | "updated_at";
 type SortDir = "asc" | "desc";
+type DomainStatusId = StatusId | CriminalStageId;
+type DomainStatusDef = Omit<StatusDef, "id"> & {
+  id: DomainStatusId;
+  domain: "civil" | "criminal";
+};
 export type EventKind = Exclude<HomeAgendaKind, "feishu">;
 
 type CaseListPreferences = {
@@ -127,6 +151,7 @@ type CaseListPreferences = {
 };
 
 interface CaseDisplayFields {
+  isCriminal: boolean;
   name: string;
   caseNo: string | null;
   court: string | null;
@@ -137,14 +162,28 @@ interface CaseDisplayFields {
   judges: string[];
   partySummary: string;
   amountText: string | null;
+  stageDate: string | null;
+  stageDateLabel: string | null;
+  coerciveMeasure: string | null;
 }
 
 interface CaseRow {
   caseData: Case;
-  status: StatusDef;
+  status: DomainStatusDef;
+  statusOptions: DomainStatusDef[];
+  isStatusManual: boolean;
   display: CaseDisplayFields;
   nearestHearing: string | null;
 }
+
+const CIVIL_STATUS_OPTIONS: DomainStatusDef[] = STATUS_LIST.map((status) => ({
+  ...status,
+  domain: "civil",
+}));
+const CRIMINAL_STATUS_OPTIONS: DomainStatusDef[] = CRIMINAL_STAGE_LIST.map((status) => ({
+  ...status,
+  domain: "criminal",
+}));
 
 export interface UpcomingEvent {
   kind: EventKind;
@@ -167,7 +206,14 @@ const DEFAULT_CASE_LIST_PREFERENCES: CaseListPreferences = {
   sortDir: "asc",
 };
 const CASE_LIST_VIEW_MODES: ViewMode[] = ["grid", "list"];
-const CASE_LIST_SORT_KEYS: SortKey[] = ["status", "amount", "filed_at", "hearing"];
+const CASE_LIST_SORT_KEYS: SortKey[] = [
+  "status",
+  "amount",
+  "filed_at",
+  "hearing",
+  "stage_date",
+  "updated_at",
+];
 const CASE_LIST_SORT_DIRS: SortDir[] = ["asc", "desc"];
 
 function caseListPreferencesKey(mode: HomeViewMode) {
@@ -235,13 +281,19 @@ export function HomeView({
     .toUpperCase();
 
   const [docsByCase, setDocsByCase] = useState<Record<string, Document[]>>({});
-  const [statusOverride, setStatusOverride] = useState<Record<string, StatusId | null>>({});
+  const [criminalProfiles, setCriminalProfiles] = useState<
+    Record<string, CriminalCaseProfile | null>
+  >({});
+  const [criminalContacts, setCriminalContacts] = useState<Record<string, CaseAgencyContact[]>>(
+    {},
+  );
+  const [statusOverride, setStatusOverride] = useState<Record<string, DomainStatusId | null>>({});
   const [userOrder, setUserOrder] = useState<string[] | null>(null);
   const [listPreferences, setListPreferences] = useState<CaseListPreferences>(() =>
     readCaseListPreferences(mode),
   );
   const { viewMode, sortKey, sortDir } = listPreferences;
-  const [statusFilters, setStatusFilters] = useState<Set<StatusId>>(new Set());
+  const [statusFilters, setStatusFilters] = useState<Set<DomainStatusId>>(new Set());
   const [courtFilter, setCourtFilter] = useState("");
   // 2026-06-16 · 首页模糊搜索(原告/被告名,公司或人名都可子串匹配)
   const [search, setSearch] = useState("");
@@ -317,6 +369,27 @@ export function HomeView({
 
   useEffect(() => {
     let cancelled = false;
+    const criminalCases = overviewCases.filter(isCriminalCase);
+    Promise.all(
+      criminalCases.map(async (caseData) => {
+        const [profile, contacts] = await Promise.all([
+          getCriminalCaseProfile(caseData.id).catch(() => null),
+          listCaseAgencyContacts(caseData.id).catch(() => [] as CaseAgencyContact[]),
+        ]);
+        return [caseData.id, profile, contacts] as const;
+      }),
+    ).then((rows) => {
+      if (cancelled) return;
+      setCriminalProfiles(Object.fromEntries(rows.map(([id, profile]) => [id, profile])));
+      setCriminalContacts(Object.fromEntries(rows.map(([id, , contacts]) => [id, contacts])));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [overviewCases]);
+
+  useEffect(() => {
+    let cancelled = false;
     Promise.all([
       listCriminalTaskSummary(),
       listCriminalDeadlineCalendar("1970-01-01T00:00:00+08:00", "9999-12-31T23:59:59+08:00"),
@@ -372,47 +445,48 @@ export function HomeView({
   }, []);
 
   const casesWithOverride = cases.map((c) =>
-    c.id in statusOverride ? { ...c, workflow_status: statusOverride[c.id] } : c,
+    !isCriminalCase(c) && c.id in statusOverride
+      ? { ...c, workflow_status: statusOverride[c.id] as StatusId | null }
+      : c,
   );
 
   const caseRows = useMemo<CaseRow[]>(
     () =>
-      casesWithOverride.map((c) => ({
-        caseData: c,
-        status: resolveCaseStatus(c, docsByCase[c.id] ?? []),
-        display: buildCaseDisplay(c),
-        nearestHearing: findNearestFutureHearing(c),
-      })),
-    [casesWithOverride, docsByCase],
+      casesWithOverride.map((c) =>
+        buildCaseRow(
+          c,
+          docsByCase[c.id] ?? [],
+          criminalProfiles[c.id] ?? null,
+          criminalContacts[c.id] ?? [],
+          statusOverride[c.id],
+        ),
+      ),
+    [casesWithOverride, docsByCase, criminalProfiles, criminalContacts, statusOverride],
   );
   const overviewRows = useMemo<CaseRow[]>(
     () =>
-      overviewCases.map((c) => ({
-        caseData: c,
-        status: resolveCaseStatus(c, docsByCase[c.id] ?? []),
-        display: buildCaseDisplay(c),
-        nearestHearing: findNearestFutureHearing(c),
-      })),
-    [overviewCases, docsByCase],
+      overviewCases.map((c) =>
+        buildCaseRow(
+          c,
+          docsByCase[c.id] ?? [],
+          criminalProfiles[c.id] ?? null,
+          criminalContacts[c.id] ?? [],
+          statusOverride[c.id],
+        ),
+      ),
+    [overviewCases, docsByCase, criminalProfiles, criminalContacts, statusOverride],
   );
   const criminalOverviewRows = overviewRows.filter((row) =>
     isCriminalCase(row.caseData),
   );
   const executionOverviewRows = overviewRows.filter(
-    (row) => row.status.id === "execution",
+    (row) => !isCriminalCase(row.caseData) && row.status.id === "execution",
   );
   const civilOverviewRows = overviewRows.filter(
     (row) => !isCriminalCase(row.caseData) && row.status.id !== "execution",
   );
 
-  const defaultSorted = [...caseRows].sort((a, b) =>
-    compareCasesByStatusThenTime(
-      a.status.id,
-      a.caseData.updated_at,
-      b.status.id,
-      b.caseData.updated_at,
-    ),
-  );
+  const defaultSorted = [...caseRows].sort(compareDomainCaseRows);
 
   // 用户拖过 → 按 userOrder 重排,没排过的(新案件 / userOrder 没覆盖到的)按默认顺序追加。
   // 已删的 case id 留在 userOrder 里也无害(idMap 找不到自动 filter)。
@@ -458,6 +532,12 @@ export function HomeView({
   const courtOptions = Array.from(
     new Set(caseRows.map((row) => row.display.court).filter(Boolean) as string[]),
   ).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  const statusFilterOptions =
+    mode === "criminal"
+      ? CRIMINAL_STATUS_OPTIONS
+      : mode === "civil"
+        ? CIVIL_STATUS_OPTIONS
+        : [...CIVIL_STATUS_OPTIONS, ...CRIMINAL_STATUS_OPTIONS];
 
   const searchQuery = search.trim().toLowerCase();
   const filteredRows = sortedRows.filter((row) => {
@@ -472,7 +552,11 @@ export function HomeView({
   });
 
   const activeCases = defaultSorted
-    .filter(({ status }) => status.id !== "closed" && status.id !== "mediated")
+    .filter(({ caseData, status }) =>
+      isCriminalCase(caseData)
+        ? caseData.management_status !== "closed"
+        : status.id !== "closed" && status.id !== "mediated",
+    )
     .map(({ caseData }) => caseData);
   const upcomingEvents = buildUpcomingEvents(activeCases);
   const activeCaseCount = activeCases.length;
@@ -489,18 +573,28 @@ export function HomeView({
   );
   const sortedIds = filteredRows.map((row) => row.caseData.id);
 
-  const handleChangeStatus = async (caseId: string, status: StatusId | null) => {
+  const handleChangeStatus = async (row: CaseRow, status: DomainStatusId | null) => {
+    const caseId = row.caseData.id;
+    const previous = statusOverride[caseId];
     setStatusOverride((m) => ({ ...m, [caseId]: status }));
     try {
-      await updateWorkflowStatus(caseId, status);
-      if (status === "closed") {
+      if (isCriminalCase(row.caseData)) {
+        if (!status) throw new Error("刑事程序阶段不能为空");
+        const profile = await updateCriminalCaseStage(caseId, status);
+        setCriminalProfiles((current) => ({ ...current, [caseId]: profile }));
+      } else {
+        await updateWorkflowStatus(caseId, status as StatusId | null);
+      }
+      if (!isCriminalCase(row.caseData) && status === "closed") {
         toast(
           "案件已结案。可进详情页点「沉淀为办案经验」存入知识库,日后同类案可检索复用",
           "info",
         );
       }
     } catch (e) {
+      setStatusOverride((current) => ({ ...current, [caseId]: previous ?? null }));
       console.warn("updateWorkflowStatus failed", e);
+      toast(`状态更新失败：${String(e)}`, "error");
     }
   };
 
@@ -520,7 +614,7 @@ export function HomeView({
     }
   };
 
-  const toggleStatusFilter = (id: StatusId) => {
+  const toggleStatusFilter = (id: DomainStatusId) => {
     setStatusFilters((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -741,10 +835,19 @@ export function HomeView({
                     }
                     className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
                   >
-                    <option value="status">按状态</option>
-                    <option value="amount">按诉讼金额</option>
-                    <option value="filed_at">按立案时间</option>
-                    <option value="hearing">按最近开庭日</option>
+                    <option value="status">按状态/阶段</option>
+                    {mode === "criminal" ? (
+                      <>
+                        <option value="stage_date">按当前阶段日期</option>
+                        <option value="updated_at">按最近更新</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="amount">按诉讼金额</option>
+                        <option value="filed_at">按立案时间</option>
+                        <option value="hearing">按最近开庭日</option>
+                      </>
+                    )}
                   </select>
                 </label>
                 {/* 与左右两个 select 同尺寸(px-2 py-1 text-xs),别用 Button size=sm(更高) */}
@@ -761,7 +864,7 @@ export function HomeView({
                   {sortDir === "asc" ? "升序" : "降序"}
                 </button>
                 <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  法院
+                  {mode === "criminal" ? "办案机关" : "法院"}
                   <select
                     value={courtFilter}
                     onChange={(e) => setCourtFilter(e.target.value)}
@@ -776,7 +879,7 @@ export function HomeView({
                   </select>
                 </label>
                 <div className="flex flex-wrap items-center gap-1">
-                  {STATUS_LIST.map((s) => (
+                  {statusFilterOptions.map((s) => (
                     <button
                       key={s.id}
                       type="button"
@@ -891,7 +994,7 @@ export function HomeView({
                     key={row.caseData.id}
                     row={row}
                     onClick={() => onPickCase(row.caseData.id)}
-                    onChangeStatus={(s) => handleChangeStatus(row.caseData.id, s)}
+                    onChangeStatus={(s) => handleChangeStatus(row, s)}
                     onContextMenu={(e) => openCtxMenu(e, row)}
                     selectMode={effSelectMode}
                     selected={selectedIds.has(row.caseData.id)}
@@ -912,7 +1015,7 @@ export function HomeView({
                         key={row.caseData.id}
                         row={row}
                         onClick={() => onPickCase(row.caseData.id)}
-                        onChangeStatus={(s) => handleChangeStatus(row.caseData.id, s)}
+                        onChangeStatus={(s) => handleChangeStatus(row, s)}
                         onContextMenu={(e) => openCtxMenu(e, row)}
                         selectMode={effSelectMode}
                         selected={selectedIds.has(row.caseData.id)}
@@ -1193,7 +1296,10 @@ function OverviewCard({
 
 function activeRows(rows: CaseRow[]) {
   return rows.filter(
-    (row) => row.status.id !== "closed" && row.status.id !== "mediated",
+    (row) =>
+      row.display.isCriminal
+        ? row.caseData.management_status !== "closed"
+        : row.status.id !== "closed" && row.status.id !== "mediated",
   );
 }
 
@@ -1227,7 +1333,7 @@ function IconToggle({
 function SortableCaseCard(props: {
   row: CaseRow;
   onClick: () => void;
-  onChangeStatus: (s: StatusId | null) => void;
+  onChangeStatus: (s: DomainStatusId | null) => void;
   onContextMenu: (e: React.MouseEvent) => void;
   selectMode: boolean;
   selected: boolean;
@@ -1271,7 +1377,7 @@ function CaseCard({
 }: {
   row: CaseRow;
   onClick: () => void;
-  onChangeStatus: (s: StatusId | null) => void;
+  onChangeStatus: (s: DomainStatusId | null) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
   selectMode?: boolean;
   selected?: boolean;
@@ -1283,7 +1389,9 @@ function CaseCard({
   isDragging?: boolean;
 }) {
   const { caseData, status, display } = row;
-  const isClosed = status.id === "closed";
+  const isClosed = display.isCriminal
+    ? caseData.management_status === "closed"
+    : status.id === "closed";
   // 多选模式:整卡点击 = 勾选/取消(不进详情);非多选 = 打开案件
   const handleActivate = selectMode ? onToggleSelect : onClick;
   return (
@@ -1337,7 +1445,9 @@ function CaseCard({
       <div className="absolute right-3 top-3">
         <StatusPicker
           status={status}
-          isManual={caseData.workflow_status != null}
+          options={row.statusOptions}
+          isManual={row.isStatusManual}
+          allowReset={!display.isCriminal}
           onPick={onChangeStatus}
         />
       </div>
@@ -1358,15 +1468,25 @@ function CaseCard({
       <p className="mt-1 text-sm text-muted-foreground">{display.partySummary}</p>
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
         <Item label="案号" value={display.caseNo} mono />
-        <Item
-          label={caseData.agg_court_type === "仲裁委" ? "仲裁委" : "法院"}
-          value={display.court}
-        />
-        <Item
-          label={caseData.agg_court_type === "仲裁委" ? "仲裁员" : "承办法官"}
-          value={display.judges.length > 0 ? display.judges.join("、") : null}
-        />
-        <Item label="诉讼金额" value={display.amountText} mono highlight />
+        {display.isCriminal ? (
+          <>
+            <Item label="办案机关" value={display.court} />
+            <Item label={display.stageDateLabel ?? "阶段日期"} value={display.stageDate} />
+            <Item label="强制措施" value={display.coerciveMeasure} />
+          </>
+        ) : (
+          <>
+            <Item
+              label={caseData.agg_court_type === "仲裁委" ? "仲裁委" : "法院"}
+              value={display.court}
+            />
+            <Item
+              label={caseData.agg_court_type === "仲裁委" ? "仲裁员" : "承办法官"}
+              value={display.judges.length > 0 ? display.judges.join("、") : null}
+            />
+            <Item label="诉讼金额" value={display.amountText} mono highlight />
+          </>
+        )}
       </dl>
       <div className="mt-4 flex items-center justify-between border-t border-border pt-3 text-caption text-muted-foreground">
         <span className="font-mono">{caseData.agg_computed_at ? "已抽取" : "抽取中..."}</span>
@@ -1389,7 +1509,7 @@ function CaseListRow({
 }: {
   row: CaseRow;
   onClick: () => void;
-  onChangeStatus: (s: StatusId | null) => void;
+  onChangeStatus: (s: DomainStatusId | null) => void;
   onContextMenu: (e: React.MouseEvent) => void;
   selectMode?: boolean;
   selected?: boolean;
@@ -1401,7 +1521,9 @@ function CaseListRow({
     <div
       className={cn(
         "grid cursor-pointer grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-3 text-left transition-colors last:border-b-0 hover:bg-muted/50",
-        status.id === "closed" && "opacity-60",
+        (display.isCriminal
+          ? caseData.management_status === "closed"
+          : status.id === "closed") && "opacity-60",
         selectMode && selected && "bg-sky-50/70 dark:bg-sky-950/30",
       )}
       onClick={handleActivate}
@@ -1440,13 +1562,21 @@ function CaseListRow({
       </div>
       <div className="min-w-0 text-xs">
         <div className="truncate text-foreground">
-          {display.judges.length > 0 ? display.judges.join("、") : "-"}
+          {display.isCriminal
+            ? display.stageDateLabel ?? "阶段日期"
+            : display.judges.length > 0
+              ? display.judges.join("、")
+              : "-"}
         </div>
-        <div className="font-mono text-muted-foreground">{display.amountText || "-"}</div>
+        <div className="font-mono text-muted-foreground">
+          {display.isCriminal ? display.stageDate || "待核实" : display.amountText || "-"}
+        </div>
       </div>
       <StatusPicker
         status={status}
-        isManual={caseData.workflow_status != null}
+        options={row.statusOptions}
+        isManual={row.isStatusManual}
+        allowReset={!display.isCriminal}
         onPick={onChangeStatus}
       />
       <span className="inline-flex items-center gap-0.5 text-caption text-muted-foreground">
@@ -1458,12 +1588,16 @@ function CaseListRow({
 
 function StatusPicker({
   status,
+  options,
   isManual,
+  allowReset,
   onPick,
 }: {
-  status: StatusDef;
+  status: DomainStatusDef;
+  options: DomainStatusDef[];
   isManual: boolean;
-  onPick: (s: StatusId | null) => void;
+  allowReset: boolean;
+  onPick: (s: DomainStatusId | null) => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -1497,7 +1631,7 @@ function StatusPicker({
       </button>
       {open && (
         <div className="absolute right-0 top-full z-20 mt-1 w-32 overflow-hidden rounded-md border border-border bg-card shadow-lg">
-          {STATUS_LIST.map((s) => (
+          {options.map((s) => (
             <button
               key={s.id}
               type="button"
@@ -1515,7 +1649,7 @@ function StatusPicker({
               {s.id === status.id && <Check className="size-3 text-foreground" />}
             </button>
           ))}
-          {isManual && (
+          {allowReset && isManual && (
             <>
               <div className="border-t border-border" />
               <button
@@ -2371,7 +2505,103 @@ function CalendarPanel({
   );
 }
 
-function buildCaseDisplay(caseData: Case): CaseDisplayFields {
+function buildCaseRow(
+  caseData: Case,
+  documents: Document[],
+  criminalProfile: CriminalCaseProfile | null,
+  criminalContacts: CaseAgencyContact[],
+  override: DomainStatusId | null | undefined,
+): CaseRow {
+  if (isCriminalCase(caseData)) {
+    const currentStage = (override as CriminalStageId | null | undefined) ?? criminalProfile?.current_stage;
+    const status = {
+      ...resolveCriminalCaseStatus({ current_stage: currentStage ?? null }),
+      domain: "criminal" as const,
+    };
+    return {
+      caseData,
+      status,
+      statusOptions: CRIMINAL_STATUS_OPTIONS,
+      isStatusManual: Boolean(currentStage),
+      display: buildCaseDisplay(caseData, criminalProfile, criminalContacts, currentStage),
+      nearestHearing: null,
+    };
+  }
+
+  const status = { ...resolveCaseStatus(caseData, documents), domain: "civil" as const };
+  return {
+    caseData,
+    status,
+    statusOptions: CIVIL_STATUS_OPTIONS,
+    isStatusManual: caseData.workflow_status != null,
+    display: buildCaseDisplay(caseData),
+    nearestHearing: findNearestFutureHearing(caseData),
+  };
+}
+
+function buildCaseDisplay(
+  caseData: Case,
+  criminalProfile: CriminalCaseProfile | null = null,
+  criminalContacts: CaseAgencyContact[] = [],
+  criminalStageOverride?: string | null,
+): CaseDisplayFields {
+  if (isCriminalCase(caseData)) {
+    const handlingContact =
+      criminalContacts.find(
+        (contact) =>
+          contact.agency_name &&
+          criminalProfile?.current_stage &&
+          contact.stage_scope?.includes(criminalProfile.current_stage),
+      ) ?? criminalContacts.find((contact) => contact.agency_name || contact.case_no);
+    const prosecutionContact =
+      criminalContacts.find(
+        (contact) =>
+          contact.agency_name &&
+          (contact.agency_type?.includes("检察") || contact.agency_name.includes("检察院")),
+      ) ?? null;
+    const identity = buildCriminalCaseIdentity({
+      displayNameOverride: caseData.display_name_override,
+      suspectOrDefendantName: criminalProfile?.suspect_or_defendant_name,
+      suspectedCharge: criminalProfile?.suspected_charge,
+      storedName: caseData.name,
+      currentStage: criminalStageOverride ?? criminalProfile?.current_stage,
+      prosecutionAuthority: prosecutionContact?.agency_name,
+      clientName: criminalProfile?.client_name,
+      detention_date: criminalProfile?.detention_date,
+      prosecution_received_date: criminalProfile?.prosecution_received_date,
+      first_instance_accepted_date: criminalProfile?.first_instance_accepted_date,
+      second_instance_accepted_date: criminalProfile?.second_instance_accepted_date,
+    });
+    const partyBits = [
+      identity.suspectOrDefendantName
+        ? `${identity.partyTerm}：${identity.suspectOrDefendantName}`
+        : null,
+      identity.pureCharge ? `涉嫌${identity.pureCharge}` : null,
+      identity.clientName ? `委托人：${identity.clientName}` : null,
+    ].filter(Boolean);
+    return {
+      isCriminal: true,
+      name: resolveCriminalDisplayName({
+        displayNameOverride: caseData.display_name_override,
+        suspectOrDefendantName: criminalProfile?.suspect_or_defendant_name,
+        suspectedCharge: criminalProfile?.suspected_charge,
+        storedName: caseData.name,
+      }).value,
+      caseNo: handlingContact?.case_no ?? caseData.case_no,
+      court: handlingContact?.agency_name ?? null,
+      cause: identity.pureCharge,
+      claimAmount: null,
+      plaintiffs: [],
+      defendants: [],
+      judges: [],
+      partySummary: partyBits.join(" · ") || "刑事专属信息待核实",
+      amountText: null,
+      stageDate: identity.stageDate?.value ?? null,
+      stageDateLabel: identity.stageDate?.label ?? null,
+      coerciveMeasure: criminalProfile?.coercive_measure_type ?? null,
+    };
+  }
+
   const plaintiffs = parseJsonArray(caseData.agg_plaintiffs);
   const defendants = parseJsonArray(caseData.agg_defendants);
   const judges = parseJsonArray(caseData.agg_judges);
@@ -2399,6 +2629,7 @@ function buildCaseDisplay(caseData: Case): CaseDisplayFields {
   const leftMore = plaintiffs.length > 1 ? `等${plaintiffs.length}人` : "";
   const rightMore = defendants.length > 1 ? `等${defendants.length}人` : "";
   return {
+    isCriminal: false,
     name: getCaseDisplayName(caseData),
     caseNo: ovStr("agg_case_no", caseData.agg_case_no),
     court: ovStr("agg_court", caseData.agg_court),
@@ -2409,19 +2640,36 @@ function buildCaseDisplay(caseData: Case): CaseDisplayFields {
     judges,
     partySummary: `${left}${leftMore} vs ${right}${rightMore}`,
     amountText: claimAmount ? formatYuan(claimAmount) : null,
+    stageDate: null,
+    stageDateLabel: null,
+    coerciveMeasure: null,
   };
+}
+
+function compareDomainCaseRows(a: CaseRow, b: CaseRow): number {
+  const aClosed = a.display.isCriminal
+    ? a.caseData.management_status === "closed"
+    : a.status.id === "closed";
+  const bClosed = b.display.isCriminal
+    ? b.caseData.management_status === "closed"
+    : b.status.id === "closed";
+  if (aClosed !== bClosed) return aClosed ? 1 : -1;
+  if (!a.display.isCriminal && !b.display.isCriminal) {
+    return compareCasesByStatusThenTime(
+      a.status.id as StatusId,
+      a.caseData.updated_at,
+      b.status.id as StatusId,
+      b.caseData.updated_at,
+    );
+  }
+  if (a.status.order !== b.status.order) return a.status.order - b.status.order;
+  return b.caseData.updated_at.localeCompare(a.caseData.updated_at);
 }
 
 function compareCaseRows(a: CaseRow, b: CaseRow, key: SortKey, dir: SortDir): number {
   const sign = dir === "asc" ? 1 : -1;
   if (key === "status") {
-    const base = compareCasesByStatusThenTime(
-      a.status.id,
-      a.caseData.updated_at,
-      b.status.id,
-      b.caseData.updated_at,
-    );
-    return sign * base;
+    return sign * compareDomainCaseRows(a, b);
   }
   const av = sortValue(a, key);
   const bv = sortValue(b, key);
@@ -2437,6 +2685,8 @@ function sortValue(row: CaseRow, key: SortKey): number | string | null {
   if (key === "amount") return row.display.claimAmount;
   if (key === "filed_at") return row.caseData.agg_filed_at;
   if (key === "hearing") return row.nearestHearing;
+  if (key === "stage_date") return row.display.stageDate;
+  if (key === "updated_at") return row.caseData.updated_at;
   return row.status.order;
 }
 

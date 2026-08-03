@@ -229,7 +229,7 @@ export function CaseSnapshotView({
     // ≥2 个审级才显示历程卡(单审级时与基本信息重复);紧跟基本信息,最新审级在上
     ...(contentMode !== "basic" && instances.length >= 2 ? [TITLES.INSTANCES] : []),
     ...(contentMode === "full" ? [TITLES.COURT, TITLES.PARTY] : []),
-    ...(contentMode !== "basic" ? [TITLES.FEE, TITLES.TIMELINE] : []),
+    ...(contentMode !== "basic" ? [TITLES.FEE, ...(!isCriminal ? [TITLES.TIMELINE] : [])] : []),
     ...(contentMode !== "basic" && snap.preservations.length > 0
       ? [TITLES.PRESERVATION]
       : []),
@@ -249,9 +249,9 @@ export function CaseSnapshotView({
           <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 md:grid-cols-3">
             <FactRow
               label={executionCaseNo ? "执行案号" : "案件编号"}
-              value={primaryCaseNo}
+              value={isCriminal ? caseData.case_no : primaryCaseNo}
               mono
-              {...(!executionCaseNo ? edit("agg_case_no") : {})}
+              {...(!isCriminal && !executionCaseNo ? edit("agg_case_no") : {})}
             />
             {executionCaseNo && (
               <FactRow label="审判案号" value={trialCaseNo} mono {...edit("agg_case_no")} />
@@ -270,12 +270,16 @@ export function CaseSnapshotView({
                 {...edit("case_stage")}
               />
             )}
-            <FactRow
-              label="案件状态"
-              value={snap.case_status}
-              pill={!isEditMode}
-              {...edit("agg_status_text")}
-            />
+            {isCriminal ? (
+              <FactRow label="管理状态" value={caseData.management_status || "unknown"} pill />
+            ) : (
+              <FactRow
+                label="案件状态"
+                value={snap.case_status}
+                pill={!isEditMode}
+                {...edit("agg_status_text")}
+              />
+            )}
             {!isCriminal && (
               <FactRow label="案由" value={snap.cause} {...edit("agg_cause")} />
             )}
@@ -581,7 +585,7 @@ export function CaseSnapshotView({
       )}
 
       {/* Hero:案由 + 案号 + 法院 + vs banner + 关键数字 */}
-      {contentMode === "full" && <section className="rounded-lg border border-border bg-card px-6 py-5 shadow-sm">
+      {contentMode === "full" && !isCriminal && <section className="rounded-lg border border-border bg-card px-6 py-5 shadow-sm">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h2 className="text-xl font-semibold text-foreground">
             {isEditMode ? (

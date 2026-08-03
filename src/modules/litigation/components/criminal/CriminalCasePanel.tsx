@@ -244,6 +244,18 @@ export function CriminalCasePanel({
     () => resolveProsecutionAgency(contacts, plaintiffs),
     [contacts, plaintiffs],
   );
+  const currentAgency = useMemo(
+    () =>
+      contacts.find(
+        (contact) =>
+          contact.agency_name &&
+          profileForm.current_stage &&
+          contact.stage_scope?.includes(profileForm.current_stage),
+      )?.agency_name ??
+      contacts.find((contact) => contact.agency_name)?.agency_name ??
+      null,
+    [contacts, profileForm.current_stage],
+  );
   const criminalIdentity = useMemo(
     () =>
       buildCriminalCaseIdentity({
@@ -826,7 +838,7 @@ export function CriminalCasePanel({
       {isCriminal && <Panel title="刑事案件信息">
         <div className="mb-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <FactTile label="公诉机关" value={criminalIdentity.prosecutionAuthority || "待核实"} />
-          <FactTile label="当前承办 / 审判机关" value={caseData.agg_court || caseData.court || "待核实"} />
+          <FactTile label="当前承办 / 审判机关" value={currentAgency || "待核实"} />
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <Field label="当前阶段">

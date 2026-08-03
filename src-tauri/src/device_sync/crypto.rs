@@ -258,7 +258,14 @@ mod tests {
             b"sensitive-case-data"
         );
 
-        envelope.ciphertext_sha256.replace_range(0..1, "f");
+        let replacement = if envelope.ciphertext_sha256.starts_with('f') {
+            "e"
+        } else {
+            "f"
+        };
+        envelope
+            .ciphertext_sha256
+            .replace_range(0..1, replacement);
         assert!(open(&envelope, &key, &device.signing_public_b64).is_err());
     }
 

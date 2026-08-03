@@ -1,13 +1,11 @@
-//! 飞书案件管理明细的单向入站同步。
+//! 飞书案件管理明细的受控双向同步预演。
 //!
-//! 这里只写入带 `external_source = 'feishu'` 的进展、阶段和通讯录记录；
-//! 案件名称、罪名、当事人、日期等案件业务字段仍由预览/人工确认流程维护。
+//! 拉取只写候选变化表；进展、阶段和通讯录业务表必须在用户逐项确认后才更新。
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{FixedOffset, TimeZone};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
@@ -128,10 +126,6 @@ fn payload(record: &FeishuRemoteCaseRecord, slot: Option<&str>) -> Result<String
     .map_err(|_| "FEISHU_RESPONSE_INVALID: 无法保存飞书关联记录原始数据".to_string())
 }
 
-fn hash(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
-}
-
 fn stage_status(value: Option<&str>) -> &'static str {
     match value.unwrap_or_default() {
         value if value.contains("完成") || value.contains("结束") => "completed",
@@ -152,7 +146,7 @@ fn work_type(value: Option<&str>) -> &'static str {
     }
 }
 
-async fn linked_case(
+fn linked_case(
     links: &HashMap<String, String>,
     fields: &serde_json::Map<String, Value>,
     field: &str,
@@ -168,65 +162,94 @@ async fn linked_case(
     }
 }
 
-type AuditEntry<'a> = (
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-);
+struct EntityPreviewInput<'a> {
+    run_id: &'a str,
+    link_id: &'a str,
+    entity_type: &'a str,
+    local_entity_id: Option<&'a str>,
+    app_token: &'a str,
+    table_id: &'a str,
+    record_id: &'a str,
+    slot_key: &'a str,
+    case_id: &'a str,
+    case_name: &'a str,
+    change_kind: &'a str,
+    local_value: Option<&'a Value>,
+    remote_value: &'a Value,
+    mapped_value: &'a Value,
+}
 
-async fn audit(tx: &mut Transaction<'_, Sqlite>, entry: AuditEntry<'_>) -> Result<(), String> {
-    let (run_id, entity_type, local_id, record_id, slot, action, payload_hash) = entry;
-    sqlx::query("INSERT INTO feishu_sync_entity_audits (id,run_id,entity_type,local_entity_id,remote_record_id,slot_key,action,payload_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)")
-        .bind(Uuid::new_v4().to_string()).bind(run_id).bind(entity_type).bind(local_id)
-        .bind(record_id).bind(slot).bind(action).bind(payload_hash)
-        .execute(&mut **tx).await
-        .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法保存飞书入站审计记录".to_string())?;
+async fn save_preview(
+    tx: &mut Transaction<'_, Sqlite>,
+    input: EntityPreviewInput<'_>,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO feishu_sync_entity_previews
+         (id,run_id,link_id,entity_type,local_entity_id,app_token,table_id,record_id,slot_key,
+          case_id,case_name,change_kind,local_value_json,feishu_value_json,mapped_value_json)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(input.run_id)
+    .bind(input.link_id)
+    .bind(input.entity_type)
+    .bind(input.local_entity_id)
+    .bind(input.app_token)
+    .bind(input.table_id)
+    .bind(input.record_id)
+    .bind(input.slot_key)
+    .bind(input.case_id)
+    .bind(input.case_name)
+    .bind(input.change_kind)
+    .bind(input.local_value.map(Value::to_string))
+    .bind(input.remote_value.to_string())
+    .bind(input.mapped_value.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("FEISHU_DB_PREVIEW_WRITE_FAILED: 保存飞书明细候选变化失败: {e}"))?;
     Ok(())
 }
 
-pub async fn import_management_records(
+fn parse_local(row: &(String, String, String)) -> Option<Value> {
+    serde_json::from_str(&row.2).ok()
+}
+
+pub async fn preview_management_records(
     tx: &mut Transaction<'_, Sqlite>,
     run_id: &str,
     app_token: &str,
     case_table_id: &str,
     bundle: &FeishuCaseManagementRecords,
 ) -> Result<FeishuEntityImportCounts, String> {
-    let link_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT record_id,local_entity_id FROM feishu_sync_links WHERE app_token=?1 AND table_id=?2 AND entity_type='case' AND slot_key='' AND status='active'",
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id,record_id,local_entity_id FROM feishu_sync_links
+         WHERE app_token=?1 AND table_id=?2 AND entity_type='case' AND slot_key='' AND status='active'",
     )
     .bind(app_token).bind(case_table_id).fetch_all(&mut **tx).await
-    .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法读取案件绑定".to_string())?;
-    let links: HashMap<String, String> = link_rows.into_iter().collect();
-    let bound_case_ids: HashSet<String> = links.values().cloned().collect();
-    let mut seen_work = HashSet::new();
-    let mut seen_stages = HashSet::new();
-    let mut seen_contacts = HashSet::new();
+    .map_err(|e| format!("FEISHU_DB_PREVIEW_WRITE_FAILED: 无法读取案件绑定: {e}"))?;
+    let links: HashMap<String, String> = rows
+        .iter()
+        .map(|(_, record, case_id)| (record.clone(), case_id.clone()))
+        .collect();
+    let link_ids_by_case: HashMap<String, String> = rows
+        .into_iter()
+        .map(|(link, _, case_id)| (case_id, link))
+        .collect();
+    sqlx::query("UPDATE feishu_sync_entity_previews SET review_status='superseded',resolved_at=datetime('now') WHERE review_status='pending'")
+        .execute(&mut **tx).await
+        .map_err(|e| format!("FEISHU_DB_PREVIEW_WRITE_FAILED: 无法结束旧的飞书明细候选: {e}"))?;
     let mut counts = FeishuEntityImportCounts::default();
 
     for record in &bundle.progress {
         let fields = object(record)?;
-        let Some(case_id) = linked_case(&links, fields, PROGRESS_CASE_FIELD).await? else {
+        let Some(case_id) = linked_case(&links, fields, PROGRESS_CASE_FIELD)? else {
             continue;
         };
-        let raw = payload(record, None)?;
-        let existing: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id,external_status,raw_payload_json FROM case_work_items WHERE external_source='feishu' AND external_record_id=?1 LIMIT 1",
+        let existing: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT id,external_status,json_object('occurred_at',occurred_at,'work_type',work_type,'title',title,'content',content,'duration_minutes',duration_minutes)
+             FROM case_work_items WHERE external_source='feishu' AND external_record_id=?1 LIMIT 1",
         ).bind(&record.record_id).fetch_optional(&mut **tx).await
-        .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法读取既有飞书进展".to_string())?;
-        let action = match existing.as_ref() {
-            None => "insert",
-            Some((_, status, _)) if status == "archived" => "restore",
-            Some((_, _, previous)) if previous.as_deref() == Some(raw.as_str()) => "unchanged",
-            _ => "update",
-        };
-        let id = existing
-            .as_ref()
-            .map(|row| row.0.clone())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        .map_err(|e| format!("FEISHU_DB_PREVIEW_WRITE_FAILED: 无法读取既有飞书进展: {e}"))?;
         let occurred_at = field_datetime(fields, "进度日期")
             .or_else(|| field_datetime(fields, "开始时间"))
             .ok_or_else(|| "FEISHU_SCHEMA_CHANGED: 飞书进展缺少进度日期".to_string())?;
@@ -240,116 +263,110 @@ pub async fn import_management_records(
             + field_text(fields, "分钟")
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(0);
-        if existing.is_some() {
-            sqlx::query("UPDATE case_work_items SET case_id=?2,occurred_at=?3,work_type=?4,title=?5,content=?6,duration_minutes=?7,external_updated_at=?8,raw_payload_json=?9,external_status='active',external_last_seen_at=datetime('now'),deleted_at=NULL,updated_at=datetime('now') WHERE id=?1")
-                .bind(&id).bind(&case_id).bind(&occurred_at).bind(work_type(kind.as_deref()))
-                .bind(kind.as_deref().unwrap_or("飞书进展")).bind(&content).bind(duration)
-                .bind(&record.last_modified_time).bind(&raw).execute(&mut **tx).await
-                .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法更新飞书进展".to_string())?;
-        } else {
-            sqlx::query("INSERT INTO case_work_items (id,case_id,occurred_at,work_type,title,content,duration_minutes,source,external_source,external_record_id,external_updated_at,raw_payload_json,external_status,external_last_seen_at) VALUES (?1,?2,?3,?4,?5,?6,?7,'feishu','feishu',?8,?9,?10,'active',datetime('now'))")
-                .bind(&id).bind(&case_id).bind(&occurred_at).bind(work_type(kind.as_deref()))
-                .bind(kind.as_deref().unwrap_or("飞书进展")).bind(&content).bind(duration)
-                .bind(&record.record_id).bind(&record.last_modified_time).bind(&raw).execute(&mut **tx).await
-                .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法新增飞书进展".to_string())?;
+        let values = serde_json::json!({"occurred_at":occurred_at,"work_type":work_type(kind.as_deref()),"title":kind.as_deref().unwrap_or("飞书进展"),"content":content,"duration_minutes":duration});
+        let local = existing.as_ref().and_then(parse_local);
+        if local.as_ref() != Some(&values)
+            || existing.as_ref().is_some_and(|row| row.1 == "archived")
+        {
+            let change = match existing.as_ref() {
+                None => "create",
+                Some(row) if row.1 == "archived" => "restore",
+                _ => "update",
+            };
+            let case_name: String = sqlx::query_scalar(
+                "SELECT COALESCE(NULLIF(display_name_override,''),name,id) FROM cases WHERE id=?1",
+            )
+            .bind(&case_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            let mapped = serde_json::json!({"values":values,"raw_payload_json":payload(record,None)?,"external_updated_at":record.last_modified_time});
+            save_preview(
+                tx,
+                EntityPreviewInput {
+                    run_id,
+                    link_id: &link_ids_by_case[&case_id],
+                    entity_type: "work_item",
+                    local_entity_id: existing.as_ref().map(|row| row.0.as_str()),
+                    app_token,
+                    table_id: &bundle.progress_table_id,
+                    record_id: &record.record_id,
+                    slot_key: "",
+                    case_id: &case_id,
+                    case_name: &case_name,
+                    change_kind: change,
+                    local_value: local.as_ref(),
+                    remote_value: &record.fields,
+                    mapped_value: &mapped,
+                },
+            )
+            .await?;
+            counts.work_items += 1;
         }
-        audit(
-            tx,
-            (
-                run_id,
-                "work_item",
-                &id,
-                &record.record_id,
-                "",
-                action,
-                &hash(&raw),
-            ),
-        )
-        .await?;
-        seen_work.insert(record.record_id.clone());
-        counts.work_items += 1;
     }
 
     for record in &bundle.stages {
         let fields = object(record)?;
-        let Some(case_id) = linked_case(&links, fields, STAGE_CASE_FIELD).await? else {
+        let Some(case_id) = linked_case(&links, fields, STAGE_CASE_FIELD)? else {
             continue;
         };
-        let raw = payload(record, None)?;
-        let existing: Option<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id,external_status,raw_payload_json FROM case_stage_items WHERE external_source='feishu' AND external_record_id=?1 LIMIT 1",
-        ).bind(&record.record_id).fetch_optional(&mut **tx).await
-        .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法读取既有飞书阶段".to_string())?;
-        let action = match existing.as_ref() {
-            None => "insert",
-            Some((_, status, _)) if status == "archived" => "restore",
-            Some((_, _, previous)) if previous.as_deref() == Some(raw.as_str()) => "unchanged",
-            _ => "update",
-        };
-        let id = existing
-            .as_ref()
-            .map(|row| row.0.clone())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let existing: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT id,external_status,json_object('major_stage',major_stage,'stage_label',stage_label,'status',status,'started_at',started_at,'due_at',due_at,'reminder_at',reminder_at)
+             FROM case_stage_items WHERE external_source='feishu' AND external_record_id=?1 LIMIT 1",
+        ).bind(&record.record_id).fetch_optional(&mut **tx).await.map_err(|e| e.to_string())?;
         let stage_label = field_text(fields, "程序")
             .or_else(|| field_text(fields, "阶段"))
             .ok_or_else(|| "FEISHU_SCHEMA_CHANGED: 飞书阶段缺少程序或阶段".to_string())?;
-        let status_text = field_text(fields, "🔁【状态】");
-        if existing.is_some() {
-            sqlx::query("UPDATE case_stage_items SET case_id=?2,major_stage=?3,stage_label=?4,status=?5,started_at=?6,due_at=?7,reminder_at=?8,external_updated_at=?9,raw_payload_json=?10,external_status='active',external_last_seen_at=datetime('now'),deleted_at=NULL,updated_at=datetime('now') WHERE id=?1")
-                .bind(&id).bind(&case_id).bind(field_text(fields, "阶段")).bind(&stage_label)
-                .bind(stage_status(status_text.as_deref())).bind(field_datetime(fields, "开始时间"))
-                .bind(field_datetime(fields, "程序结束时间")).bind(field_datetime(fields, "提醒时间"))
-                .bind(&record.last_modified_time).bind(&raw).execute(&mut **tx).await
-                .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法更新飞书阶段".to_string())?;
-        } else {
-            sqlx::query("INSERT INTO case_stage_items (id,case_id,domain,major_stage,stage_label,status,started_at,due_at,reminder_at,source,external_source,external_record_id,external_updated_at,raw_payload_json,external_status,external_last_seen_at) VALUES (?1,?2,'other',?3,?4,?5,?6,?7,?8,'feishu','feishu',?9,?10,?11,'active',datetime('now'))")
-                .bind(&id).bind(&case_id).bind(field_text(fields, "阶段")).bind(&stage_label)
-                .bind(stage_status(status_text.as_deref())).bind(field_datetime(fields, "开始时间"))
-                .bind(field_datetime(fields, "程序结束时间")).bind(field_datetime(fields, "提醒时间"))
-                .bind(&record.record_id).bind(&record.last_modified_time).bind(&raw).execute(&mut **tx).await
-                .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法新增飞书阶段".to_string())?;
+        let status_text = field_text(fields, "🔣【状态】");
+        let values = serde_json::json!({"major_stage":field_text(fields,"阶段"),"stage_label":stage_label,"status":stage_status(status_text.as_deref()),"started_at":field_datetime(fields,"开始时间"),"due_at":field_datetime(fields,"程序结束时间"),"reminder_at":field_datetime(fields,"提醒时间")});
+        let local = existing.as_ref().and_then(parse_local);
+        if local.as_ref() != Some(&values)
+            || existing.as_ref().is_some_and(|row| row.1 == "archived")
+        {
+            let change = match existing.as_ref() {
+                None => "create",
+                Some(row) if row.1 == "archived" => "restore",
+                _ => "update",
+            };
+            let (case_name,domain):(String,String)=sqlx::query_as("SELECT COALESCE(NULLIF(display_name_override,''),name,id),legal_domain FROM cases WHERE id=?1").bind(&case_id).fetch_one(&mut **tx).await.map_err(|e|e.to_string())?;
+            let mapped = serde_json::json!({"values":values,"domain":domain,"raw_payload_json":payload(record,None)?,"external_updated_at":record.last_modified_time});
+            save_preview(
+                tx,
+                EntityPreviewInput {
+                    run_id,
+                    link_id: &link_ids_by_case[&case_id],
+                    entity_type: "stage",
+                    local_entity_id: existing.as_ref().map(|row| row.0.as_str()),
+                    app_token,
+                    table_id: &bundle.stage_table_id,
+                    record_id: &record.record_id,
+                    slot_key: "",
+                    case_id: &case_id,
+                    case_name: &case_name,
+                    change_kind: change,
+                    local_value: local.as_ref(),
+                    remote_value: &record.fields,
+                    mapped_value: &mapped,
+                },
+            )
+            .await?;
+            counts.stages += 1;
         }
-        audit(
-            tx,
-            (
-                run_id,
-                "stage",
-                &id,
-                &record.record_id,
-                "",
-                action,
-                &hash(&raw),
-            ),
-        )
-        .await?;
-        seen_stages.insert(record.record_id.clone());
-        counts.stages += 1;
     }
 
     for record in &bundle.contacts {
         let fields = object(record)?;
-        let Some(case_id) = linked_case(&links, fields, CONTACT_CASE_FIELD).await? else {
+        let Some(case_id) = linked_case(&links, fields, CONTACT_CASE_FIELD)? else {
             continue;
         };
         for (slot, stage_scope, role) in CONTACT_SLOTS {
             let Some(contact_name) = field_text(fields, slot) else {
                 continue;
             };
-            let raw = payload(record, Some(slot))?;
-            let existing: Option<(String, String, Option<String>)> = sqlx::query_as(
-                "SELECT id,external_status,raw_payload_json FROM case_agency_contacts WHERE external_source='feishu' AND external_record_id=?1 AND external_slot_key=?2 LIMIT 1",
-            ).bind(&record.record_id).bind(slot).fetch_optional(&mut **tx).await
-            .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法读取既有飞书联系人".to_string())?;
-            let action = match existing.as_ref() {
-                None => "insert",
-                Some((_, status, _)) if status == "archived" => "restore",
-                Some((_, _, previous)) if previous.as_deref() == Some(raw.as_str()) => "unchanged",
-                _ => "update",
-            };
-            let id = existing
-                .as_ref()
-                .map(|row| row.0.clone())
-                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let existing: Option<(String,String,String)>=sqlx::query_as(
+                "SELECT id,external_status,json_object('stage_scope',stage_scope,'agency_name',agency_name,'contact_role',contact_role,'contact_name',contact_name,'case_no',case_no,'query_code',query_code,'notes',notes)
+                 FROM case_agency_contacts WHERE external_source='feishu' AND external_record_id=?1 AND external_slot_key=?2 LIMIT 1"
+            ).bind(&record.record_id).bind(slot).fetch_optional(&mut **tx).await.map_err(|e|e.to_string())?;
             let agency_name = match *stage_scope {
                 "investigation" => field_text(fields, "侦查机关"),
                 "prosecution" => {
@@ -357,103 +374,42 @@ pub async fn import_management_records(
                 }
                 _ => field_text(fields, "审判机关"),
             };
-            if existing.is_some() {
-                sqlx::query("UPDATE case_agency_contacts SET case_id=?2,stage_scope=?3,agency_type=?3,agency_name=?4,contact_role=?5,contact_name=?6,case_no=?7,query_code=?8,notes=?9,external_updated_at=?10,external_last_seen_at=datetime('now'),external_status='active',raw_payload_json=?11,deleted_at=NULL,updated_at=datetime('now') WHERE id=?1")
-                    .bind(&id).bind(&case_id).bind(stage_scope).bind(&agency_name).bind(role).bind(&contact_name)
-                    .bind(field_text(fields, "案号")).bind(field_text(fields, "案件查询码/备注"))
-                    .bind(field_text(fields, "备注")).bind(&record.last_modified_time).bind(&raw)
-                    .execute(&mut **tx).await
-                    .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法更新飞书联系人".to_string())?;
-            } else {
-                sqlx::query("INSERT INTO case_agency_contacts (id,case_id,stage_scope,agency_type,agency_name,contact_role,contact_name,case_no,query_code,notes,source,external_source,external_record_id,external_slot_key,external_updated_at,external_last_seen_at,external_status,raw_payload_json) VALUES (?1,?2,?3,?3,?4,?5,?6,?7,?8,?9,'feishu','feishu',?10,?11,?12,datetime('now'),'active',?13)")
-                    .bind(&id).bind(&case_id).bind(stage_scope).bind(&agency_name).bind(role).bind(&contact_name)
-                    .bind(field_text(fields, "案号")).bind(field_text(fields, "案件查询码/备注"))
-                    .bind(field_text(fields, "备注")).bind(&record.record_id).bind(slot)
-                    .bind(&record.last_modified_time).bind(&raw).execute(&mut **tx).await
-                    .map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法新增飞书联系人".to_string())?;
+            let values = serde_json::json!({"stage_scope":stage_scope,"agency_name":agency_name,"contact_role":role,"contact_name":contact_name,"case_no":field_text(fields,"案号"),"query_code":field_text(fields,"案件查询码/备注"),"notes":field_text(fields,"备注")});
+            let local = existing.as_ref().and_then(parse_local);
+            if local.as_ref() != Some(&values)
+                || existing.as_ref().is_some_and(|row| row.1 == "archived")
+            {
+                let change = match existing.as_ref() {
+                    None => "create",
+                    Some(row) if row.1 == "archived" => "restore",
+                    _ => "update",
+                };
+                let case_name:String=sqlx::query_scalar("SELECT COALESCE(NULLIF(display_name_override,''),name,id) FROM cases WHERE id=?1").bind(&case_id).fetch_one(&mut **tx).await.map_err(|e|e.to_string())?;
+                let mapped = serde_json::json!({"values":values,"raw_payload_json":payload(record,Some(slot))?,"external_updated_at":record.last_modified_time});
+                save_preview(
+                    tx,
+                    EntityPreviewInput {
+                        run_id,
+                        link_id: &link_ids_by_case[&case_id],
+                        entity_type: "contact",
+                        local_entity_id: existing.as_ref().map(|row| row.0.as_str()),
+                        app_token,
+                        table_id: &bundle.contact_table_id,
+                        record_id: &record.record_id,
+                        slot_key: slot,
+                        case_id: &case_id,
+                        case_name: &case_name,
+                        change_kind: change,
+                        local_value: local.as_ref(),
+                        remote_value: &record.fields,
+                        mapped_value: &mapped,
+                    },
+                )
+                .await?;
+                counts.contacts += 1;
             }
-            audit(
-                tx,
-                (
-                    run_id,
-                    "contact",
-                    &id,
-                    &record.record_id,
-                    slot,
-                    action,
-                    &hash(&raw),
-                ),
-            )
-            .await?;
-            seen_contacts.insert(format!("{}\u{1f}{}", record.record_id, slot));
-            counts.contacts += 1;
         }
     }
-
-    let bound_cases = bound_case_ids.into_iter().collect::<Vec<_>>();
-    for case_id in bound_cases {
-        let work_rows: Vec<(String, String, String)> = sqlx::query_as("SELECT id,external_record_id,COALESCE(raw_payload_json,'') FROM case_work_items WHERE case_id=?1 AND external_source='feishu' AND external_status='active' AND external_record_id IS NOT NULL")
-            .bind(&case_id).fetch_all(&mut **tx).await.map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法检查失效进展".to_string())?;
-        for (id, record_id, raw) in work_rows
-            .into_iter()
-            .filter(|row| !seen_work.contains(&row.1))
-        {
-            sqlx::query("UPDATE case_work_items SET external_status='archived',deleted_at=datetime('now'),updated_at=datetime('now') WHERE id=?1")
-                .bind(&id).execute(&mut **tx).await.map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法归档失效进展".to_string())?;
-            audit(
-                tx,
-                (
-                    run_id,
-                    "work_item",
-                    &id,
-                    &record_id,
-                    "",
-                    "archive",
-                    &hash(&raw),
-                ),
-            )
-            .await?;
-            counts.archived += 1;
-        }
-        let stage_rows: Vec<(String, String, String)> = sqlx::query_as("SELECT id,external_record_id,COALESCE(raw_payload_json,'') FROM case_stage_items WHERE case_id=?1 AND external_source='feishu' AND external_status='active' AND external_record_id IS NOT NULL")
-            .bind(&case_id).fetch_all(&mut **tx).await.map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法检查失效阶段".to_string())?;
-        for (id, record_id, raw) in stage_rows
-            .into_iter()
-            .filter(|row| !seen_stages.contains(&row.1))
-        {
-            sqlx::query("UPDATE case_stage_items SET external_status='archived',deleted_at=datetime('now'),updated_at=datetime('now') WHERE id=?1")
-                .bind(&id).execute(&mut **tx).await.map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法归档失效阶段".to_string())?;
-            audit(
-                tx,
-                (run_id, "stage", &id, &record_id, "", "archive", &hash(&raw)),
-            )
-            .await?;
-            counts.archived += 1;
-        }
-        let contact_rows: Vec<(String, String, String, String)> = sqlx::query_as("SELECT id,external_record_id,external_slot_key,COALESCE(raw_payload_json,'') FROM case_agency_contacts WHERE case_id=?1 AND external_source='feishu' AND external_status='active' AND external_record_id IS NOT NULL")
-            .bind(&case_id).fetch_all(&mut **tx).await.map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法检查失效联系人".to_string())?;
-        for (id, record_id, slot, raw) in contact_rows
-            .into_iter()
-            .filter(|row| !seen_contacts.contains(&format!("{}\u{1f}{}", row.1, row.2)))
-        {
-            sqlx::query("UPDATE case_agency_contacts SET external_status='archived',deleted_at=datetime('now'),updated_at=datetime('now') WHERE id=?1")
-                .bind(&id).execute(&mut **tx).await.map_err(|_| "FEISHU_DB_ENTITY_WRITE_FAILED: 无法归档失效联系人".to_string())?;
-            audit(
-                tx,
-                (
-                    run_id,
-                    "contact",
-                    &id,
-                    &record_id,
-                    &slot,
-                    "archive",
-                    &hash(&raw),
-                ),
-            )
-            .await?;
-            counts.archived += 1;
-        }
-    }
-
+    // 远端缺失不映射为本地删除或归档；删除仍由用户在本地手工完成。
     Ok(counts)
 }

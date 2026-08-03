@@ -648,14 +648,8 @@ async fn accept_memory_candidate(
     candidate_id: String,
     input: db::case_memory::AcceptCandidateInput,
 ) -> Result<db::case_memory::CaseMemory, String> {
-    db::case_memory::accept_memory_candidate(
-        &pool,
-        &case_id,
-        &candidate_id,
-        input,
-        "local-user",
-    )
-    .await
+    db::case_memory::accept_memory_candidate(&pool, &case_id, &candidate_id, input, "local-user")
+        .await
 }
 
 #[tauri::command]
@@ -817,13 +811,9 @@ async fn preview_legal_skill_diff(
     current_skill_id: String,
     target_skill_id: String,
 ) -> Result<chat::legal_skills::LegalSkillDiffPreview, String> {
-    chat::legal_skills::preview_package_diff(
-        pool.inner(),
-        &current_skill_id,
-        &target_skill_id,
-    )
-    .await
-    .map_err(|error| error.to_string())
+    chat::legal_skills::preview_package_diff(pool.inner(), &current_skill_id, &target_skill_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -993,6 +983,15 @@ async fn get_criminal_case_profile(
     case_id: String,
 ) -> Result<Option<db::criminal_cases::CriminalCaseProfile>, String> {
     db::criminal_cases::get_criminal_case_profile(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn update_criminal_case_stage(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+    stage: String,
+) -> Result<db::criminal_cases::CriminalCaseProfile, String> {
+    db::criminal_cases::update_criminal_case_stage(pool.inner(), &case_id, &stage).await
 }
 
 #[tauri::command]
@@ -1619,6 +1618,9 @@ fn feishu_oauth_error(error: feishu_oauth::FeishuOAuthError) -> String {
     format!("{}: {}", error.code(), error)
 }
 
+static FEISHU_CONNECT_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 #[tauri::command]
 fn get_feishu_connection_status() -> Result<feishu_oauth::FeishuOAuthStatus, String> {
     let app_id = settings::read_settings()?
@@ -1632,6 +1634,7 @@ fn get_feishu_connection_status() -> Result<feishu_oauth::FeishuOAuthStatus, Str
             access_expires_at: None,
             refresh_expires_at: None,
             reauthorization_required: true,
+            write_enabled: false,
         });
     }
     feishu_oauth::connection_status(app_id.trim()).map_err(feishu_oauth_error)
@@ -1641,8 +1644,7 @@ fn get_feishu_connection_status() -> Result<feishu_oauth::FeishuOAuthStatus, Str
 async fn connect_feishu_readonly(
     input: FeishuConnectInput,
 ) -> Result<feishu_oauth::FeishuOAuthStatus, String> {
-    static CONNECT_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = CONNECT_LOCK
+    let _guard = FEISHU_CONNECT_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock()
         .map_err(|_| "FEISHU_OAUTH_IN_PROGRESS: 已有一个飞书授权窗口正在等待完成".to_string())?;
@@ -1656,6 +1658,26 @@ async fn connect_feishu_readonly(
     current.feishu_oauth_app_id = Some(app_id);
     settings::write_settings(&current)?;
     Ok(status)
+}
+
+#[tauri::command]
+async fn reauthorize_feishu_sync() -> Result<feishu_oauth::FeishuOAuthStatus, String> {
+    let _guard = FEISHU_CONNECT_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .try_lock()
+        .map_err(|_| "FEISHU_OAUTH_IN_PROGRESS: 已有一个飞书授权窗口正在等待完成".to_string())?;
+    let app_id = settings::read_settings()?
+        .feishu_oauth_app_id
+        .unwrap_or_default();
+    let app_id = app_id.trim();
+    if app_id.is_empty() {
+        return Err("FEISHU_AUTH_REQUIRED: 请先配置飞书 App ID".to_string());
+    }
+    feishu_oauth::reauthorize_with_stored_secret(app_id, |url| {
+        tauri_plugin_opener::open_url(url, None::<&str>).map_err(|_| ())
+    })
+    .await
+    .map_err(feishu_oauth_error)
 }
 
 #[tauri::command]
@@ -1673,6 +1695,7 @@ fn disconnect_feishu_readonly() -> Result<feishu_oauth::FeishuOAuthStatus, Strin
         access_expires_at: None,
         refresh_expires_at: None,
         reauthorization_required: true,
+        write_enabled: false,
     })
 }
 
@@ -1685,13 +1708,17 @@ async fn pull_feishu_sync_preview(
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock()
         .map_err(|_| "FEISHU_PULL_IN_PROGRESS: 已有一次飞书预演正在进行".to_string())?;
+    let _write_guard = FEISHU_WRITE_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .try_lock()
+        .map_err(|_| "FEISHU_WRITE_IN_PROGRESS: 正在处理一项飞书写入，请稍后刷新".to_string())?;
     let current = settings::read_settings()?;
     let app_id = current
         .feishu_oauth_app_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书只读授权".to_string())?;
+        .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书案件同步授权".to_string())?;
     let app_token = current
         .feishu_app_token
         .as_deref()
@@ -4638,9 +4665,180 @@ async fn update_workflow_status(
     case_id: String,
     status: Option<String>,
 ) -> Result<(), String> {
-    cases_db::update_workflow_status(pool.inner(), &case_id, status.as_deref())
-        .await
-        .map_err(db_err)
+    cases_db::update_workflow_status(pool.inner(), &case_id, status.as_deref()).await
+}
+
+#[derive(Deserialize)]
+struct FeishuResolveFieldInput {
+    preview_id: String,
+    resolution: String,
+}
+
+static FEISHU_WRITE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+/// 逐项处理飞书字段差异：采用飞书、保留本地并写飞书，或暂不处理。
+#[tauri::command]
+async fn resolve_feishu_sync_field(
+    pool: tauri::State<'_, SqlitePool>,
+    input: FeishuResolveFieldInput,
+) -> Result<(), String> {
+    let _guard = FEISHU_WRITE_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .try_lock()
+        .map_err(|_| "FEISHU_WRITE_IN_PROGRESS: 正在处理另一项飞书写入，请稍后重试".to_string())?;
+    let preview_id = input.preview_id.trim();
+    match input.resolution.trim() {
+        "feishu" => {
+            let plan = db::feishu_sync::get_field_resolution_plan(pool.inner(), preview_id).await?;
+            let current = settings::read_settings()?;
+            let app_id = current
+                .feishu_oauth_app_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书".to_string())?;
+            let token = feishu_oauth::valid_access_token(app_id)
+                .await
+                .map_err(feishu_oauth_error)?;
+            let remote = feishu::fetch_bitable_record(
+                token.expose(),
+                &plan.app_token,
+                &plan.table_id,
+                &plan.record_id,
+            )
+            .await?;
+            db::feishu_sync::ensure_remote_field_snapshot(&plan, &remote)?;
+            db::feishu_sync::apply_feishu_value_to_local(pool.inner(), &plan).await
+        }
+        "local" => {
+            let plan = db::feishu_sync::get_field_resolution_plan(pool.inner(), preview_id).await?;
+            if plan.review_status != "pending" {
+                return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该字段已处理".into());
+            }
+            db::feishu_sync::ensure_field_preview_fresh(pool.inner(), &plan).await?;
+            let current = settings::read_settings()?;
+            let app_id = current
+                .feishu_oauth_app_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书读写授权".to_string())?;
+            let status = feishu_oauth::connection_status(app_id).map_err(feishu_oauth_error)?;
+            if !status.write_enabled {
+                return Err(
+                    "FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权为旧只读权限，请重新连接".into(),
+                );
+            }
+            let (field_name, field_value) = db::feishu_sync::local_value_for_feishu(&plan)?;
+            let token = feishu_oauth::valid_access_token(app_id)
+                .await
+                .map_err(feishu_oauth_error)?;
+            let remote = feishu::fetch_bitable_record(
+                token.expose(),
+                &plan.app_token,
+                &plan.table_id,
+                &plan.record_id,
+            )
+            .await?;
+            db::feishu_sync::ensure_remote_field_snapshot(&plan, &remote)?;
+            feishu::update_bitable_record_fields(
+                token.expose(),
+                &plan.app_token,
+                &plan.table_id,
+                &plan.record_id,
+                serde_json::json!({ (field_name): field_value }),
+            )
+            .await?;
+            db::feishu_sync::finish_local_to_feishu(pool.inner(), &plan).await
+        }
+        "dismiss" => db::feishu_sync::dismiss_field_preview(pool.inner(), preview_id).await,
+        _ => Err("FEISHU_REVIEW_INVALID: resolution 必须为 feishu、local 或 dismiss".into()),
+    }
+}
+
+/// 逐项处理进展、阶段或联系人差异；拉取本身不会触碰业务表。
+#[tauri::command]
+async fn resolve_feishu_sync_entity(
+    pool: tauri::State<'_, SqlitePool>,
+    input: FeishuResolveFieldInput,
+) -> Result<(), String> {
+    let _guard = FEISHU_WRITE_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .try_lock()
+        .map_err(|_| "FEISHU_WRITE_IN_PROGRESS: 正在处理另一项飞书写入，请稍后重试".to_string())?;
+    let preview_id = input.preview_id.trim();
+    match input.resolution.trim() {
+        "feishu" => {
+            let plan =
+                db::feishu_sync::get_entity_resolution_plan(pool.inner(), preview_id).await?;
+            let current = settings::read_settings()?;
+            let app_id = current
+                .feishu_oauth_app_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书".to_string())?;
+            let token = feishu_oauth::valid_access_token(app_id)
+                .await
+                .map_err(feishu_oauth_error)?;
+            let remote = feishu::fetch_bitable_record(
+                token.expose(),
+                &plan.app_token,
+                &plan.table_id,
+                &plan.record_id,
+            )
+            .await?;
+            db::feishu_sync::ensure_remote_entity_snapshot(&plan, &remote)?;
+            db::feishu_sync::apply_feishu_entity_to_local(pool.inner(), &plan).await
+        }
+        "local" => {
+            let plan =
+                db::feishu_sync::get_entity_resolution_plan(pool.inner(), preview_id).await?;
+            if plan.review_status != "pending" {
+                return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该明细已处理".into());
+            }
+            if plan.local_entity_id.is_none() {
+                return Err("FEISHU_REVIEW_UNSUPPORTED: 本地尚无该明细，不能写回飞书".into());
+            }
+            db::feishu_sync::ensure_entity_preview_fresh(pool.inner(), &plan).await?;
+            let current = settings::read_settings()?;
+            let app_id = current
+                .feishu_oauth_app_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书读写授权".to_string())?;
+            let status = feishu_oauth::connection_status(app_id).map_err(feishu_oauth_error)?;
+            if !status.write_enabled {
+                return Err(
+                    "FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权为旧只读权限，请重新连接".into(),
+                );
+            }
+            let fields = db::feishu_sync::local_entity_fields_for_feishu(&plan)?;
+            let token = feishu_oauth::valid_access_token(app_id)
+                .await
+                .map_err(feishu_oauth_error)?;
+            let remote = feishu::fetch_bitable_record(
+                token.expose(),
+                &plan.app_token,
+                &plan.table_id,
+                &plan.record_id,
+            )
+            .await?;
+            db::feishu_sync::ensure_remote_entity_snapshot(&plan, &remote)?;
+            feishu::update_bitable_record_fields(
+                token.expose(),
+                &plan.app_token,
+                &plan.table_id,
+                &plan.record_id,
+                serde_json::Value::Object(fields),
+            )
+            .await?;
+            db::feishu_sync::finish_local_entity_to_feishu(pool.inner(), &plan).await
+        }
+        "dismiss" => db::feishu_sync::dismiss_entity_preview(pool.inner(), preview_id).await,
+        _ => Err("FEISHU_REVIEW_INVALID: resolution 必须为 feishu、local 或 dismiss".into()),
+    }
 }
 
 /// 2026-05-26 V0.1.13 · 写入案件 user_overrides JSON(编辑模式手改 overlay)。
@@ -6193,10 +6391,7 @@ pub fn run() {
             })?;
             tauri::async_runtime::block_on(chat::legal_skills::seed_builtin_packages(&pool))
                 .map_err(|e| {
-                    Box::<dyn std::error::Error>::from(format!(
-                        "初始化内置法律方法包失败: {}",
-                        e
-                    ))
+                    Box::<dyn std::error::Error>::from(format!("初始化内置法律方法包失败: {}", e))
                 })?;
 
             // V0.2 D5.5 · 启动时把上次崩溃前没收尾的 chat_tasks 标 failed,
@@ -6347,6 +6542,7 @@ pub fn run() {
             upsert_case_work_item,
             delete_case_work_item,
             get_criminal_case_profile,
+            update_criminal_case_stage,
             upsert_criminal_case_profile,
             save_criminal_sentencing_estimate,
             list_criminal_sentencing_estimates,
@@ -6444,8 +6640,11 @@ pub fn run() {
             unbind_feishu_sync_case,
             ignore_feishu_sync_case,
             restore_feishu_sync_case,
+            resolve_feishu_sync_field,
+            resolve_feishu_sync_entity,
             get_feishu_connection_status,
             connect_feishu_readonly,
+            reauthorize_feishu_sync,
             disconnect_feishu_readonly,
             pull_feishu_sync_preview,
             start_court_filing,
