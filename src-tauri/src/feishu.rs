@@ -1250,6 +1250,49 @@ pub async fn find_case_local_path(
 mod tests {
     use super::*;
 
+    fn qa_text(value: Option<&Value>) -> Option<String> {
+        fn collect(value: &Value, output: &mut Vec<String>) {
+            match value {
+                Value::String(text) if !text.trim().is_empty() => {
+                    output.push(text.trim().to_string());
+                }
+                Value::Array(items) => items.iter().for_each(|item| collect(item, output)),
+                Value::Object(object) => {
+                    for key in ["text", "name", "title", "value", "full_name"] {
+                        if let Some(item) = object.get(key) {
+                            collect(item, output);
+                            if !output.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut parts = Vec::new();
+        if let Some(value) = value {
+            collect(value, &mut parts);
+        }
+        (!parts.is_empty()).then(|| parts.join("、"))
+    }
+
+    #[test]
+    fn qa_text_accepts_plain_and_rich_text_shapes() {
+        assert_eq!(
+            qa_text(Some(&serde_json::json!("测试文本"))).as_deref(),
+            Some("测试文本")
+        );
+        assert_eq!(
+            qa_text(Some(
+                &serde_json::json!([{"type": "text", "text": "测试文本"}])
+            ))
+            .as_deref(),
+            Some("测试文本")
+        );
+    }
+
     #[test]
     fn parses_raw_and_cli_wrapped_record_responses() {
         let raw = serde_json::json!({
@@ -1618,7 +1661,7 @@ mod tests {
             .await
             .expect("read newly created copy-table record");
         assert_eq!(
-            created.fields.get(&field_name).and_then(Value::as_str),
+            qa_text(created.fields.get(&field_name)).as_deref(),
             Some(initial.as_str())
         );
 
@@ -1635,7 +1678,7 @@ mod tests {
             .await
             .expect("read updated copy-table record");
         assert_eq!(
-            reread.fields.get(&field_name).and_then(Value::as_str),
+            qa_text(reread.fields.get(&field_name)).as_deref(),
             Some(updated.as_str())
         );
 
