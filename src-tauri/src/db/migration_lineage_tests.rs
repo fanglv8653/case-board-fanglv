@@ -1,19 +1,43 @@
-//! V083-N0 migration-lineage fixtures.
+//! V083-M1 migration-lineage regression fixtures.
 //!
-//! These tests intentionally document the v0.8.2 behavior before M1 changes
-//! it. Every database is created under a fresh `tempfile::TempDir`; none of the
-//! helpers resolve or inspect the application's default data directory.
+//! Every database is synthetic and lives under a fresh `TempDir`. Existing
+//! incompatible files must fail during the read-only preflight, before a
+//! read-write/WAL pool can mutate migration history, schema or business rows.
 
-use super::{init_pool, reconcile_migration_checksums, DbError};
+use super::{
+    init_pool, DbError, DbMigrationCompatibilityError, DB_MIGRATION_APPLIED_VERSION_UNKNOWN,
+    DB_MIGRATION_CHECKSUM_UNKNOWN, DB_MIGRATION_LINEAGE_INCOMPATIBLE,
+    DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
+};
 use sha2::{Digest, Sha384};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const UNKNOWN_APPLIED_VERSION: i64 = 9_999;
 const SYNTHETIC_DIVERGENT_SQL: &[u8] =
     b"CREATE TABLE synthetic_same_version_different_sql (id TEXT PRIMARY KEY);";
+
+#[derive(Debug, PartialEq, Eq)]
+struct DatabaseFingerprint {
+    migration_history: Vec<(i64, String, bool, Vec<u8>, i64)>,
+    schema: Vec<(String, String, String, String)>,
+    synthetic_cases: Vec<(String, String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PhysicalFingerprint {
+    database: Vec<u8>,
+    wal: Option<Vec<u8>>,
+    shm: Option<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExistingSchemaFingerprint {
+    schema: Vec<(String, String, String, String)>,
+    business_rows: Vec<(String, String)>,
+}
 
 fn synthetic_divergent_checksum() -> Vec<u8> {
     Sha384::digest(SYNTHETIC_DIVERGENT_SQL).to_vec()
@@ -28,6 +52,16 @@ async fn migrated_fixture(label: &str) -> (TempDir, PathBuf) {
     let pool = init_pool(database.to_str().expect("UTF-8 fixture path"))
         .await
         .expect("apply current migrations to synthetic fixture");
+    sqlx::query(
+        "INSERT INTO cases (id, name, case_type, source_folder) \
+         VALUES (?1, ?2, '诉讼', ?3)",
+    )
+    .bind(format!("synthetic-case-{label}"))
+    .bind(format!("合成迁移夹具-{label}"))
+    .bind(format!("synthetic://migration-fixture/{label}"))
+    .execute(&pool)
+    .await
+    .expect("insert synthetic business marker");
     pool.close().await;
     (directory, database)
 }
@@ -44,294 +78,204 @@ async fn fixture_pool(database: &Path, foreign_keys: bool) -> SqlitePool {
         .expect("open isolated fixture database")
 }
 
-async fn object_exists(pool: &SqlitePool, object_type: &str, name: &str) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2)",
+async fn database_fingerprint(database: &Path) -> DatabaseFingerprint {
+    assert_sidecars_absent(database);
+    let options = SqliteConnectOptions::new()
+        .filename(database)
+        .create_if_missing(false)
+        .read_only(true)
+        .immutable(true)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open fixture read-only for fingerprint");
+
+    let migration_history = sqlx::query_as(
+        "SELECT version, description, success, checksum, execution_time \
+         FROM _sqlx_migrations ORDER BY version",
     )
-    .bind(object_type)
-    .bind(name)
-    .fetch_one(pool)
+    .fetch_all(&pool)
     .await
-    .expect("inspect sqlite_master")
-        == 1
-}
-
-async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
-    let query = format!("PRAGMA table_info(\"{table}\")");
-    sqlx::query(&query)
-        .fetch_all(pool)
+    .expect("fingerprint migration history");
+    let schema = sqlx::query_as(
+        "SELECT type, name, tbl_name, COALESCE(sql, '') \
+         FROM sqlite_master ORDER BY type, name",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("fingerprint schema");
+    let synthetic_cases = sqlx::query_as("SELECT id, name, source_folder FROM cases ORDER BY id")
+        .fetch_all(&pool)
         .await
-        .expect("inspect table columns")
-        .iter()
-        .any(|row| row.get::<String, _>("name") == column)
+        .expect("fingerprint synthetic business rows");
+    pool.close().await;
+
+    DatabaseFingerprint {
+        migration_history,
+        schema,
+        synthetic_cases,
+    }
 }
 
-async fn foreign_key_exists(
-    pool: &SqlitePool,
-    table: &str,
-    from: &str,
-    target_table: &str,
-    target_column: &str,
-    on_delete: &str,
-) -> bool {
-    let query = format!("PRAGMA foreign_key_list(\"{table}\")");
-    sqlx::query(&query)
-        .fetch_all(pool)
+fn sidecar_path(database: &Path, suffix: &str) -> PathBuf {
+    let mut value = database.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn file_bytes(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+fn assert_sidecars_absent(database: &Path) {
+    assert!(!sidecar_path(database, "-wal").exists());
+    assert!(!sidecar_path(database, "-shm").exists());
+}
+
+fn physical_fingerprint(database: &Path) -> PhysicalFingerprint {
+    PhysicalFingerprint {
+        database: std::fs::read(database).expect("read synthetic database file"),
+        wal: file_bytes(&sidecar_path(database, "-wal")),
+        shm: file_bytes(&sidecar_path(database, "-shm")),
+    }
+}
+
+async fn existing_schema_fingerprint(database: &Path) -> ExistingSchemaFingerprint {
+    assert_sidecars_absent(database);
+    let options = SqliteConnectOptions::new()
+        .filename(database)
+        .create_if_missing(false)
+        .read_only(true)
+        .immutable(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
         .await
-        .expect("inspect foreign keys")
-        .iter()
-        .any(|row| {
-            row.get::<String, _>("from") == from
-                && row.get::<String, _>("table") == target_table
-                && row.get::<String, _>("to") == target_column
-                && row.get::<String, _>("on_delete") == on_delete
-        })
+        .expect("open unknown existing schema read-only for fingerprint");
+    let schema = sqlx::query_as(
+        "SELECT type, name, tbl_name, COALESCE(sql, '') \
+         FROM sqlite_master ORDER BY type, name",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("fingerprint unknown existing schema");
+    let business_rows = sqlx::query_as("SELECT id, payload FROM legacy_cases ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .expect("fingerprint unknown existing business rows");
+    pool.close().await;
+    ExistingSchemaFingerprint {
+        schema,
+        business_rows,
+    }
 }
 
-/// Frozen M1 schema preflight contract. This is test-only by design: N0 must
-/// describe the required read-only checks without changing startup behavior.
-async fn missing_schema_sentinels(pool: &SqlitePool) -> Vec<&'static str> {
-    let mut missing = Vec::new();
+async fn frozen_wal_fixture(
+    label: &str,
+    include_wal: bool,
+    include_shm: bool,
+) -> (TempDir, PathBuf) {
+    let directory = tempfile::Builder::new()
+        .prefix(&format!("caseboard-v083-wal-{label}-"))
+        .tempdir()
+        .expect("create WAL sidecar fixture directory");
+    let live_database = directory.path().join("live.db");
+    let frozen_database = directory.path().join("caseboard.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&live_database)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open live WAL fixture");
+    sqlx::query("PRAGMA wal_autocheckpoint = 0")
+        .execute(&pool)
+        .await
+        .expect("disable WAL autocheckpoint in synthetic fixture");
+    sqlx::query("CREATE TABLE wal_only_marker (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .expect("create WAL-only synthetic schema");
+    sqlx::query("INSERT INTO wal_only_marker VALUES ('wal-1', 'committed-only-in-wal')")
+        .execute(&pool)
+        .await
+        .expect("commit synthetic WAL-only business row");
 
-    for (code, table) in [
-        ("M49.table.feishu_sync_links", "feishu_sync_links"),
-        ("M49.table.feishu_sync_inbox", "feishu_sync_inbox"),
-        (
-            "M51.table.feishu_sync_binding_audits",
-            "feishu_sync_binding_audits",
-        ),
-        ("M58.table.device_sync_groups", "device_sync_groups"),
-        ("M58.table.device_sync_members", "device_sync_members"),
-        ("M58.table.device_sync_outbox", "device_sync_outbox"),
-        (
-            "M58.table.device_sync_dirty_entities",
-            "device_sync_dirty_entities",
-        ),
-        (
-            "M58.table.device_sync_applied_operations",
-            "device_sync_applied_operations",
-        ),
-        (
-            "M58.table.device_sync_entity_revisions",
-            "device_sync_entity_revisions",
-        ),
-        ("M58.table.device_sync_conflicts", "device_sync_conflicts"),
-        ("M58.table.device_sync_receipts", "device_sync_receipts"),
-        ("M58.table.device_sync_snapshots", "device_sync_snapshots"),
-        ("M58.table.device_sync_quarantine", "device_sync_quarantine"),
-        ("M58.table.device_sync_audits", "device_sync_audits"),
-        (
-            "M59.table.legal_skill_binding_suppressions",
-            "legal_skill_binding_suppressions",
-        ),
-        (
-            "M60.table.case_domain_status_migration_audits",
-            "case_domain_status_migration_audits",
-        ),
-        (
-            "M61.table.feishu_sync_operation_audits",
-            "feishu_sync_operation_audits",
-        ),
-        (
-            "M62.table.feishu_sync_entity_previews",
-            "feishu_sync_entity_previews",
-        ),
-    ] {
-        if !object_exists(pool, "table", table).await {
-            missing.push(code);
-        }
+    let live_wal = sidecar_path(&live_database, "-wal");
+    let live_shm = sidecar_path(&live_database, "-shm");
+    assert!(live_wal.exists(), "WAL fixture must contain a WAL file");
+    assert!(live_shm.exists(), "WAL fixture must contain an SHM file");
+    std::fs::copy(&live_database, &frozen_database).expect("freeze synthetic main database");
+    if include_wal {
+        std::fs::copy(&live_wal, sidecar_path(&frozen_database, "-wal"))
+            .expect("freeze synthetic WAL sidecar");
     }
-
-    for (code, table, column) in [
-        (
-            "M49.column.links.entity_type",
-            "feishu_sync_links",
-            "entity_type",
-        ),
-        (
-            "M49.column.links.local_entity_id",
-            "feishu_sync_links",
-            "local_entity_id",
-        ),
-        ("M49.column.links.status", "feishu_sync_links", "status"),
-        ("M49.column.inbox.status", "feishu_sync_inbox", "status"),
-        (
-            "M49.column.inbox.bound_case_id",
-            "feishu_sync_inbox",
-            "bound_case_id",
-        ),
-        (
-            "M51.column.inbox.auto_bind_suppressed",
-            "feishu_sync_inbox",
-            "auto_bind_suppressed",
-        ),
-        (
-            "M59.column.suppression.id",
-            "legal_skill_binding_suppressions",
-            "id",
-        ),
-        (
-            "M59.column.suppression.legal_domain",
-            "legal_skill_binding_suppressions",
-            "legal_domain",
-        ),
-        (
-            "M59.column.suppression.task_type",
-            "legal_skill_binding_suppressions",
-            "task_type",
-        ),
-        (
-            "M61.column.field_preview.review_status",
-            "feishu_sync_field_previews",
-            "review_status",
-        ),
-        (
-            "M61.column.field_preview.resolution_value_json",
-            "feishu_sync_field_previews",
-            "resolution_value_json",
-        ),
-        (
-            "M61.column.field_preview.resolved_at",
-            "feishu_sync_field_previews",
-            "resolved_at",
-        ),
-        (
-            "M62.column.entity_preview.review_status",
-            "feishu_sync_entity_previews",
-            "review_status",
-        ),
-    ] {
-        if !column_exists(pool, table, column).await {
-            missing.push(code);
-        }
+    if include_shm {
+        std::fs::copy(&live_shm, sidecar_path(&frozen_database, "-shm"))
+            .expect("freeze synthetic SHM sidecar");
     }
+    pool.close().await;
+    (directory, frozen_database)
+}
 
-    for (code, index) in [
-        (
-            "M49.index.idx_feishu_sync_inbox_status",
-            "idx_feishu_sync_inbox_status",
-        ),
-        (
-            "M58.index.idx_device_sync_outbox_pending",
-            "idx_device_sync_outbox_pending",
-        ),
-        (
-            "M60.index.idx_case_domain_status_migration_audits_case",
-            "idx_case_domain_status_migration_audits_case",
-        ),
-        (
-            "M61.index.idx_feishu_sync_operation_audits_preview",
-            "idx_feishu_sync_operation_audits_preview",
-        ),
-        (
-            "M62.index.idx_feishu_sync_entity_previews_pending",
-            "idx_feishu_sync_entity_previews_pending",
-        ),
-    ] {
-        if !object_exists(pool, "index", index).await {
-            missing.push(code);
-        }
-    }
+fn expect_compatibility<'a>(
+    error: &'a DbError,
+    expected_code: &str,
+) -> &'a DbMigrationCompatibilityError {
+    let compatibility = error
+        .migration_compatibility()
+        .expect("expected structured migration compatibility error");
+    assert_eq!(compatibility.code, expected_code);
+    compatibility
+}
 
-    for (code, trigger) in [
-        (
-            "M58.trigger.device_sync_cases_insert",
-            "device_sync_cases_insert",
-        ),
-        (
-            "M58.trigger.device_sync_contacts_insert",
-            "device_sync_contacts_insert",
-        ),
-        (
-            "M59.trigger.device_sync_skill_binding_suppressions_insert",
-            "device_sync_skill_binding_suppressions_insert",
-        ),
-        (
-            "M59.trigger.device_sync_skill_binding_suppressions_update",
-            "device_sync_skill_binding_suppressions_update",
-        ),
-        (
-            "M59.trigger.device_sync_skill_binding_suppressions_delete",
-            "device_sync_skill_binding_suppressions_delete",
-        ),
-        (
-            "M60.trigger.case_stage_items_domain_guard_insert",
-            "case_stage_items_domain_guard_insert",
-        ),
-        (
-            "M60.trigger.case_stage_items_domain_guard_update",
-            "case_stage_items_domain_guard_update",
-        ),
-    ] {
-        if !object_exists(pool, "trigger", trigger).await {
-            missing.push(code);
-        }
-    }
+async fn assert_fingerprint_unchanged(
+    database: &Path,
+    before: DatabaseFingerprint,
+) -> DatabaseFingerprint {
+    let after = database_fingerprint(database).await;
+    assert_eq!(after, before);
+    after
+}
 
-    for (code, table, from, target_table, target_column, on_delete) in [
-        (
-            "M49.fk.inbox.bound_case_id",
-            "feishu_sync_inbox",
-            "bound_case_id",
-            "cases",
-            "id",
-            "SET NULL",
-        ),
-        (
-            "M51.fk.binding_audit.inbox_id",
-            "feishu_sync_binding_audits",
-            "inbox_id",
-            "feishu_sync_inbox",
-            "id",
-            "CASCADE",
-        ),
-        (
-            "M51.fk.binding_audit.previous_case_id",
-            "feishu_sync_binding_audits",
-            "previous_case_id",
-            "cases",
-            "id",
-            "SET NULL",
-        ),
-        (
-            "M58.fk.member.group_id",
-            "device_sync_members",
-            "group_id",
-            "device_sync_groups",
-            "id",
-            "CASCADE",
-        ),
-        (
-            "M58.fk.quarantine.group_id",
-            "device_sync_quarantine",
-            "group_id",
-            "device_sync_groups",
-            "id",
-            "SET NULL",
-        ),
-        (
-            "M61.fk.operation_audit.preview_id",
-            "feishu_sync_operation_audits",
-            "preview_id",
-            "feishu_sync_field_previews",
-            "id",
-            "SET NULL",
-        ),
-        (
-            "M62.fk.entity_preview.case_id",
-            "feishu_sync_entity_previews",
-            "case_id",
-            "cases",
-            "id",
-            "CASCADE",
-        ),
-    ] {
-        if !foreign_key_exists(pool, table, from, target_table, target_column, on_delete).await {
-            missing.push(code);
-        }
-    }
+async fn assert_failure_fingerprints_unchanged(
+    database: &Path,
+    before_physical: PhysicalFingerprint,
+    before: DatabaseFingerprint,
+) {
+    let after_physical = physical_fingerprint(database);
+    assert_eq!(after_physical, before_physical);
+    assert_fingerprint_unchanged(database, before).await;
+}
 
-    missing
+async fn assert_sidecar_shape_is_blocked(label: &str, include_wal: bool, include_shm: bool) {
+    let (_directory, database) = frozen_wal_fixture(label, include_wal, include_shm).await;
+
+    // This is deliberately the first operation against the frozen target.
+    // No SQLite helper may normalize or rebuild its sidecars before baseline.
+    let before_physical = physical_fingerprint(&database);
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("every WAL/SHM sidecar shape must fail before SQLite opens");
+    // Likewise, sample bytes before any post-failure SQLite helper.
+    let after_physical = physical_fingerprint(&database);
+    assert_eq!(after_physical, before_physical);
+
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE);
+    assert_eq!(
+        compatibility.reason,
+        "wal_sidecar_present_requires_recovery"
+    );
+    let message = error
+        .startup_recovery_message(database.to_str().expect("UTF-8 fixture path"))
+        .expect("sidecar recovery refusal has a native recovery message");
+    assert!(message.contains("不要删除"));
+    assert!(message.contains("WAL/SHM"));
+    assert!(message.contains("隔离副本"));
 }
 
 #[tokio::test]
@@ -357,66 +301,170 @@ async fn fresh_database_reaches_current_lineage_and_all_frozen_sentinels() {
     assert_eq!(actual_versions.last(), Some(&62));
     assert!(!actual_versions.contains(&36), "version 36 is a legal gap");
     assert_eq!(failed, 0);
-    assert_eq!(missing_schema_sentinels(&pool).await, Vec::<&str>::new());
     pool.close().await;
+
+    // Reopening is what exercises every production sentinel against the
+    // newly-created current schema.
+    let reopened = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("all frozen schema sentinels must pass");
+    reopened.close().await;
+
+    // A pre-existing empty SQLite file also has no migration table and must be
+    // allowed through the read-only preflight into normal migration.
+    let empty_directory = tempfile::Builder::new()
+        .prefix("caseboard-v083-existing-empty-")
+        .tempdir()
+        .expect("create pre-existing empty fixture directory");
+    let empty_database = empty_directory.path().join("caseboard.db");
+    std::fs::File::create(&empty_database).expect("create pre-existing empty database file");
+    let migrated_empty = init_pool(empty_database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("existing database without migration history must migrate");
+    let migrated_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&migrated_empty)
+        .await
+        .expect("inspect migrated empty database");
+    assert_eq!(migrated_count, 61);
+    migrated_empty.close().await;
 }
 
 #[tokio::test]
-async fn current_database_reopen_keeps_migration_history_unchanged() {
-    let (_directory, database) = migrated_fixture("current-reopen").await;
+async fn existing_user_schema_without_migration_history_fails_closed_before_any_write() {
+    let directory = tempfile::Builder::new()
+        .prefix("caseboard-v083-existing-schema-no-history-")
+        .tempdir()
+        .expect("create unknown existing schema fixture directory");
+    let database = directory.path().join("caseboard.db");
+    std::fs::File::create(&database).expect("create unknown existing database file");
     let pool = fixture_pool(&database, true).await;
-    let before: Vec<(i64, Vec<u8>)> =
-        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(&pool)
-            .await
-            .expect("snapshot current migration history");
+    sqlx::query("CREATE TABLE legacy_cases (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .expect("create synthetic existing user schema");
+    sqlx::query("INSERT INTO legacy_cases (id, payload) VALUES ('legacy-1', 'preserve-me')")
+        .execute(&pool)
+        .await
+        .expect("insert synthetic existing business row");
     pool.close().await;
+
+    let before_physical = physical_fingerprint(&database);
+    let before = existing_schema_fingerprint(&database).await;
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("existing user schema without migration history must fail closed");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE);
+    assert_eq!(
+        compatibility.reason,
+        "migration_history_missing_for_existing_schema"
+    );
+    assert_eq!(compatibility.version, None);
+
+    let after_physical = physical_fingerprint(&database);
+    assert_eq!(after_physical, before_physical);
+    assert_eq!(existing_schema_fingerprint(&database).await, before);
+}
+
+#[tokio::test]
+async fn empty_migration_history_with_existing_schema_fails_closed_before_any_write() {
+    let (_directory, database) = migrated_fixture("empty-history-existing-schema").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("DELETE FROM _sqlx_migrations")
+        .execute(&pool)
+        .await
+        .expect("empty synthetic migration history");
+    pool.close().await;
+
+    let before_physical = physical_fingerprint(&database);
+    let before = database_fingerprint(&database).await;
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("empty history with existing schema must fail closed");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE);
+    assert_eq!(
+        compatibility.reason,
+        "migration_history_empty_for_existing_schema"
+    );
+    assert_eq!(compatibility.version, None);
+    assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
+}
+
+#[tokio::test]
+async fn complete_wal_and_shm_are_blocked_before_sqlite_connection() {
+    assert_sidecar_shape_is_blocked("complete", true, true).await;
+}
+
+#[tokio::test]
+async fn wal_without_shm_is_blocked_before_sqlite_connection() {
+    assert_sidecar_shape_is_blocked("missing-shm", true, false).await;
+}
+
+#[tokio::test]
+async fn shm_without_wal_is_blocked_before_sqlite_connection() {
+    assert_sidecar_shape_is_blocked("only-shm", false, true).await;
+}
+
+#[tokio::test]
+async fn current_database_reopen_keeps_all_fingerprints_unchanged() {
+    let (_directory, database) = migrated_fixture("current-reopen").await;
+    let before = database_fingerprint(&database).await;
 
     let reopened = init_pool(database.to_str().expect("UTF-8 fixture path"))
         .await
         .expect("current lineage must reopen");
-    let after: Vec<(i64, Vec<u8>)> =
-        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(&reopened)
-            .await
-            .expect("snapshot reopened migration history");
-    assert_eq!(after, before);
     reopened.close().await;
+
+    assert_fingerprint_unchanged(&database, before).await;
 }
 
 #[tokio::test]
-async fn unknown_checksum_fixture_documents_unconditional_preflight_write() {
+async fn unknown_checksum_fails_closed_before_any_database_write() {
     let (_directory, database) = migrated_fixture("unknown-checksum").await;
     let pool = fixture_pool(&database, true).await;
-    let current: Vec<u8> =
-        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 49")
-            .fetch_one(&pool)
-            .await
-            .expect("read current synthetic checksum");
     let unknown_checksum = synthetic_divergent_checksum();
-    assert_ne!(current, unknown_checksum);
     sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 49")
         .bind(&unknown_checksum)
         .execute(&pool)
         .await
         .expect("install synthetic unknown checksum");
-
-    reconcile_migration_checksums(&pool)
-        .await
-        .expect("v0.8.2 reconciliation accepts any checksum");
-
-    let after: Vec<u8> =
-        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 49")
-            .fetch_one(&pool)
-            .await
-            .expect("read reconciled checksum");
-    assert_eq!(after, current, "v0.8.2 overwrites an untrusted checksum");
-    assert_ne!(after, unknown_checksum);
     pool.close().await;
+    let before_physical = physical_fingerprint(&database);
+    let before = database_fingerprint(&database).await;
+
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("unknown checksum must fail closed");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_CHECKSUM_UNKNOWN);
+    assert_eq!(compatibility.version, Some(49));
+    assert_eq!(compatibility.reason, "checksum_not_allowlisted");
+    assert_eq!(
+        compatibility.stored_checksum.as_deref().map(str::len),
+        Some(96)
+    );
+    assert_eq!(
+        compatibility.current_checksum.as_deref().map(str::len),
+        Some(96)
+    );
+    assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
+
+    let serialized =
+        serde_json::to_value(&error).expect("serialize structured compatibility error");
+    assert_eq!(serialized["code"], DB_MIGRATION_CHECKSUM_UNKNOWN);
+    assert_eq!(serialized["version"], 49);
+    assert!(serialized.get("sql").is_none());
+    assert!(serialized.get("business_data").is_none());
+
+    let message = error
+        .startup_recovery_message("X:\\synthetic\\caseboard.db")
+        .expect("compatibility errors have a native recovery message");
+    assert!(message.contains(DB_MIGRATION_CHECKSUM_UNKNOWN));
+    assert!(message.contains("X:\\synthetic\\caseboard.db"));
+    assert!(message.contains("备份"));
+    assert!(message.contains("退出"));
 }
 
 #[tokio::test]
-async fn migration_49_success_without_inbox_reaches_migration_51_failure() {
+async fn migration_49_success_without_inbox_fails_on_schema_sentinel_before_write() {
     let (_directory, database) = migrated_fixture("missing-m49-sentinel").await;
     let pool = fixture_pool(&database, false).await;
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 51")
@@ -427,32 +475,59 @@ async fn migration_49_success_without_inbox_reaches_migration_51_failure() {
         .execute(&pool)
         .await
         .expect("remove the migration 49 sentinel from synthetic fixture");
-
-    let missing = missing_schema_sentinels(&pool).await;
-    assert!(missing.contains(&"M49.table.feishu_sync_inbox"));
-    assert!(missing.contains(&"M51.column.inbox.auto_bind_suppressed"));
     pool.close().await;
+    let before_physical = physical_fingerprint(&database);
+    let before = database_fingerprint(&database).await;
 
     let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
         .await
-        .expect_err("v0.8.2 must reproduce the notebook migration failure");
-    match error {
-        DbError::Migrate(message) => {
-            assert!(
-                message.contains("51"),
-                "unexpected migration error: {message}"
-            );
-            assert!(
-                message.contains("feishu_sync_inbox"),
-                "unexpected migration error: {message}"
-            );
-        }
-        other => panic!("unexpected error kind: {other}"),
-    }
+        .expect_err("missing migration 49 sentinel must fail closed");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_SCHEMA_SENTINEL_MISSING);
+    assert_eq!(compatibility.version, Some(49));
+    assert_eq!(compatibility.reason, "applied_migration_schema_missing");
+    assert!(compatibility
+        .missing_sentinels
+        .iter()
+        .any(|code| code == "M49.table.feishu_sync_inbox"));
+    assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
 }
 
 #[tokio::test]
-async fn unknown_applied_version_fixture_documents_ignore_missing_behavior() {
+async fn missing_sentinel_takes_priority_over_unknown_checksum() {
+    let (_directory, database) = migrated_fixture("sentinel-before-checksum").await;
+    let pool = fixture_pool(&database, false).await;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 51")
+        .execute(&pool)
+        .await
+        .expect("roll combination fixture history back to version 50");
+    sqlx::query("DROP TABLE feishu_sync_inbox")
+        .execute(&pool)
+        .await
+        .expect("remove combination fixture sentinel");
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 49")
+        .bind(synthetic_divergent_checksum())
+        .execute(&pool)
+        .await
+        .expect("install combination fixture unknown checksum");
+    pool.close().await;
+
+    let before_physical = physical_fingerprint(&database);
+    let before = database_fingerprint(&database).await;
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("schema sentinel must take priority over checksum mismatch");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_SCHEMA_SENTINEL_MISSING);
+    assert_eq!(compatibility.version, Some(49));
+    assert_eq!(compatibility.reason, "applied_migration_schema_missing");
+    assert!(compatibility
+        .missing_sentinels
+        .iter()
+        .any(|code| code == "M49.table.feishu_sync_inbox"));
+    assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
+}
+
+#[tokio::test]
+async fn unknown_applied_version_fails_closed_before_any_database_write() {
     let (_directory, database) = migrated_fixture("unknown-version").await;
     let pool = fixture_pool(&database, true).await;
     sqlx::query(
@@ -466,23 +541,20 @@ async fn unknown_applied_version_fixture_documents_ignore_missing_behavior() {
     .await
     .expect("insert synthetic unknown applied migration");
     pool.close().await;
+    let before_physical = physical_fingerprint(&database);
+    let before = database_fingerprint(&database).await;
 
-    let reopened = init_pool(database.to_str().expect("UTF-8 fixture path"))
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
         .await
-        .expect("v0.8.2 set_ignore_missing(true) accepts unknown applied versions");
-    let retained: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?1 AND success = 1",
-    )
-    .bind(UNKNOWN_APPLIED_VERSION)
-    .fetch_one(&reopened)
-    .await
-    .expect("inspect unknown migration row");
-    assert_eq!(retained, 1);
-    reopened.close().await;
+        .expect_err("unknown applied version must fail closed");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_APPLIED_VERSION_UNKNOWN);
+    assert_eq!(compatibility.version, Some(UNKNOWN_APPLIED_VERSION));
+    assert_eq!(compatibility.reason, "applied_version_not_embedded");
+    assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
 }
 
 #[tokio::test]
-async fn failed_migration_row_fixture_is_rejected_by_sqlx() {
+async fn failed_migration_row_fails_closed_before_any_database_write() {
     let (_directory, database) = migrated_fixture("failed-row").await;
     let pool = fixture_pool(&database, true).await;
     sqlx::query("UPDATE _sqlx_migrations SET success = 0 WHERE version = 62")
@@ -490,15 +562,14 @@ async fn failed_migration_row_fixture_is_rejected_by_sqlx() {
         .await
         .expect("mark synthetic migration row failed");
     pool.close().await;
+    let before_physical = physical_fingerprint(&database);
+    let before = database_fingerprint(&database).await;
 
     let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
         .await
-        .expect_err("a failed migration row must not be accepted");
-    match error {
-        DbError::Migrate(message) => assert!(
-            message.contains("62") || message.to_ascii_lowercase().contains("failed"),
-            "unexpected migration error: {message}"
-        ),
-        other => panic!("unexpected error kind: {other}"),
-    }
+        .expect_err("failed migration history must fail closed");
+    let compatibility = expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE);
+    assert_eq!(compatibility.version, Some(62));
+    assert_eq!(compatibility.reason, "failed_history_row");
+    assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
 }

@@ -19,6 +19,8 @@ use directories::ProjectDirs;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
+mod migration_safety;
+
 pub mod bookmarks;
 pub mod calendar_events;
 pub mod case_instances;
@@ -214,6 +216,21 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     }
 
     let is_memory = db_path == ":memory:";
+    if !is_memory {
+        // Refuse orphaned as well as paired WAL/SHM files before deciding
+        // whether the main database itself is new or existing.
+        migration_safety::ensure_no_wal_sidecars(Path::new(db_path))?;
+    }
+    let is_existing_file = !is_memory && Path::new(db_path).is_file();
+
+    // Existing databases are inspected through a separate read-only connection
+    // before any read-write/WAL connection is created. This ordering is the
+    // fail-closed boundary: incompatible lineage must not reach a connection
+    // option or migration step that can write the database header, WAL, schema,
+    // migration history or business tables.
+    if is_existing_file {
+        migration_safety::preflight_existing_database(Path::new(db_path)).await?;
+    }
 
     let mut options = SqliteConnectOptions::new()
         .filename(db_path)
@@ -235,20 +252,9 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
         .await
         .map_err(|e| DbError::Connect(e.to_string()))?;
 
-    // 2026-06-15:跑迁移前先对齐 _sqlx_migrations 校验值,根治「migration N ... has been modified」
-    // 启动崩溃。病根 = 双轨发布(私人仓 vs 开源仓)对**同一批已发布迁移**做了去身份化注释改动
-    // (`lawtools.top`→`lawtools.top`、本地路径→泛化),SQL 一字未改但 SHA-384 变了 → 老用户 DB 里
-    // 存的旧校验值对不上新二进制内嵌值 → sqlx 启动中止(release 是 panic=abort,直接闪退)。
-    // 详见 docs/反馈问题排查-2026-06-15.md。
-    reconcile_migration_checksums(&pool).await?;
-
-    // 2026-06-18(整合外部 PR #13 @zzf516988659-del):容忍「DB 里已 applied 但本二进制 resolved
-    // 里没有」的迁移行(sqlx 0.8 默认遇此 panic)。病根 = 跨 fork/跨仓发布节奏漂移:用户先装了某
-    // fork binary(内嵌更多迁移、apply 过)、再装主仓 binary(内嵌较少)→ 启动报「migration N
-    // previously applied but missing」直接闪退。已 applied 的不会重跑,schema 不受影响。
-    // 配合上面的 reconcile_migration_checksums,是跨仓发布漂移的最后一道兜底。
+    // Unknown applied versions have already been rejected by the read-only
+    // preflight. Keep sqlx's default ignore_missing=false as a second guard.
     sqlx::migrate!("./migrations")
-        .set_ignore_missing(true)
         .run(&pool)
         .await
         .map_err(|e| DbError::Migrate(e.to_string()))?;
@@ -263,47 +269,28 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     Ok(pool)
 }
 
-/// 把已存在的 `_sqlx_migrations.checksum` 对齐到本二进制内嵌的迁移校验值。
-///
-/// 仅当该表已存在(= 非全新库,跑过至少一次迁移)时才动;逐条只在校验值**不同**时更新并 dlog。
-/// SQL 一字未改(只是注释/项目名漂移),已应用的迁移 sqlx 本就不会重跑 —— 对齐校验值不改变任何
-/// 已执行的 SQL、不动数据,只是消掉「文件被动过」这道与双轨发布天然冲突的 tripwire。
-async fn reconcile_migration_checksums(pool: &SqlitePool) -> Result<(), DbError> {
-    // 全新库还没这张表 → 无需对齐(后续 migrate 会正常建表并全量应用)。
-    let table_exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| DbError::Migrate(e.to_string()))?;
-    if table_exists.is_none() {
-        return Ok(());
-    }
+pub const DB_MIGRATION_CHECKSUM_UNKNOWN: &str = "DB_MIGRATION_CHECKSUM_UNKNOWN";
+pub const DB_MIGRATION_APPLIED_VERSION_UNKNOWN: &str = "DB_MIGRATION_APPLIED_VERSION_UNKNOWN";
+pub const DB_MIGRATION_SCHEMA_SENTINEL_MISSING: &str = "DB_MIGRATION_SCHEMA_SENTINEL_MISSING";
+pub const DB_MIGRATION_LINEAGE_INCOMPATIBLE: &str = "DB_MIGRATION_LINEAGE_INCOMPATIBLE";
 
-    for m in sqlx::migrate!("./migrations").iter() {
-        let embedded: &[u8] = &m.checksum;
-        let stored: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT checksum FROM _sqlx_migrations WHERE version = ?1")
-                .bind(m.version)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| DbError::Migrate(e.to_string()))?;
-        if let Some((stored,)) = stored {
-            if stored.as_slice() != embedded {
-                sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = ?2")
-                    .bind(embedded)
-                    .bind(m.version)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| DbError::Migrate(e.to_string()))?;
-                crate::dlog!(
-                    "[db] 迁移 {} 校验值与内嵌不一致,已对齐(注释漂移,SQL 未变)",
-                    m.version
-                );
-            }
-        }
+/// Safe, structured metadata for migration-lineage failures. Values are
+/// limited to migration/schema metadata and never contain SQL parameters or
+/// business-table contents.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DbMigrationCompatibilityError {
+    pub code: &'static str,
+    pub version: Option<i64>,
+    pub reason: &'static str,
+    pub stored_checksum: Option<String>,
+    pub current_checksum: Option<String>,
+    pub missing_sentinels: Vec<String>,
+}
+
+impl std::fmt::Display for DbMigrationCompatibilityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} ({})", self.code, self.reason)
     }
-    Ok(())
 }
 
 /// 数据库相关错误。映射到前端友好的字符串。
@@ -319,11 +306,40 @@ pub enum DbError {
     Connect(String),
     #[error("数据库迁移失败: {0}")]
     Migrate(String),
+    #[error("数据库迁移兼容性检查失败: {0}")]
+    MigrationCompatibility(DbMigrationCompatibilityError),
+}
+
+impl DbError {
+    pub fn migration_compatibility(&self) -> Option<&DbMigrationCompatibilityError> {
+        match self {
+            Self::MigrationCompatibility(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    pub fn startup_recovery_message(&self, db_path: &str) -> Option<String> {
+        let error = self.migration_compatibility()?;
+        let summary = match error.code {
+            DB_MIGRATION_CHECKSUM_UNKNOWN => "检测到无法验证的数据库迁移校验值。",
+            DB_MIGRATION_APPLIED_VERSION_UNKNOWN => "数据库包含当前版本无法识别的已应用迁移。",
+            DB_MIGRATION_SCHEMA_SENTINEL_MISSING => "数据库结构与已记录的迁移历史不一致。",
+            DB_MIGRATION_LINEAGE_INCOMPATIBLE => "数据库迁移谱系不兼容。",
+            _ => "数据库迁移兼容性检查未通过。",
+        };
+        Some(format!(
+            "{summary}\n\n错误码：{}\n数据库位置：{db_path}\n\n为保护现有数据，本次已在写入前停止，未继续迁移、重建、覆盖或删除数据库。\n不要删除、重命名、分离或单独处理数据库旁的 WAL/SHM 文件。请先将数据库及 WAL/SHM 原样完整备份，再由支持人员在隔离副本上进行受控 checkpoint、恢复与只读谱系审计。\n\n关闭本提示后，方律案件看板将退出。",
+            error.code
+        ))
+    }
 }
 
 impl serde::Serialize for DbError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.to_string())
+        match self {
+            Self::MigrationCompatibility(error) => serde::Serialize::serialize(error, s),
+            _ => s.serialize_str(&self.to_string()),
+        }
     }
 }
 

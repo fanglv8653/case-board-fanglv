@@ -31,3 +31,21 @@
 | 2026-08-07T15:00:05+08:00 | worker-migration | 04-project-master | V083-N0-MIG | ack | worker accepted task V083-N0-MIG | .agent-work\threads\worker-migration |
 | 2026-08-07T15:02:07+08:00 | worker-migration | 04-project-master | V083-N0-MIG | review_request | task V083-N0-MIG is ready for review; please read local files | .agent-work\threads\worker-migration |
 | 2026-08-07T15:04:35+08:00 | 04-project-master | worker-migration | V083-N0-MIG | accepted | master set accepted; read .agent-work/review/V083-N0-MIG.md | .agent-work/review/V083-N0-MIG.md |
+| 2026-08-07T15:14:05+08:00 | 00-master | worker-m1 | V083-M1 | dispatch | master dispatched task V083-M1 | .agent-work\threads\worker-m1 |
+| 2026-08-07T15:14:06+08:00 | worker-m1 | 04-project-master | V083-M1 | ack | worker accepted task V083-M1 | .agent-work\threads\worker-m1 |
+| 2026-08-07T15:47:25+08:00 | worker-m1 | 04-project-master | V083-M1 | review_request | task V083-M1 is ready for review; please read local files | .agent-work\threads\worker-m1 |
+| 2026-08-07T15:50:04+08:00 | 04-project-master | worker-m1 | V083-M1 | rejected | master set rejected; read .agent-work/review/V083-M1.md | .agent-work/review/V083-M1.md |
+| 2026-08-07T15:52:06+08:00 | worker-m1 | 04-project-master | V083-M1 | ack | worker accepted task V083-M1 | .agent-work\threads\worker-m1 |
+| 2026-08-07T15:54:15+08:00 | worker-m1 | 04-project-master | V083-M1 | review_request | task V083-M1 is ready for review; please read local files | .agent-work\threads\worker-m1 |
+| 2026-08-07T16:00:53+08:00 | 00-master | worker-m1-review | V083-M1-REVIEW | dispatch | master dispatched task V083-M1-REVIEW | .agent-work\threads\worker-m1-review |
+| 2026-08-07T16:00:54+08:00 | worker-m1-review | 04-project-master | V083-M1-REVIEW | ack | worker accepted task V083-M1-REVIEW | .agent-work\threads\worker-m1-review |
+| 2026-08-07T16:11:14+08:00 | worker-m1-review | 04-project-master | V083-M1-REVIEW | review_request | task V083-M1-REVIEW is ready for review; please read local files | .agent-work\threads\worker-m1-review |
+| 2026-08-07T16:12:55+08:00 | 04-project-master | worker-m1-review | V083-M1-REVIEW | accepted | master set accepted; read .agent-work/review/V083-M1-REVIEW.md | .agent-work/review/V083-M1-REVIEW.md |
+| 2026-08-07T16:12:56+08:00 | 04-project-master | worker-m1 | V083-M1 | rejected | master set rejected; read .agent-work/review/V083-M1.md | .agent-work/review/V083-M1.md |
+| 2026-08-07T16:25:39+08:00 | worker-m1 | 04-project-master | V083-M1 | ack | worker accepted task V083-M1 | .agent-work\threads\worker-m1 |
+| 2026-08-07T16:29:46+08:00 | worker-m1 | 04-project-master | V083-M1 | review_request | task V083-M1 is ready for review; please read local files | .agent-work\threads\worker-m1 |
+| 2026-08-07T16:37:49+08:00 | 04-project-master | worker-m1-review2 | V083-M1-REVIEW2 | dispatch | master dispatched task V083-M1-REVIEW2 | .agent-work\threads\worker-m1-review2 |
+| 2026-08-07T16:38:15+08:00 | worker-m1-review2 | 04-project-master | V083-M1-REVIEW2 | ack | worker accepted task V083-M1-REVIEW2 | .agent-work\threads\worker-m1-review2 |
+| 2026-08-07T16:42:39+08:00 | worker-m1-review2 | 04-project-master | V083-M1-REVIEW2 | review_request | task V083-M1-REVIEW2 is ready for review; please read local files | .agent-work\threads\worker-m1-review2 |
+| 2026-08-07T16:43:36+08:00 | 04-project-master | worker-m1-review2 | V083-M1-REVIEW2 | accepted | master set accepted; read .agent-work/review/V083-M1-REVIEW2.md | .agent-work/review/V083-M1-REVIEW2.md |
+| 2026-08-07T16:43:38+08:00 | 04-project-master | worker-m1 | V083-M1 | accepted | master set accepted; read .agent-work/review/V083-M1.md | .agent-work/review/V083-M1.md |

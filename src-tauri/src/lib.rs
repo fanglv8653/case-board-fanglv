@@ -6361,6 +6361,30 @@ fn ensure_webview2_runtime() {
     std::process::exit(0);
 }
 
+/// Display a migration-lineage failure before the WebView is required, then
+/// terminate without falling through to Tauri's setup-error panic path.
+fn show_database_compatibility_error_and_exit(error: &db::DbError, db_path: &str) -> ! {
+    let compatibility = error
+        .migration_compatibility()
+        .expect("only migration compatibility errors use this startup path");
+    let message = error
+        .startup_recovery_message(db_path)
+        .expect("migration compatibility errors have a recovery message");
+    crate::dlog!(
+        "[startup] database compatibility check stopped startup code={} version={:?} reason={}",
+        compatibility.code,
+        compatibility.version,
+        compatibility.reason
+    );
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("方律案件看板 · 数据库兼容性检查未通过")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    std::process::exit(2);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 2026-05-26 V0.1.11:启动早期装 panic hook,把 panic 信息落到 diagnostic_log
@@ -6386,9 +6410,17 @@ pub fn run() {
                 .map_err(|e| Box::<dyn std::error::Error>::from(format!("找不到数据目录: {}", e)))?
                 .to_string_lossy()
                 .to_string();
-            let pool = tauri::async_runtime::block_on(db::init_pool(&db_path)).map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("初始化数据库失败: {}", e))
-            })?;
+            let pool = match tauri::async_runtime::block_on(db::init_pool(&db_path)) {
+                Ok(pool) => pool,
+                Err(error) if error.migration_compatibility().is_some() => {
+                    show_database_compatibility_error_and_exit(&error, &db_path)
+                }
+                Err(error) => {
+                    return Err(Box::<dyn std::error::Error>::from(format!(
+                        "初始化数据库失败: {error}"
+                    )))
+                }
+            };
             tauri::async_runtime::block_on(chat::legal_skills::seed_builtin_packages(&pool))
                 .map_err(|e| {
                     Box::<dyn std::error::Error>::from(format!("初始化内置法律方法包失败: {}", e))
