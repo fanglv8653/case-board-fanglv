@@ -1,0 +1,7 @@
+   Compiling caseboard v0.8.3 (D:\CodexWorkspace\008案件看板应用\case-board-v0.8.3-dev\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 38s
+     Running unittests src\lib.rs (target\debug\deps\caseboard_lib-86fba87ebcf99d60.exe)
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `D:\CodexWorkspace\008案件看板应用\case-board-v0.8.3-dev\target\debug\deps\caseboard_lib-86fba87ebcf99d60.exe rc_local_pre_0063_database_upgrades_through_production_init_idempotently --exact --nocapture --test-threads=1` (exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)

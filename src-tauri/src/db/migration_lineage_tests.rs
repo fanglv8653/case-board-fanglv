@@ -10,9 +10,12 @@ use super::{
     DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
 };
 use sha2::{Digest, Sha384};
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
 const UNKNOWN_APPLIED_VERSION: i64 = 9_999;
@@ -25,6 +28,7 @@ CREATE UNIQUE INDEX idx_device_sync_export_drafts_one_prepared
 ON device_sync_export_drafts(group_id)
 WHERE state='prepared';
 "#;
+const RC_MIGRATION_CHILD_DATABASE_ENV: &str = "CASEBOARD_RC_MIGRATION_CHILD_DATABASE";
 
 #[derive(Debug, PartialEq, Eq)]
 struct DatabaseFingerprint {
@@ -169,6 +173,25 @@ fn file_bytes(path: &Path) -> Option<Vec<u8>> {
 fn assert_sidecars_absent(database: &Path) {
     assert!(!sidecar_path(database, "-wal").exists());
     assert!(!sidecar_path(database, "-shm").exists());
+}
+
+fn run_rc_production_init_child(database: &Path) {
+    let output =
+        Command::new(std::env::current_exe().expect("resolve current Rust test executable"))
+            .arg("db::migration_lineage_tests::rc_local_production_init_child")
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(RC_MIGRATION_CHILD_DATABASE_ENV, database)
+            .output()
+            .expect("run production init in an isolated application-process fixture");
+    assert!(
+        output.status.success(),
+        "production-init child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn physical_fingerprint(database: &Path) -> PhysicalFingerprint {
@@ -408,6 +431,119 @@ async fn fresh_database_reaches_current_lineage_and_all_frozen_sentinels() {
         .expect("inspect migrated empty database");
     assert_eq!(migrated_count, 62);
     migrated_empty.close().await;
+}
+
+#[tokio::test]
+async fn rc_local_pre_0063_database_upgrades_through_production_init_idempotently() {
+    let directory = tempfile::Builder::new()
+        .prefix("caseboard-v083-rc-pre-0063-")
+        .tempdir()
+        .expect("create isolated pre-0063 fixture directory");
+    let staging_database = directory.path().join("staging.db");
+    let database = directory.path().join("caseboard.db");
+    std::fs::File::create(&staging_database).expect("create pre-0063 staging file");
+
+    let embedded = sqlx::migrate!("./migrations");
+    let pre_0063 = Migrator {
+        migrations: Cow::Owned(
+            embedded
+                .iter()
+                .filter(|migration| migration.version <= 62)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    let fixture = fixture_pool(&staging_database, true).await;
+    pre_0063
+        .run(&fixture)
+        .await
+        .expect("apply the real 0001-0062 migration set");
+    sqlx::query(
+        "INSERT INTO cases (id,name,case_type,source_folder,legal_domain,domain_source)
+         VALUES ('rc-pre-0063-marker','RC synthetic marker','诉讼',
+                 'synthetic://rc/pre-0063','civil','manual')",
+    )
+    .execute(&fixture)
+    .await
+    .expect("insert de-identified pre-0063 marker");
+    let pre_state: (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*),max(version),
+                sum(CASE WHEN version=63 THEN 1 ELSE 0 END)
+         FROM _sqlx_migrations WHERE success=1",
+    )
+    .fetch_one(&fixture)
+    .await
+    .expect("inspect pre-0063 migration state");
+    assert_eq!(pre_state, (61, 62, 0));
+    sqlx::query("VACUUM INTO ?1")
+        .bind(database.to_str().expect("UTF-8 fixture path"))
+        .execute(&fixture)
+        .await
+        .expect("freeze a main-only real pre-0063 fixture");
+    fixture.close().await;
+    assert_sidecars_absent(&database);
+
+    run_rc_production_init_child(&database);
+    assert_sidecars_absent(&database);
+    let first_upgrade_fingerprint = database_fingerprint(&database).await;
+
+    run_rc_production_init_child(&database);
+    assert_sidecars_absent(&database);
+    assert_eq!(
+        database_fingerprint(&database).await,
+        first_upgrade_fingerprint
+    );
+}
+
+#[test]
+#[ignore = "invoked by the RC migration parent fixture in a fresh process"]
+fn rc_local_production_init_child() {
+    let database = std::env::var_os(RC_MIGRATION_CHILD_DATABASE_ENV)
+        .map(PathBuf::from)
+        .expect("RC migration child database path must be provided");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create RC migration child runtime");
+    runtime.block_on(async {
+        let pool = init_pool(database.to_str().expect("UTF-8 fixture path"))
+            .await
+            .expect("production init upgrades or reopens the RC database");
+        let state: (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*),max(version),
+                    sum(CASE WHEN version=63 THEN 1 ELSE 0 END)
+             FROM _sqlx_migrations WHERE success=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect production migration state");
+        assert_eq!(state, (62, 63, 1));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM cases WHERE id='rc-pre-0063-marker'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("read preserved synthetic marker"),
+            "RC synthetic marker"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA quick_check")
+                .fetch_one(&pool)
+                .await
+                .expect("run production quick_check"),
+            "ok"
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .expect("run production foreign_key_check")
+            .is_empty());
+        pool.close().await;
+    });
 }
 
 #[tokio::test]

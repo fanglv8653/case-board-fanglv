@@ -17,6 +17,145 @@ fn value_hash(value: &serde_json::Value) -> String {
         .collect()
 }
 
+#[cfg(target_os = "windows")]
+static DEVICE_SYNC_INTEGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct RcCredentialCleanup {
+    devices: Vec<(String, String, u32)>,
+    invites: Vec<(String, String, String)>,
+    completed: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl RcCredentialCleanup {
+    fn track_device(&mut self, group_id: &str, device_id: &str, through_epoch: u32) {
+        self.devices
+            .push((group_id.to_string(), device_id.to_string(), through_epoch));
+    }
+
+    fn track_invite(&mut self, group_id: &str, device_id: &str, invite_id: &str) {
+        self.invites.push((
+            group_id.to_string(),
+            device_id.to_string(),
+            invite_id.to_string(),
+        ));
+    }
+
+    fn remove_entries(&self) {
+        for (group_id, device_id, invite_id) in &self.invites {
+            let _ = device_sync::identity::delete_invite_code(group_id, device_id, invite_id);
+        }
+        for (group_id, device_id, through_epoch) in &self.devices {
+            device_sync::identity::delete_device_secrets(group_id, device_id, *through_epoch);
+        }
+    }
+
+    fn cleanup_and_verify(mut self) {
+        self.remove_entries();
+        for (group_id, device_id, invite_id) in &self.invites {
+            assert!(
+                device_sync::identity::load_invite_code(group_id, device_id, invite_id).is_err(),
+                "the exact RC invite credential must be absent"
+            );
+        }
+        for (group_id, device_id, through_epoch) in &self.devices {
+            assert!(
+                device_sync::identity::load_signing_secret(group_id, device_id).is_err(),
+                "the exact RC signing credential must be absent"
+            );
+            assert!(
+                device_sync::identity::load_exchange_secret(group_id, device_id).is_err(),
+                "the exact RC exchange credential must be absent"
+            );
+            for epoch in 1..=*through_epoch {
+                assert!(
+                    device_sync::identity::load_group_key(group_id, device_id, epoch).is_err(),
+                    "the exact RC group-key credential must be absent"
+                );
+            }
+        }
+        self.completed = true;
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for RcCredentialCleanup {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.remove_entries();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn rc_canonical_cases(pool: &sqlx::SqlitePool) -> Vec<(String, String, String)> {
+    sqlx::query_as(
+        "SELECT id,name,COALESCE(cause,'')
+         FROM cases WHERE id LIKE 'rc-sync-%' ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read canonical RC case projection")
+}
+
+#[cfg(target_os = "windows")]
+async fn rc_endpoint_fingerprint(
+    pool: &sqlx::SqlitePool,
+    group_id: &str,
+) -> (Vec<(String, String, String)>, i64, i64, i64) {
+    let next_sequence =
+        sqlx::query_scalar("SELECT next_sequence FROM device_sync_groups WHERE id=?1")
+            .bind(group_id)
+            .fetch_one(pool)
+            .await
+            .expect("read next sync sequence");
+    let total_outbox =
+        sqlx::query_scalar("SELECT count(*) FROM device_sync_outbox WHERE group_id=?1")
+            .bind(group_id)
+            .fetch_one(pool)
+            .await
+            .expect("count RC outbox rows");
+    let total_revisions =
+        sqlx::query_scalar("SELECT count(*) FROM device_sync_entity_revisions WHERE group_id=?1")
+            .bind(group_id)
+            .fetch_one(pool)
+            .await
+            .expect("count RC revision rows");
+    (
+        rc_canonical_cases(pool).await,
+        next_sequence,
+        total_outbox,
+        total_revisions,
+    )
+}
+
+#[cfg(target_os = "windows")]
+async fn assert_rc_endpoint_healthy(pool: &sqlx::SqlitePool, group_id: &str) {
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("PRAGMA quick_check")
+            .fetch_one(pool)
+            .await
+            .expect("run RC quick_check"),
+        "ok"
+    );
+    assert!(sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(pool)
+        .await
+        .expect("run RC foreign_key_check")
+        .is_empty());
+    let status = device_sync::engine::get_status(pool, group_id)
+        .await
+        .expect("read RC sync status");
+    assert!(!status.paused);
+    assert!(!status.auto_paused);
+    assert_eq!(status.pending_upload, 0);
+    assert_eq!(status.conflicts, 0);
+    assert_eq!(status.quarantined, 0);
+    assert_eq!(status.manual_review, 0);
+}
+
 async fn test_pool() -> sqlx::SqlitePool {
     let pool = caseboard_lib::db::init_pool(":memory:").await.unwrap();
     let migration_58: i64 =
@@ -328,6 +467,8 @@ async fn invite_consumption_is_single_use_and_replay_safe() {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract() {
+    let _serial = DEVICE_SYNC_INTEGRATION_LOCK.lock().await;
+    let mut credential_cleanup = RcCredentialCleanup::default();
     let first = caseboard_lib::db::init_pool(":memory:").await.unwrap();
     let second = caseboard_lib::db::init_pool(":memory:").await.unwrap();
     let nas = tempfile::tempdir().unwrap();
@@ -342,6 +483,7 @@ async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract
     )
     .await
     .unwrap();
+    credential_cleanup.track_device(&created.identity.group_id, &created.identity.device_id, 2);
     assert!(recovery_path.exists());
     let recovery_preview = device_sync::recovery::preview_recovery_package(
         &recovery_path,
@@ -353,6 +495,11 @@ async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract
     let invite = device_sync::pairing::create_pairing_invite(&first, &created.identity.group_id)
         .await
         .unwrap();
+    credential_cleanup.track_invite(
+        &invite.group_id,
+        &created.identity.device_id,
+        &invite.invite_id,
+    );
     let request = device_sync::pairing::create_join_request(
         nas.path(),
         &invite.group_id,
@@ -361,6 +508,7 @@ async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract
         "电脑 B",
     )
     .unwrap();
+    credential_cleanup.track_device(&invite.group_id, &request.device_id, 2);
     let wrong = device_sync::pairing::approve_join(
         &first,
         &invite.group_id,
@@ -395,6 +543,11 @@ async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract
         device_sync::pairing::create_pairing_invite(&first, &created.identity.group_id)
             .await
             .unwrap();
+    credential_cleanup.track_invite(
+        &expired_invite.group_id,
+        &created.identity.device_id,
+        &expired_invite.invite_id,
+    );
     let expired_request = device_sync::pairing::create_join_request(
         nas.path(),
         &expired_invite.group_id,
@@ -403,6 +556,7 @@ async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract
         "过期设备",
     )
     .unwrap();
+    credential_cleanup.track_device(&expired_invite.group_id, &expired_request.device_id, 2);
     sqlx::query(
         "UPDATE device_sync_invites SET expires_at='2020-01-01T00:00:00Z'
          WHERE id=?1",
@@ -517,9 +671,260 @@ async fn pairing_two_pool_sync_conflict_revocation_and_isolated_restore_contract
         "revoked"
     );
 
-    device_sync::identity::delete_device_secrets(&invite.group_id, &created.identity.device_id, 2);
-    device_sync::identity::delete_device_secrets(&invite.group_id, &request.device_id, 1);
-    device_sync::identity::delete_device_secrets(&invite.group_id, &expired_request.device_id, 1);
+    credential_cleanup.cleanup_and_verify();
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn rc_local_two_file_endpoints_converge_idempotently_and_recover_real_quarantine() {
+    let _serial = DEVICE_SYNC_INTEGRATION_LOCK.lock().await;
+    let database_directory = tempfile::tempdir().unwrap();
+    let mounted_directory = tempfile::tempdir().unwrap();
+    let recovery_directory = tempfile::tempdir().unwrap();
+    let endpoint_a_path = database_directory.path().join("endpoint-a.sqlite");
+    let endpoint_b_path = database_directory.path().join("endpoint-b.sqlite");
+    let endpoint_a = caseboard_lib::db::init_pool(endpoint_a_path.to_str().unwrap())
+        .await
+        .unwrap();
+    let endpoint_b = caseboard_lib::db::init_pool(endpoint_b_path.to_str().unwrap())
+        .await
+        .unwrap();
+    let mut credential_cleanup = RcCredentialCleanup::default();
+
+    let recovery_path = recovery_directory.path().join("rc-local-recovery.cbr");
+    let created = device_sync::recovery::create_group_with_recovery(
+        &endpoint_a,
+        mounted_directory.path(),
+        "RC endpoint A",
+        &recovery_path,
+        "correct horse battery staple",
+    )
+    .await
+    .unwrap();
+    let group_id = created.identity.group_id.clone();
+    let endpoint_a_device_id = created.identity.device_id.clone();
+    credential_cleanup.track_device(&group_id, &endpoint_a_device_id, 1);
+
+    let invite = device_sync::pairing::create_pairing_invite(&endpoint_a, &group_id)
+        .await
+        .unwrap();
+    credential_cleanup.track_invite(&group_id, &endpoint_a_device_id, &invite.invite_id);
+    let request = device_sync::pairing::create_join_request(
+        mounted_directory.path(),
+        &invite.group_id,
+        &invite.invite_id,
+        &invite.pairing_code,
+        "RC endpoint B",
+    )
+    .unwrap();
+    credential_cleanup.track_device(&group_id, &request.device_id, 1);
+    device_sync::pairing::approve_join(
+        &endpoint_a,
+        &group_id,
+        &invite.invite_id,
+        &request.fingerprint,
+    )
+    .await
+    .unwrap();
+    device_sync::pairing::complete_join(
+        &endpoint_b,
+        mounted_directory.path(),
+        &invite.invite_id,
+        &request,
+    )
+    .await
+    .unwrap();
+
+    // Round one: A exports and B imports the first canonical row.
+    sqlx::query(
+        "INSERT INTO cases (
+             id,name,case_type,cause,source_folder,legal_domain,domain_source
+         ) VALUES (
+             'rc-sync-a','RC case A','litigation','contract dispute',
+             'D:\\rc-a','civil','manual'
+         )",
+    )
+    .execute(&endpoint_a)
+    .await
+    .unwrap();
+    assert_eq!(
+        device_sync::engine::sync_once(&endpoint_a, &group_id)
+            .await
+            .unwrap()
+            .exported_operations,
+        1
+    );
+    assert_eq!(
+        device_sync::engine::sync_once(&endpoint_b, &group_id)
+            .await
+            .unwrap()
+            .imported_operations,
+        1
+    );
+
+    // Round two: B exports and A imports a second canonical row.
+    sqlx::query(
+        "INSERT INTO cases (
+             id,name,case_type,cause,source_folder,legal_domain,domain_source
+         ) VALUES (
+             'rc-sync-b','RC case B','litigation','service dispute',
+             'D:\\rc-b','civil','manual'
+         )",
+    )
+    .execute(&endpoint_b)
+    .await
+    .unwrap();
+    assert_eq!(
+        device_sync::engine::sync_once(&endpoint_b, &group_id)
+            .await
+            .unwrap()
+            .exported_operations,
+        1
+    );
+    assert_eq!(
+        device_sync::engine::sync_once(&endpoint_a, &group_id)
+            .await
+            .unwrap()
+            .imported_operations,
+        1
+    );
+    assert_eq!(
+        rc_canonical_cases(&endpoint_a).await,
+        rc_canonical_cases(&endpoint_b).await
+    );
+
+    let unchanged_a_before = rc_endpoint_fingerprint(&endpoint_a, &group_id).await;
+    let unchanged_b_before = rc_endpoint_fingerprint(&endpoint_b, &group_id).await;
+    let unchanged_a = device_sync::engine::sync_once(&endpoint_a, &group_id)
+        .await
+        .unwrap();
+    let unchanged_b = device_sync::engine::sync_once(&endpoint_b, &group_id)
+        .await
+        .unwrap();
+    for run in [&unchanged_a, &unchanged_b] {
+        assert_eq!(run.exported_operations, 0);
+        assert_eq!(run.imported_operations, 0);
+        assert_eq!(run.conflicts_created, 0);
+        assert_eq!(run.quarantined_packages, 0);
+    }
+    assert_eq!(
+        unchanged_a_before,
+        rc_endpoint_fingerprint(&endpoint_a, &group_id).await
+    );
+    assert_eq!(
+        unchanged_b_before,
+        rc_endpoint_fingerprint(&endpoint_b, &group_id).await
+    );
+
+    let endpoint_b_seen_a: i64 = sqlx::query_scalar(
+        "SELECT last_seen_sequence FROM device_sync_members
+         WHERE group_id=?1 AND device_id=?2",
+    )
+    .bind(&group_id)
+    .bind(&endpoint_a_device_id)
+    .fetch_one(&endpoint_b)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE cases SET cause='repaired contract dispute' WHERE id='rc-sync-a'")
+        .execute(&endpoint_a)
+        .await
+        .unwrap();
+    assert_eq!(
+        device_sync::engine::sync_once(&endpoint_a, &group_id)
+            .await
+            .unwrap()
+            .exported_operations,
+        1
+    );
+
+    let mounted =
+        device_sync::nas_folder::MountedFolder::connect(mounted_directory.path()).unwrap();
+    let pending_events = mounted
+        .list_events_after(&group_id, &endpoint_a_device_id, endpoint_b_seen_a as u64)
+        .unwrap();
+    assert_eq!(pending_events.len(), 1);
+    let bad_package_path = pending_events[0].1.clone();
+    let authentic_package = std::fs::read(&bad_package_path).unwrap();
+    std::fs::write(&bad_package_path, b"{").unwrap();
+
+    let endpoint_b_before_bad_package = rc_canonical_cases(&endpoint_b).await;
+    let bad_package_error = device_sync::engine::sync_once(&endpoint_b, &group_id)
+        .await
+        .expect_err("deterministically invalid package must auto-pause the endpoint");
+    assert_eq!(bad_package_error.code(), "SYNC_GROUP_AUTO_PAUSED");
+    assert_eq!(
+        endpoint_b_before_bad_package,
+        rc_canonical_cases(&endpoint_b).await,
+        "quarantined package must not partially change the canonical projection"
+    );
+    let paused_status = device_sync::engine::get_status(&endpoint_b, &group_id)
+        .await
+        .unwrap();
+    assert!(paused_status.paused);
+    assert!(paused_status.auto_paused);
+    assert_eq!(paused_status.quarantined, 1);
+
+    std::fs::write(&bad_package_path, authentic_package).unwrap();
+    device_sync::queries::set_paused(&endpoint_b, &group_id, false)
+        .await
+        .unwrap();
+    let repaired_run = device_sync::engine::sync_once(&endpoint_b, &group_id)
+        .await
+        .unwrap();
+    assert_eq!(repaired_run.imported_operations, 1);
+    assert_eq!(repaired_run.quarantined_packages, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM device_sync_quarantine
+             WHERE group_id=?1 AND status='active'",
+        )
+        .bind(&group_id)
+        .fetch_one(&endpoint_b)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM device_sync_quarantine
+             WHERE group_id=?1 AND status='resolved' AND resolved_at IS NOT NULL",
+        )
+        .bind(&group_id)
+        .fetch_one(&endpoint_b)
+        .await
+        .unwrap(),
+        1
+    );
+
+    assert_eq!(
+        rc_canonical_cases(&endpoint_a).await,
+        rc_canonical_cases(&endpoint_b).await
+    );
+    assert_rc_endpoint_healthy(&endpoint_a, &group_id).await;
+    assert_rc_endpoint_healthy(&endpoint_b, &group_id).await;
+    let final_a_before = rc_endpoint_fingerprint(&endpoint_a, &group_id).await;
+    let final_b_before = rc_endpoint_fingerprint(&endpoint_b, &group_id).await;
+    for pool in [&endpoint_a, &endpoint_b] {
+        let run = device_sync::engine::sync_once(pool, &group_id)
+            .await
+            .unwrap();
+        assert_eq!(run.exported_operations, 0);
+        assert_eq!(run.imported_operations, 0);
+        assert_eq!(run.conflicts_created, 0);
+        assert_eq!(run.quarantined_packages, 0);
+    }
+    assert_eq!(
+        final_a_before,
+        rc_endpoint_fingerprint(&endpoint_a, &group_id).await
+    );
+    assert_eq!(
+        final_b_before,
+        rc_endpoint_fingerprint(&endpoint_b, &group_id).await
+    );
+
+    endpoint_a.close().await;
+    endpoint_b.close().await;
+    credential_cleanup.cleanup_and_verify();
 }
 
 #[test]

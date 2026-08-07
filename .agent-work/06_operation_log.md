@@ -132,3 +132,28 @@
 | 2026-08-07T23:29:55+08:00 | worker-f1-review-r2 | submit | V083-F1-REVIEW-R2 | 独立复审完成：P0=0、P1=0、P2=0；Rust394/0、Node123/0，建议接受 |
 | 2026-08-07T23:30:08+08:00 | 04-project-master | review | V083-F1-REVIEW-R2 | accepted: 验收通过：独立复审P0/P1/P2均为0；共享生命周期协议、真实barrier反例、缺inbox孤立恢复及394/123全门禁闭合。 |
 | 2026-08-07T23:30:10+08:00 | 04-project-master | review | V083-F1-R2 | accepted: 返工验收通过：关闭设备同步绕锁P0与缺inbox/P1；无0064/迁移/sentinel，正式资源未访问。 |
+| 2026-08-07T23:32:04+08:00 | 04-project-master | create_task | V083-RC-GATE | created task RC版本签名发布只读门禁 |
+| 2026-08-07T23:32:07+08:00 | 04-project-master | create_task | V083-RC-DBSYNC-GATE | created task RC数据库设备同步只读门禁 |
+| 2026-08-07T23:32:09+08:00 | 04-project-master | dispatch | V083-RC-GATE | 只读发布链盘点，不构建、不签名、不读取秘密 |
+| 2026-08-07T23:32:12+08:00 | worker-rc-gate | start | V083-RC-GATE | 开始RC发布链只读盘点 |
+| 2026-08-07T23:32:14+08:00 | 04-project-master | dispatch | V083-RC-DBSYNC-GATE | 只读数据库/设备同步夹具盘点，不接正式资源 |
+| 2026-08-07T23:32:17+08:00 | worker-rc-dbsync-gate | start | V083-RC-DBSYNC-GATE | 开始RC数据库设备同步只读盘点 |
+| 2026-08-07T23:37:09+08:00 | worker-rc-dbsync-gate | submit | V083-RC-DBSYNC-GATE | 完成RC数据库升级与双端同步夹具只读盘点：确认0.8.2升级、历史checksum正向兼容、双端两轮收敛/重复幂等/生产隔离恢复为最小缺口，给出复用命令、最小新增夹具脚本及正式外部资源边界 |
+| 2026-08-07T23:38:19+08:00 | worker-rc-gate | submit | V083-RC-GATE | RC发布链盘点完成：版本本地准备可执行；签名、远端资产与实机升级blocked_external |
+| 2026-08-07T23:38:24+08:00 | 04-project-master | review | V083-RC-GATE | accepted: 门禁报告验收：冻结五处版本准备、latest延后、updater minisign与Authenticode边界及外部阻塞。 |
+| 2026-08-07T23:38:27+08:00 | 04-project-master | review | V083-RC-DBSYNC-GATE | accepted: 门禁报告验收：冻结0062→0063、历史checksum输入、双端两轮幂等及综合隔离恢复四项缺口。 |
+| 2026-08-07T23:39:12+08:00 | 04-project-master | create_task | V083-RC-LOCAL | created task RC本地集成版本与隔离收敛 |
+| 2026-08-07T23:39:15+08:00 | 04-project-master | dispatch | V083-RC-LOCAL | 唯一写入/串行构建；本地可完成项闭合，外部资源如实blocked_external |
+| 2026-08-07T23:39:17+08:00 | worker-rc-local | start | V083-RC-LOCAL | 开始RC本地版本与集成实现 |
+| 2026-08-08T00:26:09+08:00 | worker-rc-local | submit | V083-RC-LOCAL | 0.8.3版本、pre-0063生产升级、临时双文件端两轮幂等及真实隔离恢复均已完成；全部本地门禁通过，正式checksum/签名/远端发布/实机升级/物理双端保持blocked_external。 |
+| 2026-08-08T00:26:47+08:00 | 04-project-master | review | V083-RC-LOCAL | rejected: 缺少34号要求的不需秘密release executable实际构建/结果；先补pnpm tauri build --no-bundle并更新报告后再验收。 |
+| 2026-08-08T00:26:49+08:00 | 04-project-master | create_task | V083-RC-LOCAL-R2 | created task RC本地release executable补验 |
+| 2026-08-08T00:26:52+08:00 | 04-project-master | dispatch | V083-RC-LOCAL-R2 | 补release EXE构建；不签名、不启动默认正式数据路径 |
+| 2026-08-08T00:26:54+08:00 | worker-rc-local-r2 | start | V083-RC-LOCAL-R2 | 开始RC release executable补验 |
+| 2026-08-08T00:52:25+08:00 | worker-rc-local-r2 | submit | V083-RC-LOCAL-R2 | 原RC-LOCAL本地门禁保持通过；0.8.3 release EXE无bundle构建成功并核验PE版本/SHA-256。因启动会读取不可重定向的Windows正式凭据状态，12秒冒烟按边界not_run；正式bundle/签名/远端/实机仍blocked_external。 |
+| 2026-08-08T00:53:28+08:00 | 04-project-master | review | V083-RC-LOCAL-R2 | accepted: Release EXE实际构建通过；PE FileVersion/ProductVersion=0.8.3，SHA-256已复核；未启动默认数据路径，未生成bundle/伪签名，latest.json保持0.8.2。 |
+| 2026-08-08T00:53:41+08:00 | 04-project-master | create_task | V083-RC-REVIEW | created task 0.8.3 RC独立总复核 |
+| 2026-08-08T00:53:44+08:00 | 04-project-master | dispatch | V083-RC-REVIEW | RC本地实现和release EXE补验已完成，派发独立只读总复核。 |
+| 2026-08-08T01:00:28+08:00 | worker-rc-review | start | V083-RC-REVIEW | 同步主控看板为独立RC复核执行中。 |
+| 2026-08-08T01:00:31+08:00 | worker-rc-review | submit | V083-RC-REVIEW | 独立总复核完成：P0=0、P1=0、P2=2，建议P2收口后接受本地RC；最终发布保持blocked_external。 |
+| 2026-08-08T01:00:33+08:00 | 04-project-master | review | V083-RC-REVIEW | accepted: 独立总复核P0=0/P1=0；六个状态噪声文件已以索引/工作树同哈希确认并从status清除，旧定向失败日志已在RC报告注明由重编译及Windows全量396项通过覆盖。正式发布继续blocked_external。 |

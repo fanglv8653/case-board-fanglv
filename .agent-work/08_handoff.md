@@ -113,6 +113,29 @@
 | 2026-08-07T23:02:57+08:00 | 04-project-master | worker-f1-review-r2 | V083-F1-REVIEW-R2 | dispatch | master dispatched task V083-F1-REVIEW-R2 | .agent-work\threads\worker-f1-review-r2 |
 | 2026-08-07T23:03:00+08:00 | worker-f1-review-r2 | 04-project-master | V083-F1-REVIEW-R2 | ack | worker accepted task V083-F1-REVIEW-R2 | .agent-work\threads\worker-f1-review-r2 |
 | 2026-08-07T23:28:08+08:00 | worker-f1-review-r2 | 04-project-master | V083-F1-REVIEW-R2 | review_request | task V083-F1-REVIEW-R2 is ready for review; P0/P1/P2=0, Rust 394/0, Node 123/0 | .agent-work\output\V083-F1-REVIEW-R2.md |
+| 2026-08-07T23:47:00+08:00 | worker-rc-gate | 04-project-master | V083-RC-GATE | review_request | task V083-RC-GATE is ready for review; local chain inventoried, final release remains blocked_external | .agent-work\output\V083-RC-GATE.md |
+| 2026-08-08T00:55:00+08:00 | worker-rc-review | 04-project-master | V083-RC-REVIEW | ack | worker accepted task V083-RC-REVIEW | .agent-work\threads\worker-rc-review |
 | 2026-08-07T23:29:55+08:00 | worker-f1-review-r2 | 04-project-master | V083-F1-REVIEW-R2 | review_request | task V083-F1-REVIEW-R2 is ready for review; please read local files | .agent-work\threads\worker-f1-review-r2 |
 | 2026-08-07T23:30:08+08:00 | 04-project-master | worker-f1-review-r2 | V083-F1-REVIEW-R2 | accepted | master set accepted; read .agent-work/review/V083-F1-REVIEW-R2.md | .agent-work/review/V083-F1-REVIEW-R2.md |
 | 2026-08-07T23:30:10+08:00 | 04-project-master | worker-f1-r2 | V083-F1-R2 | accepted | master set accepted; read .agent-work/review/V083-F1-R2.md | .agent-work/review/V083-F1-R2.md |
+| 2026-08-07T23:32:09+08:00 | 04-project-master | worker-rc-gate | V083-RC-GATE | dispatch | master dispatched task V083-RC-GATE | .agent-work\threads\worker-rc-gate |
+| 2026-08-07T23:32:12+08:00 | worker-rc-gate | 04-project-master | V083-RC-GATE | ack | worker accepted task V083-RC-GATE | .agent-work\threads\worker-rc-gate |
+| 2026-08-07T23:32:14+08:00 | 04-project-master | worker-rc-dbsync-gate | V083-RC-DBSYNC-GATE | dispatch | master dispatched task V083-RC-DBSYNC-GATE | .agent-work\threads\worker-rc-dbsync-gate |
+| 2026-08-07T23:32:17+08:00 | worker-rc-dbsync-gate | 04-project-master | V083-RC-DBSYNC-GATE | ack | worker accepted task V083-RC-DBSYNC-GATE | .agent-work\threads\worker-rc-dbsync-gate |
+| 2026-08-07T23:37:09+08:00 | worker-rc-dbsync-gate | 04-project-master | V083-RC-DBSYNC-GATE | review_request | task V083-RC-DBSYNC-GATE is ready for review; please read local files | .agent-work\threads\worker-rc-dbsync-gate |
+| 2026-08-07T23:38:19+08:00 | worker-rc-gate | 04-project-master | V083-RC-GATE | review_request | task V083-RC-GATE is ready for review; please read local files | .agent-work\threads\worker-rc-gate |
+| 2026-08-07T23:38:24+08:00 | 04-project-master | worker-rc-gate | V083-RC-GATE | accepted | master set accepted; read .agent-work/review/V083-RC-GATE.md | .agent-work/review/V083-RC-GATE.md |
+| 2026-08-07T23:38:27+08:00 | 04-project-master | worker-rc-dbsync-gate | V083-RC-DBSYNC-GATE | accepted | master set accepted; read .agent-work/review/V083-RC-DBSYNC-GATE.md | .agent-work/review/V083-RC-DBSYNC-GATE.md |
+| 2026-08-07T23:39:15+08:00 | 04-project-master | worker-rc-local | V083-RC-LOCAL | dispatch | master dispatched task V083-RC-LOCAL | .agent-work\threads\worker-rc-local |
+| 2026-08-07T23:39:17+08:00 | worker-rc-local | 04-project-master | V083-RC-LOCAL | ack | worker accepted task V083-RC-LOCAL | .agent-work\threads\worker-rc-local |
+| 2026-08-08T00:26:09+08:00 | worker-rc-local | 04-project-master | V083-RC-LOCAL | review_request | task V083-RC-LOCAL is ready for review; please read local files | .agent-work\threads\worker-rc-local |
+| 2026-08-08T00:26:47+08:00 | 04-project-master | worker-rc-local | V083-RC-LOCAL | rejected | master set rejected; read .agent-work/review/V083-RC-LOCAL.md | .agent-work/review/V083-RC-LOCAL.md |
+| 2026-08-08T00:26:52+08:00 | 04-project-master | worker-rc-local-r2 | V083-RC-LOCAL-R2 | dispatch | master dispatched task V083-RC-LOCAL-R2 | .agent-work\threads\worker-rc-local-r2 |
+| 2026-08-08T00:26:54+08:00 | worker-rc-local-r2 | 04-project-master | V083-RC-LOCAL-R2 | ack | worker accepted task V083-RC-LOCAL-R2 | .agent-work\threads\worker-rc-local-r2 |
+| 2026-08-08T00:52:25+08:00 | worker-rc-local-r2 | 04-project-master | V083-RC-LOCAL-R2 | review_request | task V083-RC-LOCAL-R2 is ready for review; please read local files | .agent-work\threads\worker-rc-local-r2 |
+| 2026-08-08T00:53:28+08:00 | 04-project-master | worker-rc-local-r2 | V083-RC-LOCAL-R2 | accepted | master set accepted; read .agent-work/review/V083-RC-LOCAL-R2.md | .agent-work/review/V083-RC-LOCAL-R2.md |
+| 2026-08-08T00:53:44+08:00 | 04-project-master | worker-rc-review | V083-RC-REVIEW | dispatch | master dispatched task V083-RC-REVIEW | .agent-work\threads\worker-rc-review |
+| 2026-08-08T00:59:00+08:00 | worker-rc-review | 04-project-master | V083-RC-REVIEW | review_request | task V083-RC-REVIEW is ready for review; P0=0 P1=0 P2=2; please read local files | .agent-work\output\V083-RC-REVIEW.md |
+| 2026-08-08T01:00:28+08:00 | worker-rc-review | 04-project-master | V083-RC-REVIEW | ack | worker accepted task V083-RC-REVIEW | .agent-work\threads\worker-rc-review |
+| 2026-08-08T01:00:31+08:00 | worker-rc-review | 04-project-master | V083-RC-REVIEW | review_request | task V083-RC-REVIEW is ready for review; please read local files | .agent-work\threads\worker-rc-review |
+| 2026-08-08T01:00:33+08:00 | 04-project-master | worker-rc-review | V083-RC-REVIEW | accepted | master set accepted; read .agent-work/review/V083-RC-REVIEW.md | .agent-work/review/V083-RC-REVIEW.md |

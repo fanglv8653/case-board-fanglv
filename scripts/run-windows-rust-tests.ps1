@@ -6,6 +6,13 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Windows PowerShell 5.1 otherwise decodes Cargo's UTF-8 JSON using the active
+# console code page, corrupting executable paths when the workspace is under a
+# directory with non-ASCII characters.
+$utf8NoBom = New-Object Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
 if ($env:OS -ne 'Windows_NT') {
     throw 'run-windows-rust-tests.ps1 requires Windows.'
 }
