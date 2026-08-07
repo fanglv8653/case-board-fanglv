@@ -50,3 +50,6 @@
 | 2026-08-07T16:42:39+08:00 | worker-m1-review2 | submit | V083-M1-REVIEW2 | 第三轮阻断级静态复核未发现剩余P0/P1，建议fail-closed安全实现代码accepted；WAL/SHM连接前门禁、空迁移历史、checksum写框架移除、sentinel优先级和成功路径静态闭合。明确历史checksum兼容未实现，需标记deferred/pending_verified_input并在RC前决策。未改源码、未跑Cargo/Node、未碰正式数据。 |
 | 2026-08-07T16:43:36+08:00 | 04-project-master | review | V083-M1-REVIEW2 | accepted: 第三轮独立复核未发现P0/P1，确认WAL sidecar写前阻断、空迁移历史失败关闭、生产checksum零写入及sentinel优先级；历史checksum自动兼容因无经核验旧值明确标记pending_verified_input。 |
 | 2026-08-07T16:43:38+08:00 | 04-project-master | review | V083-M1 | accepted: M1 fail-closed主体验收通过：cargo check/clippy全绿，Windows Rust 280/0/3及device sync 23/23，Node119、Vite、source gate全绿；12项迁移安全夹具通过，四源码文件范围合规。历史checksum自动兼容未宣称完成，因缺少经核验旧值留作RC前pending_verified_input。 |
+| 2026-08-07T16:47:10+08:00 | 04-project-master | create_task | V083-S1 | created task 设备同步循环引用、分包与隔离生命周期 |
+| 2026-08-07T16:47:12+08:00 | 04-project-master | register_thread | V083-S1 | bound worker-s1 -> /root/worker_sync |
+| 2026-08-07T16:47:14+08:00 | 04-project-master | dispatch | V083-S1 | M1 accepted后串行派发S1，单实现线程负责0063与同步事务语义 |
