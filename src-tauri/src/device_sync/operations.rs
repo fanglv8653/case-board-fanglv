@@ -57,6 +57,18 @@ pub async fn resolve_operation_conflicts(
     resolution: ConflictResolution,
     manual_fields: Option<BTreeMap<String, Value>>,
 ) -> Result<usize, SyncError> {
+    super::feishu_binding_lifecycle::run_device_sync_action(|| {
+        resolve_operation_conflicts_inner(pool, operation_id, resolution, manual_fields)
+    })
+    .await
+}
+
+async fn resolve_operation_conflicts_inner(
+    pool: &SqlitePool,
+    operation_id: &str,
+    resolution: ConflictResolution,
+    manual_fields: Option<BTreeMap<String, Value>>,
+) -> Result<usize, SyncError> {
     #[derive(sqlx::FromRow)]
     struct ConflictRow {
         id: String,

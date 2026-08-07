@@ -51,6 +51,9 @@ pub mod seed;
 pub mod todos;
 pub mod usage_dashboard;
 
+#[cfg(test)]
+mod feishu_f1_tests;
+
 /// `directories` 用的标识——macOS 上这会拼成 `~/Library/Application Support/FanglvCaseBoard/`
 const APP_QUALIFIER: &str = "";
 const APP_ORG: &str = "";

@@ -69,6 +69,9 @@ function runLabel(status: string): string {
 
 function pullErrorMessage(error: unknown): string {
   const message = String(error).toUpperCase();
+  if (message.includes("FEISHU_ORPHAN_BINDING")) {
+    return "已发现本地案件已删除的历史绑定；系统已在本地安全隔离，其余有效案件预演继续完成。";
+  }
   if (message.includes("FEISHU_CONFIG_INVALID")) {
     return "请先在“日历设置—案件管理多维表格”填写 App Token 和案件总表 Table ID。";
   }
@@ -109,6 +112,13 @@ function pullErrorMessage(error: unknown): string {
     return "已有一次飞书预演正在进行，请等待完成后再试。";
   }
   return "本次读取未完成，请稍后重试。";
+}
+
+function runErrorMessage(errorCode: string | null): string | null {
+  if (errorCode === "FEISHU_ORPHAN_BINDING") {
+    return "已隔离本地案件已删除的历史绑定；其他有效案件预演已保留。";
+  }
+  return errorCode ? `稳定错误码：${errorCode}` : null;
 }
 
 export function FeishuSyncPreview({
@@ -154,7 +164,10 @@ export function FeishuSyncPreview({
       const result = await pullFeishuSyncPreview();
       const next = await getFeishuSyncPreview();
       setData(next);
-      const message = `飞书预演完成：读取 ${result.remote_count} 件在办案件；生成进展候选 ${result.work_item_count} 条、阶段候选 ${result.stage_count} 条、联系人候选 ${result.contact_count} 条。待绑定 ${result.pending_count} 件；尚未写入任何一端。`;
+      const orphanNotice = result.status === "partial" && result.error_code === "FEISHU_ORPHAN_BINDING"
+        ? ` 已在本地隔离 ${result.orphan_count} 条“本地案件已删除”历史绑定；其他有效案件预演已完成。`
+        : "";
+      const message = `飞书预演完成：读取 ${result.remote_count} 件在办案件；生成进展候选 ${result.work_item_count} 条、阶段候选 ${result.stage_count} 条、联系人候选 ${result.contact_count} 条。待绑定 ${result.pending_count} 件；尚未写入任何一端。${orphanNotice}`;
       setLiveMessage(message);
       toast(message, "info");
       void getFeishuConnectionStatus().then(onConnectionStatusChange).catch(() => {});
@@ -194,6 +207,8 @@ export function FeishuSyncPreview({
           ? "绑定状态已变化，请刷新后重试。"
           : code.includes("FEISHU_BINDING_CASE_NOT_FOUND")
             ? "所选本地案件已不存在，请刷新后重新选择。"
+            : code.includes("FEISHU_ORPHAN_BINDING")
+              ? "本地案件已删除；请解除孤立绑定后重新选择案件。"
             : "本地绑定操作失败；飞书数据和案件业务字段均未修改。";
       toast(message, "error");
       setLiveMessage(message);
@@ -225,6 +240,10 @@ export function FeishuSyncPreview({
           ? "本地或飞书值在预演后已经变化，请先获取最新预演再复核。"
         : code.includes("FEISHU_REVIEW_ALREADY_RESOLVED")
           ? "该字段已由另一操作处理，请刷新查看。"
+        : code.includes("FEISHU_ORPHAN_BINDING")
+          ? "该字段所属本地案件已删除，未访问飞书；请解除孤立绑定。"
+        : code.includes("FEISHU_REVIEW_NOT_FOUND")
+          ? "找不到该待复核字段，未访问飞书；请刷新预演。"
           : code.includes("FEISHU_REVIEW_UNSUPPORTED")
             ? "该字段须在对应的阶段或通讯录中处理，不能从案件总表直接写入。"
             : "字段处理失败，未执行静默覆盖；请检查权限或刷新后重试。";
@@ -253,6 +272,12 @@ export function FeishuSyncPreview({
         ? "当前授权不能写入飞书，请重新连接并授予多维表格读写权限。"
         : code.includes("FEISHU_REVIEW_STALE")
           ? "本地或飞书明细在预演后已经变化，请先获取最新预演再复核。"
+        : code.includes("FEISHU_REVIEW_ALREADY_RESOLVED")
+          ? "该明细已由另一操作处理，请刷新查看。"
+        : code.includes("FEISHU_ORPHAN_BINDING")
+          ? "该明细所属本地案件已删除，未访问飞书；请解除孤立绑定。"
+        : code.includes("FEISHU_REVIEW_NOT_FOUND")
+          ? "找不到该待复核明细，未访问飞书；请刷新预演。"
         : code.includes("FEISHU_REVIEW_UNSUPPORTED")
           ? "该候选目前没有可写回的本地明细，请采用飞书或暂不处理。"
           : "明细处理失败，未执行静默覆盖。请刷新后重试。";
@@ -302,6 +327,7 @@ export function FeishuSyncPreview({
               <span className="text-sm font-semibold text-foreground">{latestRun ? runLabel(latestRun.status) : "尚无预演记录"}</span>
               {latestRun && <Chip size="sm" variant="muted">筛选：状态={latestRun.active_case_filter}</Chip>}
             </div>
+            {latestRun && runErrorMessage(latestRun.error_code) && <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{runErrorMessage(latestRun.error_code)}</p>}
           </div>
           <p className="text-xs text-muted-foreground">{latestRun ? `完成于 ${showTime(latestRun.completed_at ?? latestRun.started_at)}` : "运行只读预演后将在此显示"}</p>
         </div>
@@ -324,10 +350,10 @@ export function FeishuSyncPreview({
         <div id={`feishu-panel-${active}`} role="tabpanel" aria-labelledby={`feishu-tab-${active}`} className="min-h-56 overflow-x-auto p-4">
           {active === "bound" && ((data?.bound_cases.length ?? 0) === 0
             ? <EmptyState text="尚无已绑定的在办案件。" />
-            : <table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["本地案件", "匹配方式", "最近同步", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.bound_cases.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.local_case_name}</td><td className="px-3 py-3 text-muted-foreground">{item.link_source === "manual" ? "人工确认" : "唯一精确案号"}</td><td className="px-3 py-3 text-muted-foreground">{showTime(item.last_synced_at)}</td><td className="px-3 py-3"><Button variant="outline" size="sm" disabled={actingId === item.id} onClick={() => {
+            : <table className="w-full min-w-[720px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["本地案件", "匹配方式", "最近同步", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.bound_cases.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.is_orphaned ? "本地案件已删除" : item.local_case_name}{item.is_orphaned && <p className="mt-1 text-xs font-normal text-amber-700 dark:text-amber-300">FEISHU_ORPHAN_BINDING</p>}</td><td className="px-3 py-3 text-muted-foreground">{item.is_orphaned ? "绑定异常" : item.link_source === "manual" ? "人工确认" : "唯一精确案号"}</td><td className="px-3 py-3 text-muted-foreground">{showTime(item.last_synced_at)}</td><td className="px-3 py-3"><Button variant="outline" size="sm" disabled={actingId === item.id} onClick={() => {
               if (!window.confirm(`确认解除“${item.local_case_name}”的飞书绑定？解除后仍可重新绑定。`)) return;
               void runBindingAction(item.id, () => unbindFeishuSyncCase(item.id), "已解除本地绑定，案件恢复为待绑定状态。");
-            }}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <Unlink />}解除绑定</Button></td></tr>)}</tbody></table>)}
+            }}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <Unlink />}{item.is_orphaned ? "解除孤立绑定" : "解除绑定"}</Button></td></tr>)}</tbody></table>)}
           {active === "pending" && ((data?.pending_cases.length ?? 0) === 0
             ? <EmptyState text="没有待绑定的在办案件。" />
             : <table className="w-full min-w-[900px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["飞书案件", "类型 / 案号", "选择本地案件", "操作"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.pending_cases.map((item) => {
@@ -350,7 +376,7 @@ export function FeishuSyncPreview({
             ? <EmptyState text="最近一次预演没有待复核的进展、阶段或联系人。" />
             : <table className="w-full min-w-[980px] border-collapse text-left text-sm"><thead><tr className="border-b border-border">{["案件", "明细类型", "变化", "本地值", "飞书值", "处理"].map((header) => <th key={header} className="px-3 py-2.5 text-xs font-medium text-muted-foreground">{header}</th>)}</tr></thead><tbody>{data?.entity_changes.map((item) => <tr key={item.id} className="border-b border-border/70 last:border-0"><td className="px-3 py-3 font-medium text-foreground">{item.case_name}</td><td className="px-3 py-3 text-muted-foreground">{({ work_item: "进展", stage: "阶段", contact: "联系人" } as Record<string, string>)[item.entity_type] ?? item.entity_type}</td><td className="px-3 py-3 text-muted-foreground">{({ create: "新增", update: "更新", restore: "恢复", archive: "归档" } as Record<string, string>)[item.change_kind] ?? item.change_kind}</td><td className="max-w-56 px-3 py-3"><span className="line-clamp-3 break-words">{showValue(item.local_value_json)}</span></td><td className="max-w-56 px-3 py-3"><span className="line-clamp-3 break-words">{showValue(item.feishu_value_json)}</span></td><td className="px-3 py-3"><div className="flex min-w-72 flex-wrap gap-2"><Button size="sm" disabled={actingId === item.id} onClick={() => { if (window.confirm(`确认采用飞书中的${item.entity_type === "work_item" ? "进展" : item.entity_type === "stage" ? "阶段" : "联系人"}并更新本地？`)) void runEntityAction(item.id, "feishu"); }}>{actingId === item.id ? <Loader2 className="animate-spin" /> : <ArrowRight />}采用飞书</Button><Button variant="outline" size="sm" disabled={actingId === item.id || connectionStatus?.write_enabled !== true || !item.local_value_json} onClick={() => { if (window.confirm("确认保留本地明细并写入飞书？")) void runEntityAction(item.id, "local"); }}>保留本地并写飞书</Button><Button variant="ghost" size="sm" disabled={actingId === item.id} onClick={() => void runEntityAction(item.id, "dismiss")}>暂不处理</Button></div></td></tr>)}</tbody></table>)}
           {active === "conflicts" && <SimpleTable headers={["案件", "字段", "本地值", "飞书值", "状态"]} rows={(data?.conflicts ?? []).map((item) => [item.case_name, item.field_key, showValue(item.local_value_json), showValue(item.feishu_value_json), "待人工处理"])} empty="没有待处理的字段冲突。" />}
-          {active === "runs" && <SimpleTable headers={["状态", "模式", "案件范围", "开始时间", "完成时间"]} rows={(data?.recent_runs ?? []).map((item) => [runLabel(item.status), item.mode === "readonly_preflight" ? "只读预演" : item.mode, `状态=${item.active_case_filter}`, showTime(item.started_at), showTime(item.completed_at)])} empty="尚无同步预演记录。" />}
+          {active === "runs" && <SimpleTable headers={["状态", "说明", "模式", "案件范围", "开始时间", "完成时间"]} rows={(data?.recent_runs ?? []).map((item) => [runLabel(item.status), runErrorMessage(item.error_code) ?? "—", item.mode === "readonly_preflight" ? "只读预演" : item.mode, `状态=${item.active_case_filter}`, showTime(item.started_at), showTime(item.completed_at)])} empty="尚无同步预演记录。" />}
         </div>
       </div>
     </div>

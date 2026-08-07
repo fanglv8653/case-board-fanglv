@@ -33,6 +33,9 @@ pub mod settings;
 pub mod team;
 pub mod telemetry;
 pub mod ticktick;
+
+#[cfg(test)]
+mod feishu_binding_lifecycle_tests;
 pub mod transaction_research;
 pub mod update;
 pub mod verify;
@@ -273,9 +276,11 @@ async fn list_cases(pool: tauri::State<'_, SqlitePool>) -> Result<Vec<Case>, Str
 /// 不动原始文件夹,只删 CaseBoard 数据库里这个案件的记录。
 #[tauri::command]
 async fn delete_case(pool: tauri::State<'_, SqlitePool>, id: String) -> Result<(), String> {
-    cases_db::delete_case(pool.inner(), &id)
-        .await
-        .map_err(db_err)
+    let pool = pool.inner().clone();
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| async move {
+        cases_db::delete_case(&pool, &id).await
+    })
+    .await
 }
 
 /// 取案件详情 + 文档列表(详情页用)。
@@ -1581,7 +1586,11 @@ async fn bind_feishu_sync_case(
     pool: tauri::State<'_, SqlitePool>,
     input: FeishuBindCaseInput,
 ) -> Result<(), String> {
-    db::feishu_sync::bind_case(pool.inner(), input.inbox_id.trim(), input.case_id.trim()).await
+    let pool = pool.inner().clone();
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| async move {
+        db::feishu_sync::bind_case(&pool, input.inbox_id.trim(), input.case_id.trim()).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1589,7 +1598,11 @@ async fn unbind_feishu_sync_case(
     pool: tauri::State<'_, SqlitePool>,
     link_id: String,
 ) -> Result<(), String> {
-    db::feishu_sync::unbind_case(pool.inner(), link_id.trim()).await
+    let pool = pool.inner().clone();
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| async move {
+        db::feishu_sync::unbind_case(&pool, link_id.trim()).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1597,7 +1610,11 @@ async fn ignore_feishu_sync_case(
     pool: tauri::State<'_, SqlitePool>,
     inbox_id: String,
 ) -> Result<(), String> {
-    db::feishu_sync::ignore_case(pool.inner(), inbox_id.trim()).await
+    let pool = pool.inner().clone();
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| async move {
+        db::feishu_sync::ignore_case(&pool, inbox_id.trim()).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1605,7 +1622,11 @@ async fn restore_feishu_sync_case(
     pool: tauri::State<'_, SqlitePool>,
     inbox_id: String,
 ) -> Result<(), String> {
-    db::feishu_sync::restore_case(pool.inner(), inbox_id.trim()).await
+    let pool = pool.inner().clone();
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| async move {
+        db::feishu_sync::restore_case(&pool, inbox_id.trim()).await
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1708,10 +1729,15 @@ async fn pull_feishu_sync_preview(
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock()
         .map_err(|_| "FEISHU_PULL_IN_PROGRESS: 已有一次飞书预演正在进行".to_string())?;
-    let _write_guard = FEISHU_WRITE_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .try_lock()
-        .map_err(|_| "FEISHU_WRITE_IN_PROGRESS: 正在处理一项飞书写入，请稍后刷新".to_string())?;
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| {
+        pull_feishu_sync_preview_locked(pool)
+    })
+    .await
+}
+
+async fn pull_feishu_sync_preview_locked(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<db::feishu_sync::FeishuPullResult, String> {
     let current = settings::read_settings()?;
     let app_id = current
         .feishu_oauth_app_id
@@ -4674,82 +4700,100 @@ struct FeishuResolveFieldInput {
     resolution: String,
 }
 
-static FEISHU_WRITE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-
 /// 逐项处理飞书字段差异：采用飞书、保留本地并写飞书，或暂不处理。
 #[tauri::command]
 async fn resolve_feishu_sync_field(
     pool: tauri::State<'_, SqlitePool>,
     input: FeishuResolveFieldInput,
 ) -> Result<(), String> {
-    let _guard = FEISHU_WRITE_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .try_lock()
-        .map_err(|_| "FEISHU_WRITE_IN_PROGRESS: 正在处理另一项飞书写入，请稍后重试".to_string())?;
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| {
+        resolve_feishu_sync_field_locked(pool, input)
+    })
+    .await
+}
+
+async fn resolve_feishu_sync_field_locked(
+    pool: tauri::State<'_, SqlitePool>,
+    input: FeishuResolveFieldInput,
+) -> Result<(), String> {
     let preview_id = input.preview_id.trim();
     match input.resolution.trim() {
         "feishu" => {
-            let plan = db::feishu_sync::get_field_resolution_plan(pool.inner(), preview_id).await?;
-            let current = settings::read_settings()?;
-            let app_id = current
-                .feishu_oauth_app_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书".to_string())?;
-            let token = feishu_oauth::valid_access_token(app_id)
-                .await
-                .map_err(feishu_oauth_error)?;
-            let remote = feishu::fetch_bitable_record(
-                token.expose(),
-                &plan.app_token,
-                &plan.table_id,
-                &plan.record_id,
+            let pool = pool.inner().clone();
+            let operation_pool = pool.clone();
+            db::feishu_sync::run_authorized_field_network_action(
+                &pool,
+                preview_id,
+                |plan| async move {
+                    let current = settings::read_settings()?;
+                    let app_id = current
+                        .feishu_oauth_app_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书".to_string())?;
+                    let token = feishu_oauth::valid_access_token(app_id)
+                        .await
+                        .map_err(feishu_oauth_error)?;
+                    let remote = feishu::fetch_bitable_record(
+                        token.expose(),
+                        &plan.app_token,
+                        &plan.table_id,
+                        &plan.record_id,
+                    )
+                    .await?;
+                    db::feishu_sync::ensure_remote_field_snapshot(&plan, &remote)?;
+                    db::feishu_sync::apply_feishu_value_to_local(&operation_pool, &plan).await
+                },
             )
-            .await?;
-            db::feishu_sync::ensure_remote_field_snapshot(&plan, &remote)?;
-            db::feishu_sync::apply_feishu_value_to_local(pool.inner(), &plan).await
+            .await
         }
         "local" => {
-            let plan = db::feishu_sync::get_field_resolution_plan(pool.inner(), preview_id).await?;
-            if plan.review_status != "pending" {
-                return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该字段已处理".into());
-            }
-            db::feishu_sync::ensure_field_preview_fresh(pool.inner(), &plan).await?;
-            let current = settings::read_settings()?;
-            let app_id = current
-                .feishu_oauth_app_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书读写授权".to_string())?;
-            let status = feishu_oauth::connection_status(app_id).map_err(feishu_oauth_error)?;
-            if !status.write_enabled {
-                return Err(
-                    "FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权为旧只读权限，请重新连接".into(),
-                );
-            }
-            let (field_name, field_value) = db::feishu_sync::local_value_for_feishu(&plan)?;
-            let token = feishu_oauth::valid_access_token(app_id)
-                .await
-                .map_err(feishu_oauth_error)?;
-            let remote = feishu::fetch_bitable_record(
-                token.expose(),
-                &plan.app_token,
-                &plan.table_id,
-                &plan.record_id,
+            let pool = pool.inner().clone();
+            let operation_pool = pool.clone();
+            db::feishu_sync::run_authorized_field_network_action(
+                &pool,
+                preview_id,
+                |plan| async move {
+                    let current = settings::read_settings()?;
+                    let app_id = current
+                        .feishu_oauth_app_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            "FEISHU_AUTH_REQUIRED: 请先连接飞书读写授权".to_string()
+                        })?;
+                    let status =
+                        feishu_oauth::connection_status(app_id).map_err(feishu_oauth_error)?;
+                    if !status.write_enabled {
+                        return Err("FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权为旧只读权限，请重新连接".into());
+                    }
+                    let (field_name, field_value) =
+                        db::feishu_sync::local_value_for_feishu(&plan)?;
+                    let token = feishu_oauth::valid_access_token(app_id)
+                        .await
+                        .map_err(feishu_oauth_error)?;
+                    let remote = feishu::fetch_bitable_record(
+                        token.expose(),
+                        &plan.app_token,
+                        &plan.table_id,
+                        &plan.record_id,
+                    )
+                    .await?;
+                    db::feishu_sync::ensure_remote_field_snapshot(&plan, &remote)?;
+                    feishu::update_bitable_record_fields(
+                        token.expose(),
+                        &plan.app_token,
+                        &plan.table_id,
+                        &plan.record_id,
+                        serde_json::json!({ (field_name): field_value }),
+                    )
+                    .await?;
+                    db::feishu_sync::finish_local_to_feishu(&operation_pool, &plan).await
+                },
             )
-            .await?;
-            db::feishu_sync::ensure_remote_field_snapshot(&plan, &remote)?;
-            feishu::update_bitable_record_fields(
-                token.expose(),
-                &plan.app_token,
-                &plan.table_id,
-                &plan.record_id,
-                serde_json::json!({ (field_name): field_value }),
-            )
-            .await?;
-            db::feishu_sync::finish_local_to_feishu(pool.inner(), &plan).await
+            .await
         }
         "dismiss" => db::feishu_sync::dismiss_field_preview(pool.inner(), preview_id).await,
         _ => Err("FEISHU_REVIEW_INVALID: resolution 必须为 feishu、local 或 dismiss".into()),
@@ -4762,79 +4806,95 @@ async fn resolve_feishu_sync_entity(
     pool: tauri::State<'_, SqlitePool>,
     input: FeishuResolveFieldInput,
 ) -> Result<(), String> {
-    let _guard = FEISHU_WRITE_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .try_lock()
-        .map_err(|_| "FEISHU_WRITE_IN_PROGRESS: 正在处理另一项飞书写入，请稍后重试".to_string())?;
+    device_sync::feishu_binding_lifecycle::run_explicit_action(|| {
+        resolve_feishu_sync_entity_locked(pool, input)
+    })
+    .await
+}
+
+async fn resolve_feishu_sync_entity_locked(
+    pool: tauri::State<'_, SqlitePool>,
+    input: FeishuResolveFieldInput,
+) -> Result<(), String> {
     let preview_id = input.preview_id.trim();
     match input.resolution.trim() {
         "feishu" => {
-            let plan =
-                db::feishu_sync::get_entity_resolution_plan(pool.inner(), preview_id).await?;
-            let current = settings::read_settings()?;
-            let app_id = current
-                .feishu_oauth_app_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书".to_string())?;
-            let token = feishu_oauth::valid_access_token(app_id)
-                .await
-                .map_err(feishu_oauth_error)?;
-            let remote = feishu::fetch_bitable_record(
-                token.expose(),
-                &plan.app_token,
-                &plan.table_id,
-                &plan.record_id,
+            let pool = pool.inner().clone();
+            let operation_pool = pool.clone();
+            db::feishu_sync::run_authorized_entity_network_action(
+                &pool,
+                preview_id,
+                false,
+                |plan| async move {
+                    let current = settings::read_settings()?;
+                    let app_id = current
+                        .feishu_oauth_app_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书".to_string())?;
+                    let token = feishu_oauth::valid_access_token(app_id)
+                        .await
+                        .map_err(feishu_oauth_error)?;
+                    let remote = feishu::fetch_bitable_record(
+                        token.expose(),
+                        &plan.app_token,
+                        &plan.table_id,
+                        &plan.record_id,
+                    )
+                    .await?;
+                    db::feishu_sync::ensure_remote_entity_snapshot(&plan, &remote)?;
+                    db::feishu_sync::apply_feishu_entity_to_local(&operation_pool, &plan).await
+                },
             )
-            .await?;
-            db::feishu_sync::ensure_remote_entity_snapshot(&plan, &remote)?;
-            db::feishu_sync::apply_feishu_entity_to_local(pool.inner(), &plan).await
+            .await
         }
         "local" => {
-            let plan =
-                db::feishu_sync::get_entity_resolution_plan(pool.inner(), preview_id).await?;
-            if plan.review_status != "pending" {
-                return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该明细已处理".into());
-            }
-            if plan.local_entity_id.is_none() {
-                return Err("FEISHU_REVIEW_UNSUPPORTED: 本地尚无该明细，不能写回飞书".into());
-            }
-            db::feishu_sync::ensure_entity_preview_fresh(pool.inner(), &plan).await?;
-            let current = settings::read_settings()?;
-            let app_id = current
-                .feishu_oauth_app_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书读写授权".to_string())?;
-            let status = feishu_oauth::connection_status(app_id).map_err(feishu_oauth_error)?;
-            if !status.write_enabled {
-                return Err(
-                    "FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权为旧只读权限，请重新连接".into(),
-                );
-            }
-            let fields = db::feishu_sync::local_entity_fields_for_feishu(&plan)?;
-            let token = feishu_oauth::valid_access_token(app_id)
-                .await
-                .map_err(feishu_oauth_error)?;
-            let remote = feishu::fetch_bitable_record(
-                token.expose(),
-                &plan.app_token,
-                &plan.table_id,
-                &plan.record_id,
+            let pool = pool.inner().clone();
+            let operation_pool = pool.clone();
+            db::feishu_sync::run_authorized_entity_network_action(
+                &pool,
+                preview_id,
+                true,
+                |plan| async move {
+                    let current = settings::read_settings()?;
+                    let app_id = current
+                        .feishu_oauth_app_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            "FEISHU_AUTH_REQUIRED: 请先连接飞书读写授权".to_string()
+                        })?;
+                    let status =
+                        feishu_oauth::connection_status(app_id).map_err(feishu_oauth_error)?;
+                    if !status.write_enabled {
+                        return Err("FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权为旧只读权限，请重新连接".into());
+                    }
+                    let fields = db::feishu_sync::local_entity_fields_for_feishu(&plan)?;
+                    let token = feishu_oauth::valid_access_token(app_id)
+                        .await
+                        .map_err(feishu_oauth_error)?;
+                    let remote = feishu::fetch_bitable_record(
+                        token.expose(),
+                        &plan.app_token,
+                        &plan.table_id,
+                        &plan.record_id,
+                    )
+                    .await?;
+                    db::feishu_sync::ensure_remote_entity_snapshot(&plan, &remote)?;
+                    feishu::update_bitable_record_fields(
+                        token.expose(),
+                        &plan.app_token,
+                        &plan.table_id,
+                        &plan.record_id,
+                        serde_json::Value::Object(fields),
+                    )
+                    .await?;
+                    db::feishu_sync::finish_local_entity_to_feishu(&operation_pool, &plan).await
+                },
             )
-            .await?;
-            db::feishu_sync::ensure_remote_entity_snapshot(&plan, &remote)?;
-            feishu::update_bitable_record_fields(
-                token.expose(),
-                &plan.app_token,
-                &plan.table_id,
-                &plan.record_id,
-                serde_json::Value::Object(fields),
-            )
-            .await?;
-            db::feishu_sync::finish_local_entity_to_feishu(pool.inner(), &plan).await
+            .await
         }
         "dismiss" => db::feishu_sync::dismiss_entity_preview(pool.inner(), preview_id).await,
         _ => Err("FEISHU_REVIEW_INVALID: resolution 必须为 feishu、local 或 dismiss".into()),

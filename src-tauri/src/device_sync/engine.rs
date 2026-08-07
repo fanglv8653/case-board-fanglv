@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -308,10 +309,39 @@ struct MemberRow {
 }
 
 pub async fn sync_once(pool: &SqlitePool, group_id: &str) -> Result<SyncRunResult, SyncError> {
+    sync_once_coordinated(pool, group_id, || std::future::ready(())).await
+}
+
+async fn sync_once_coordinated<G, Fut>(
+    pool: &SqlitePool,
+    group_id: &str,
+    after_lifecycle_lock: G,
+) -> Result<SyncRunResult, SyncError>
+where
+    G: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
     let lock = SYNC_RUN_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = lock.try_lock().map_err(|_| SyncError::Busy)?;
-    mark_sync_attempt(pool, group_id).await?;
-    sync_once_inner(pool, group_id).await
+    super::feishu_binding_lifecycle::run_device_sync_action(|| async {
+        after_lifecycle_lock().await;
+        mark_sync_attempt(pool, group_id).await?;
+        sync_once_inner(pool, group_id).await
+    })
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn sync_once_with_entry_gate_for_test<G, Fut>(
+    pool: &SqlitePool,
+    group_id: &str,
+    after_lifecycle_lock: G,
+) -> Result<SyncRunResult, SyncError>
+where
+    G: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    sync_once_coordinated(pool, group_id, after_lifecycle_lock).await
 }
 
 async fn mark_sync_attempt(pool: &SqlitePool, group_id: &str) -> Result<(), SyncError> {

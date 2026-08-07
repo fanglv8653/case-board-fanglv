@@ -5,8 +5,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 use std::collections::HashSet;
+use std::future::Future;
 use uuid::Uuid;
 
 use crate::feishu::{FeishuCaseManagementRecords, FeishuRemoteCaseRecord};
@@ -16,6 +17,8 @@ const ACTIVE_FILTER: &str = "在办";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeishuPullResult {
     pub run_id: String,
+    pub status: String,
+    pub error_code: Option<String>,
     pub remote_count: usize,
     pub bound_count: usize,
     pub pending_count: usize,
@@ -24,6 +27,16 @@ pub struct FeishuPullResult {
     pub stage_count: usize,
     pub contact_count: usize,
     pub archived_entity_count: usize,
+    pub orphan_count: usize,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub(crate) struct ActiveCaseLink {
+    id: String,
+    local_entity_id: String,
+    app_token: String,
+    table_id: String,
+    record_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +169,146 @@ fn stable_error(error: &str) -> (String, String) {
     )
 }
 
+async fn invalidate_link_artifacts(
+    tx: &mut Transaction<'_, Sqlite>,
+    link_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE feishu_sync_field_previews
+         SET review_status='superseded',resolved_at=datetime('now')
+         WHERE link_id=?1 AND review_status='pending'",
+    )
+    .bind(link_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法失效旧字段候选".to_string())?;
+    sqlx::query(
+        "UPDATE feishu_sync_entity_previews
+         SET review_status='superseded',resolved_at=datetime('now')
+         WHERE link_id=?1 AND review_status='pending'",
+    )
+    .bind(link_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法失效旧明细候选".to_string())?;
+    sqlx::query(
+        "UPDATE feishu_sync_conflicts
+         SET status='dismissed',resolved_at=datetime('now'),updated_at=datetime('now')
+         WHERE link_id=?1 AND status='pending'",
+    )
+    .bind(link_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法关闭旧绑定冲突".to_string())?;
+    Ok(())
+}
+
+async fn case_link_inbox(
+    tx: &mut Transaction<'_, Sqlite>,
+    link: &ActiveCaseLink,
+) -> Result<(String, String), String> {
+    sqlx::query_as(
+        "SELECT id,status FROM feishu_sync_inbox
+         WHERE app_token=?1 AND table_id=?2 AND record_id=?3",
+    )
+    .bind(&link.app_token)
+    .bind(&link.table_id)
+    .bind(&link.record_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取关联收件箱".to_string())?
+    .ok_or_else(|| "FEISHU_BINDING_NOT_FOUND: 关联收件箱不存在".to_string())
+}
+
+async fn ensure_orphan_recovery_inbox(
+    tx: &mut Transaction<'_, Sqlite>,
+    link: &ActiveCaseLink,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO feishu_sync_inbox
+         (id,app_token,table_id,record_id,display_name,mapped_payload_json,
+          status,bound_case_id,resolved_at,auto_bind_suppressed)
+         VALUES (?1,?2,?3,?4,'','{}','pending_binding',NULL,NULL,1)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&link.app_token)
+    .bind(&link.table_id)
+    .bind(&link.record_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法建立孤立绑定恢复入口".to_string())?;
+    Ok(())
+}
+
+async fn isolate_case_link(
+    tx: &mut Transaction<'_, Sqlite>,
+    link: &ActiveCaseLink,
+    inbox: &(String, String),
+    previous_case_id: Option<&str>,
+) -> Result<(), String> {
+    invalidate_link_artifacts(tx, &link.id).await?;
+    let archived = sqlx::query(
+        "UPDATE feishu_sync_links SET status='archived',updated_at=datetime('now')
+         WHERE id=?1 AND status='active'",
+    )
+    .bind(&link.id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法归档本地绑定".to_string())?
+    .rows_affected();
+    if archived != 1 {
+        return Err("FEISHU_BINDING_STATE_INVALID: 绑定状态已变化".to_string());
+    }
+    let restored = sqlx::query(
+        "UPDATE feishu_sync_inbox
+         SET status='pending_binding',bound_case_id=NULL,resolved_at=NULL,
+             auto_bind_suppressed=1,updated_at=datetime('now')
+         WHERE id=?1",
+    )
+    .bind(&inbox.0)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法恢复待绑定状态".to_string())?
+    .rows_affected();
+    if restored != 1 {
+        return Err("FEISHU_BINDING_NOT_FOUND: 关联收件箱不存在".to_string());
+    }
+    sqlx::query(
+        "INSERT INTO feishu_sync_binding_audits
+         (id,inbox_id,action,previous_status,next_status,previous_case_id,next_case_id)
+         VALUES (?1,?2,'unbind',?3,'pending_binding',?4,NULL)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&inbox.0)
+    .bind(&inbox.1)
+    .bind(previous_case_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法保存解除审计".to_string())?;
+    Ok(())
+}
+
+pub(crate) async fn prepare_case_deletion(
+    tx: &mut Transaction<'_, Sqlite>,
+    case_id: &str,
+) -> Result<(), String> {
+    let links = sqlx::query_as::<_, ActiveCaseLink>(
+        "SELECT id,local_entity_id,app_token,table_id,record_id
+         FROM feishu_sync_links
+         WHERE entity_type='case' AND local_entity_id=?1 AND status='active'
+         ORDER BY id",
+    )
+    .bind(case_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取案件绑定".to_string())?;
+    for link in links {
+        let inbox = case_link_inbox(tx, &link).await?;
+        isolate_case_link(tx, &link, &inbox, None).await?;
+    }
+    Ok(())
+}
+
 pub async fn start_pull_run(pool: &SqlitePool) -> Result<String, String> {
     let run_id = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO feishu_sync_runs (id,mode,status,active_case_filter) VALUES (?1,'pull','running',?2)")
@@ -274,6 +427,38 @@ fn classify(local: Option<&str>, remote: Option<&str>) -> (&'static str, &'stati
     }
 }
 
+async fn isolate_orphans_for_pull(
+    tx: &mut Transaction<'_, Sqlite>,
+    app_token: &str,
+    table_id: &str,
+) -> Result<usize, String> {
+    let orphans = sqlx::query_as::<_, ActiveCaseLink>(
+        "SELECT l.id,l.local_entity_id,l.app_token,l.table_id,l.record_id
+         FROM feishu_sync_links l
+         LEFT JOIN cases c ON c.id=l.local_entity_id
+         WHERE l.entity_type='case' AND l.status='active'
+           AND l.app_token=?1 AND l.table_id=?2 AND c.id IS NULL
+         ORDER BY l.id",
+    )
+    .bind(app_token)
+    .bind(table_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法检查孤立绑定".to_string())?;
+    for link in &orphans {
+        ensure_orphan_recovery_inbox(tx, link)
+            .await
+            .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法建立孤立绑定恢复入口".to_string())?;
+        let inbox = case_link_inbox(tx, link)
+            .await
+            .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法读取孤立绑定恢复入口".to_string())?;
+        isolate_case_link(tx, link, &inbox, None)
+            .await
+            .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法隔离孤立绑定".to_string())?;
+    }
+    Ok(orphans.len())
+}
+
 async fn complete_pull_internal(
     pool: &SqlitePool,
     run_id: &str,
@@ -291,6 +476,7 @@ async fn complete_pull_internal(
         .begin()
         .await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法开始预演事务".to_string())?;
+    let orphan_count = isolate_orphans_for_pull(&mut tx, app_token, table_id).await?;
     sqlx::query("UPDATE feishu_sync_field_previews SET review_status='superseded',resolved_at=datetime('now') WHERE review_status='pending'")
         .execute(&mut *tx).await
         .map_err(|e| format!("FEISHU_DB_PREVIEW_WRITE_FAILED: 无法结束旧的字段候选: {e}"))?;
@@ -526,15 +712,27 @@ async fn complete_pull_internal(
         "stages": entity_counts.stages,
         "contacts": entity_counts.contacts,
         "archived_entities": entity_counts.archived,
+        "orphans": orphan_count,
     });
-    sqlx::query("UPDATE feishu_sync_runs SET status='succeeded',completed_at=datetime('now'),counts_json=?2,error_code=NULL,error_message=NULL WHERE id=?1")
-        .bind(run_id).bind(counts.to_string()).execute(&mut *tx).await
+    let (run_status, error_code, error_message) = if orphan_count > 0 {
+        (
+            "partial",
+            Some("FEISHU_ORPHAN_BINDING"),
+            Some("已隔离本地案件已删除的历史绑定，其余有效预演已完成"),
+        )
+    } else {
+        ("succeeded", None, None)
+    };
+    sqlx::query("UPDATE feishu_sync_runs SET status=?2,completed_at=datetime('now'),counts_json=?3,error_code=?4,error_message=?5 WHERE id=?1")
+        .bind(run_id).bind(run_status).bind(counts.to_string()).bind(error_code).bind(error_message).execute(&mut *tx).await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 无法完成预演运行记录".to_string())?;
     tx.commit()
         .await
         .map_err(|_| "FEISHU_DB_PREVIEW_WRITE_FAILED: 提交预演事务失败".to_string())?;
     Ok(FeishuPullResult {
         run_id: run_id.to_string(),
+        status: run_status.to_string(),
+        error_code: error_code.map(str::to_string),
         remote_count: mapped.len(),
         bound_count,
         pending_count,
@@ -543,6 +741,7 @@ async fn complete_pull_internal(
         stage_count: entity_counts.stages,
         contact_count: entity_counts.contacts,
         archived_entity_count: entity_counts.archived,
+        orphan_count,
     })
 }
 
@@ -576,6 +775,8 @@ pub struct FeishuSyncLinkPreview {
     pub link_source: String,
     pub status: String,
     pub last_synced_at: Option<String>,
+    pub is_orphaned: bool,
+    pub error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -793,9 +994,11 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
                     CASE WHEN trim(COALESCE(p.suspect_or_defendant_name, '')) <> ''
                            AND trim(COALESCE(p.suspected_charge, '')) <> ''
                       THEN p.suspect_or_defendant_name || p.suspected_charge END,
-                    c.name, l.local_entity_id)
+                    c.name, '本地案件已删除')
                     AS local_case_name,
-                  l.record_id, l.link_source, l.status, l.last_synced_at
+                  l.record_id, l.link_source, l.status, l.last_synced_at,
+                  c.id IS NULL AS is_orphaned,
+                  CASE WHEN c.id IS NULL THEN 'FEISHU_ORPHAN_BINDING' END AS error_code
            FROM feishu_sync_links l
            LEFT JOIN cases c ON l.entity_type = 'case' AND c.id = l.local_entity_id
            LEFT JOIN criminal_case_profiles p ON p.case_id = c.id
@@ -861,14 +1064,15 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
                    ch.feishu_value_json, ch.classification, ch.proposed_action,
                    ch.review_status
            FROM feishu_sync_field_previews ch
-           LEFT JOIN feishu_sync_links l ON ch.link_id = l.id
-           LEFT JOIN cases c ON l.entity_type = 'case' AND c.id = l.local_entity_id
+           JOIN feishu_sync_links l ON ch.link_id = l.id
+             AND l.entity_type='case' AND l.status='active'
+           JOIN cases c ON c.id = l.local_entity_id
            LEFT JOIN criminal_case_profiles p ON p.case_id = c.id
            WHERE ch.run_id = (
                SELECT id FROM feishu_sync_runs
                WHERE mode IN ('readonly_preflight','pull')
                  AND status IN ('succeeded','partial')
-               ORDER BY started_at DESC LIMIT 1
+               ORDER BY started_at DESC, rowid DESC LIMIT 1
             ) AND ch.proposed_action <> 'none' AND ch.review_status='pending'
            ORDER BY ch.created_at DESC, case_name COLLATE NOCASE, ch.field_key"#,
     )
@@ -877,14 +1081,17 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
     .map_err(|e| format!("读取拟更新字段失败: {e}"))?;
 
     let entity_changes = sqlx::query_as::<_, FeishuSyncEntityPreview>(
-        r#"SELECT id,case_name,entity_type,change_kind,local_value_json,
-                  feishu_value_json,review_status
-           FROM feishu_sync_entity_previews
-           WHERE run_id=(SELECT id FROM feishu_sync_runs
+        r#"SELECT p.id,p.case_name,p.entity_type,p.change_kind,p.local_value_json,
+                  p.feishu_value_json,p.review_status
+           FROM feishu_sync_entity_previews p
+           JOIN feishu_sync_links l ON l.id=p.link_id
+             AND l.entity_type='case' AND l.status='active' AND l.local_entity_id=p.case_id
+           JOIN cases c ON c.id=p.case_id
+           WHERE p.run_id=(SELECT id FROM feishu_sync_runs
              WHERE mode IN ('readonly_preflight','pull') AND status IN ('succeeded','partial')
-             ORDER BY started_at DESC LIMIT 1)
-             AND review_status='pending'
-           ORDER BY created_at DESC,case_name COLLATE NOCASE,entity_type"#,
+             ORDER BY started_at DESC, rowid DESC LIMIT 1)
+             AND p.review_status='pending'
+           ORDER BY p.created_at DESC,p.case_name COLLATE NOCASE,p.entity_type"#,
     )
     .fetch_all(pool)
     .await
@@ -915,7 +1122,8 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
                   cf.status, cf.created_at
            FROM feishu_sync_conflicts cf
            JOIN feishu_sync_links l ON cf.link_id = l.id
-           LEFT JOIN cases c ON l.entity_type = 'case' AND c.id = l.local_entity_id
+             AND l.entity_type='case' AND l.status='active'
+           JOIN cases c ON c.id = l.local_entity_id
            LEFT JOIN criminal_case_profiles p ON p.case_id = c.id
            WHERE cf.status = 'pending'
            ORDER BY cf.created_at DESC"#,
@@ -928,7 +1136,7 @@ pub async fn get_preview(pool: &SqlitePool) -> Result<FeishuSyncPreview, String>
         r#"SELECT id, mode, status, active_case_filter, started_at, completed_at,
                   counts_json, error_code, error_message
            FROM feishu_sync_runs
-           ORDER BY started_at DESC
+           ORDER BY started_at DESC, rowid DESC
            LIMIT 10"#,
     )
     .fetch_all(pool)
@@ -962,6 +1170,33 @@ pub struct FeishuFieldResolutionPlan {
     pub review_status: String,
 }
 
+#[derive(Debug, FromRow)]
+struct ReviewAuthorityState {
+    review_status: String,
+    link_status: Option<String>,
+    case_exists: i64,
+    authority_matches: i64,
+}
+
+fn classify_review_authority(
+    state: Option<ReviewAuthorityState>,
+    missing_message: &str,
+) -> Result<(), String> {
+    let Some(state) = state else {
+        return Err(format!("FEISHU_REVIEW_NOT_FOUND: {missing_message}"));
+    };
+    if state.review_status != "pending"
+        || state.link_status.as_deref() != Some("active")
+        || state.authority_matches != 1
+    {
+        return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该候选已处理或绑定已失效".to_string());
+    }
+    if state.case_exists != 1 {
+        return Err("FEISHU_ORPHAN_BINDING: 本地案件已删除".to_string());
+    }
+    Ok(())
+}
+
 fn json_text(value: Option<&str>) -> Result<Option<String>, String> {
     let Some(value) = value else { return Ok(None) };
     let parsed: Value = serde_json::from_str(value)
@@ -977,6 +1212,21 @@ pub async fn get_field_resolution_plan(
     pool: &SqlitePool,
     preview_id: &str,
 ) -> Result<FeishuFieldResolutionPlan, String> {
+    let state = sqlx::query_as::<_, ReviewAuthorityState>(
+        r#"SELECT p.review_status,l.status AS link_status,
+                  CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS case_exists,
+                  CASE WHEN l.entity_type='case' THEN 1 ELSE 0 END AS authority_matches
+           FROM feishu_sync_field_previews p
+           LEFT JOIN feishu_sync_links l ON l.id=p.link_id
+           LEFT JOIN cases c ON c.id=l.local_entity_id
+           WHERE p.id=?1"#,
+    )
+    .bind(preview_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("FEISHU_REVIEW_READ_FAILED: {e}"))?;
+    classify_review_authority(state, "找不到待复核字段")?;
+
     sqlx::query_as::<_, FeishuFieldResolutionPlan>(
         r#"SELECT p.id AS preview_id,p.link_id,l.local_entity_id AS case_id,
                   COALESCE(c.legal_domain,'unknown') AS legal_domain,
@@ -1032,6 +1282,28 @@ pub async fn ensure_field_preview_fresh(
         return Err("FEISHU_REVIEW_STALE: 本地字段在预演后已变化，请刷新后重新复核".into());
     }
     Ok(())
+}
+
+pub async fn authorize_field_network_action(
+    pool: &SqlitePool,
+    preview_id: &str,
+) -> Result<FeishuFieldResolutionPlan, String> {
+    let plan = get_field_resolution_plan(pool, preview_id).await?;
+    ensure_field_preview_fresh(pool, &plan).await?;
+    Ok(plan)
+}
+
+pub async fn run_authorized_field_network_action<T, F, Fut>(
+    pool: &SqlitePool,
+    preview_id: &str,
+    network_action: F,
+) -> Result<T, String>
+where
+    F: FnOnce(FeishuFieldResolutionPlan) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let plan = authorize_field_network_action(pool, preview_id).await?;
+    network_action(plan).await
 }
 
 pub fn ensure_remote_field_snapshot(
@@ -1172,9 +1444,12 @@ async fn resolve_preview_and_audit(
     direction: &str,
     after_value: Option<&str>,
 ) -> Result<(), String> {
-    sqlx::query("UPDATE feishu_sync_field_previews SET review_status=?2,resolution_value_json=?3,resolved_at=datetime('now') WHERE id=?1 AND review_status='pending'")
+    let changed = sqlx::query("UPDATE feishu_sync_field_previews SET review_status=?2,resolution_value_json=?3,resolved_at=datetime('now') WHERE id=?1 AND review_status='pending'")
         .bind(&plan.preview_id).bind(review_status).bind(after_value).execute(&mut **tx).await
         .map_err(|e| format!("FEISHU_REVIEW_WRITE_FAILED: {e}"))?;
+    if changed.rows_affected() != 1 {
+        return Err("FEISHU_REVIEW_ALREADY_RESOLVED: 该字段已处理".to_string());
+    }
     sqlx::query("INSERT INTO feishu_sync_operation_audits(id,preview_id,link_id,entity_type,field_key,direction,status,before_value_json,after_value_json) VALUES(?1,?2,?3,'case',?4,?5,'succeeded',?6,?7)")
         .bind(Uuid::new_v4().to_string()).bind(&plan.preview_id).bind(&plan.link_id)
         .bind(&plan.field_key).bind(direction).bind(&plan.local_value_json).bind(after_value)
@@ -1238,13 +1513,38 @@ pub async fn get_entity_resolution_plan(
     pool: &SqlitePool,
     preview_id: &str,
 ) -> Result<FeishuEntityResolutionPlan, String> {
+    let state = sqlx::query_as::<_, ReviewAuthorityState>(
+        "SELECT p.review_status,l.status AS link_status,
+                CASE WHEN c.id IS NULL THEN 0 ELSE 1 END AS case_exists,
+                CASE WHEN l.entity_type='case' AND l.local_entity_id=p.case_id
+                  THEN 1 ELSE 0 END AS authority_matches
+         FROM feishu_sync_entity_previews p
+         LEFT JOIN feishu_sync_links l ON l.id=p.link_id
+         LEFT JOIN cases c ON c.id=p.case_id
+         WHERE p.id=?1",
+    )
+    .bind(preview_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("FEISHU_REVIEW_READ_FAILED: {e}"))?;
+    classify_review_authority(state, "找不到待复核明细")?;
+
     sqlx::query_as::<_, FeishuEntityResolutionPlan>(
-        "SELECT id AS preview_id,link_id,entity_type,local_entity_id,app_token,table_id,record_id,slot_key,case_id,
-                local_value_json,feishu_value_json,mapped_value_json,review_status
-         FROM feishu_sync_entity_previews WHERE id=?1",
-    ).bind(preview_id).fetch_optional(pool).await
-        .map_err(|e| format!("FEISHU_REVIEW_READ_FAILED: {e}"))?
-        .ok_or_else(|| "FEISHU_REVIEW_NOT_FOUND: 找不到待复核明细".to_string())
+        "SELECT p.id AS preview_id,p.link_id,p.entity_type,p.local_entity_id,
+                p.app_token,p.table_id,p.record_id,p.slot_key,p.case_id,
+                p.local_value_json,p.feishu_value_json,p.mapped_value_json,p.review_status
+         FROM feishu_sync_entity_previews p
+         JOIN feishu_sync_links l
+           ON l.id=p.link_id AND l.entity_type='case' AND l.status='active'
+          AND l.local_entity_id=p.case_id
+         JOIN cases c ON c.id=p.case_id
+         WHERE p.id=?1",
+    )
+    .bind(preview_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("FEISHU_REVIEW_READ_FAILED: {e}"))?
+    .ok_or_else(|| "FEISHU_REVIEW_NOT_FOUND: 找不到待复核明细".to_string())
 }
 
 pub async fn ensure_entity_preview_fresh(
@@ -1272,6 +1572,33 @@ pub async fn ensure_entity_preview_fresh(
         return Err("FEISHU_REVIEW_STALE: 本地明细在预演后已变化，请刷新后重新复核".into());
     }
     Ok(())
+}
+
+pub async fn authorize_entity_network_action(
+    pool: &SqlitePool,
+    preview_id: &str,
+    requires_local_entity: bool,
+) -> Result<FeishuEntityResolutionPlan, String> {
+    let plan = get_entity_resolution_plan(pool, preview_id).await?;
+    if requires_local_entity && plan.local_entity_id.is_none() {
+        return Err("FEISHU_REVIEW_UNSUPPORTED: 本地尚无该明细，不能写回飞书".to_string());
+    }
+    ensure_entity_preview_fresh(pool, &plan).await?;
+    Ok(plan)
+}
+
+pub async fn run_authorized_entity_network_action<T, F, Fut>(
+    pool: &SqlitePool,
+    preview_id: &str,
+    requires_local_entity: bool,
+    network_action: F,
+) -> Result<T, String>
+where
+    F: FnOnce(FeishuEntityResolutionPlan) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let plan = authorize_entity_network_action(pool, preview_id, requires_local_entity).await?;
+    network_action(plan).await
 }
 
 pub fn ensure_remote_entity_snapshot(
@@ -1535,8 +1862,9 @@ pub async fn bind_case(pool: &SqlitePool, inbox_id: &str, case_id: &str) -> Resu
         return Err("FEISHU_BINDING_CONFLICT: 该飞书案件已经绑定本地案件".to_string());
     }
     if let Some((link_id, _)) = remote_link {
+        invalidate_link_artifacts(&mut tx, &link_id).await?;
         sqlx::query("UPDATE feishu_sync_links SET local_entity_id=?2,link_source='manual',status='active',confirmed_at=datetime('now'),updated_at=datetime('now') WHERE id=?1")
-            .bind(link_id).bind(case_id).execute(&mut *tx).await
+            .bind(&link_id).bind(case_id).execute(&mut *tx).await
             .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法恢复本地绑定".to_string())?;
     } else {
         sqlx::query("INSERT INTO feishu_sync_links (id,entity_type,local_entity_id,app_token,table_id,record_id,link_source,status,confirmed_at) VALUES (?1,'case',?2,?3,?4,?5,'manual','active',datetime('now'))")
@@ -1573,27 +1901,29 @@ pub async fn unbind_case(pool: &SqlitePool, link_id: &str) -> Result<(), String>
     if link.4 != "active" {
         return Err("FEISHU_BINDING_STATE_INVALID: 该绑定已经解除".to_string());
     }
-    let inbox: (String, String) = sqlx::query_as(
-        "SELECT id,status FROM feishu_sync_inbox WHERE app_token=?1 AND table_id=?2 AND record_id=?3",
+    let active_link = ActiveCaseLink {
+        id: link_id.to_string(),
+        local_entity_id: link.0.clone(),
+        app_token: link.1,
+        table_id: link.2,
+        record_id: link.3,
+    };
+    let case_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cases WHERE id=?1)")
+        .bind(&active_link.local_entity_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法校验本地案件".to_string())?;
+    if !case_exists {
+        ensure_orphan_recovery_inbox(&mut tx, &active_link).await?;
+    }
+    let inbox = case_link_inbox(&mut tx, &active_link).await?;
+    isolate_case_link(
+        &mut tx,
+        &active_link,
+        &inbox,
+        case_exists.then_some(active_link.local_entity_id.as_str()),
     )
-    .bind(&link.1).bind(&link.2).bind(&link.3)
-    .fetch_optional(&mut *tx).await
-    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法读取关联收件箱".to_string())?
-    .ok_or_else(|| "FEISHU_BINDING_NOT_FOUND: 关联收件箱不存在".to_string())?;
-    sqlx::query(
-        "UPDATE feishu_sync_links SET status='archived',updated_at=datetime('now') WHERE id=?1",
-    )
-    .bind(link_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法解除绑定".to_string())?;
-    sqlx::query("UPDATE feishu_sync_inbox SET status='pending_binding',bound_case_id=NULL,resolved_at=NULL,auto_bind_suppressed=1,updated_at=datetime('now') WHERE id=?1")
-        .bind(&inbox.0).execute(&mut *tx).await
-        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法恢复待绑定状态".to_string())?;
-    sqlx::query("INSERT INTO feishu_sync_binding_audits (id,inbox_id,action,previous_status,next_status,previous_case_id) VALUES (?1,?2,'unbind',?3,'pending_binding',?4)")
-        .bind(Uuid::new_v4().to_string()).bind(&inbox.0).bind(&inbox.1).bind(&link.0)
-        .execute(&mut *tx).await
-        .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法保存解除审计".to_string())?;
+    .await?;
     tx.commit()
         .await
         .map_err(|_| "FEISHU_BINDING_DB_FAILED: 无法提交解除事务".to_string())?;

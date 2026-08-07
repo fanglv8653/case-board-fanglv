@@ -49,6 +49,7 @@ pub fn start(pool: SqlitePool) -> JoinHandle<()> {
                 match engine::sync_once(&pool, &group_id).await {
                     Ok(_)
                     | Err(super::SyncError::Busy)
+                    | Err(super::SyncError::FeishuLifecycleBusy)
                     | Err(super::SyncError::NasUnavailable(_)) => {}
                     Err(error) => {
                         eprintln!(

@@ -8,6 +8,10 @@ const functionSource = source.match(
   /function pullErrorMessage\(error: unknown\): string \{[\s\S]*?\n\}\n\nexport function FeishuSyncPreview/,
 )?.[0]
   .replace("function pullErrorMessage(error: unknown): string", "function pullErrorMessage(error)")
+  .replace(
+    "function runErrorMessage(errorCode: string | null): string | null",
+    "function runErrorMessage(errorCode)",
+  )
   .replace(/\n\nexport function FeishuSyncPreview$/, "");
 
 assert.ok(functionSource, "应能读取同步预演错误映射函数");

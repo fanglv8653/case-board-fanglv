@@ -1324,6 +1324,8 @@ export interface FeishuSyncLinkPreview {
   link_source: string;
   status: string;
   last_synced_at: string | null;
+  is_orphaned: boolean;
+  error_code: string | null;
 }
 
 export interface FeishuSyncInboxPreview {
@@ -1419,6 +1421,8 @@ export interface FeishuConnectionInput {
 
 export interface FeishuPullResult {
   run_id: string;
+  status: "succeeded" | "partial" | string;
+  error_code: string | null;
   remote_count: number;
   bound_count: number;
   pending_count: number;
@@ -1427,6 +1431,7 @@ export interface FeishuPullResult {
   stage_count: number;
   contact_count: number;
   archived_entity_count: number;
+  orphan_count: number;
 }
 
 // ===== 法院一张网在线立案(整合外部贡献 PR #8) =====

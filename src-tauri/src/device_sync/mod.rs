@@ -10,6 +10,7 @@ pub mod capture;
 pub mod commands;
 pub mod crypto;
 pub mod engine;
+pub(crate) mod feishu_binding_lifecycle;
 pub mod identity;
 pub mod manifest;
 pub mod nas_folder;
@@ -71,6 +72,8 @@ pub enum SyncError {
     Paused,
     #[error("同步任务正在运行或状态已变化")]
     Busy,
+    #[error("飞书绑定生命周期正在变更")]
+    FeishuLifecycleBusy,
     #[error("异常变更熔断: {0}")]
     FuseTriggered(String),
     #[error("同步包依赖在当前包和接收端均不存在")]
@@ -101,6 +104,7 @@ impl SyncError {
             Self::UnsupportedPlatform => "SYNC_UNSUPPORTED_PLATFORM",
             Self::Paused => "SYNC_PAUSED",
             Self::Busy => "SYNC_BUSY",
+            Self::FeishuLifecycleBusy => "SYNC_FEISHU_LIFECYCLE_BUSY",
             Self::FuseTriggered(_) => "SYNC_FUSE_TRIGGERED",
             Self::PackageDependencyMissing => "SYNC_PACKAGE_DEPENDENCY_MISSING",
             Self::PackageTooLarge => "SYNC_PACKAGE_TOO_LARGE",
@@ -125,6 +129,7 @@ impl SyncError {
             Self::UnsupportedPlatform => "当前系统不支持设备同步密钥存储",
             Self::Paused => "设备同步已暂停",
             Self::Busy => "设备同步任务正在运行或状态已变化",
+            Self::FeishuLifecycleBusy => "飞书绑定正在变更，请稍后重试设备同步",
             Self::FuseTriggered(_) => "设备同步因异常变更已停止",
             Self::PackageDependencyMissing => "同步包缺少必要的依赖数据",
             Self::PackageTooLarge => "同步包超出容量限制",

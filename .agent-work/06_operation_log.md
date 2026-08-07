@@ -102,3 +102,33 @@
 | 2026-08-07T21:19:11+08:00 | worker-s1-review | submit | V083-S1-REVIEW-R4 | R4最终复验完成：R3的2P0/3P1均关闭，未发现新P0/P1，建议验收通过；保留2项非阻断P2。详见.agent-work/output/V083-S1-REVIEW-R4.md |
 | 2026-08-07T21:19:45+08:00 | 04-project-master | review | V083-S1-REVIEW-R4 | accepted: R4独立复验确认R3审计2P0/3P1全部关闭，无新P0/P1；两项P2记录为非阻断后续加固。 |
 | 2026-08-07T21:19:47+08:00 | 04-project-master | review | V083-S1 | accepted: S1经返工A/B/C及R4独立审计通过：迁移、原子导入、依赖闭包、隔离生命周期、durable export、no-replace、密码学恢复、脱敏与并发序列均达标；正式双设备NAS验证延后RC。 |
+| 2026-08-07T21:23:53+08:00 | 04-project-master | create_task | V083-F1-GATE | created task F1孤立绑定只读链路审计 |
+| 2026-08-07T21:23:55+08:00 | 04-project-master | dispatch | V083-F1-GATE | 只读审计，不改产品；输出P0/P1链路和最小测试矩阵。 |
+| 2026-08-07T21:23:57+08:00 | worker-f1-gate | start | V083-F1-GATE | 开始F1孤立绑定全链路只读审计。 |
+| 2026-08-07T21:23:59+08:00 | 04-project-master | create_task | V083-F1-MIG-SCOUT | created task F1是否需要0064迁移只读判定 |
+| 2026-08-07T21:24:02+08:00 | 04-project-master | dispatch | V083-F1-MIG-SCOUT | 只读判定0064必要性，不创建迁移、不改sentinel。 |
+| 2026-08-07T21:24:04+08:00 | worker-f1-mig-scout | start | V083-F1-MIG-SCOUT | 开始F1 schema/FK只读判定。 |
+| 2026-08-07T21:29:32+08:00 | worker-f1-mig-scout | submit | V083-F1-MIG-SCOUT | 只读判定完成：冻结F1不新增0064；现有archived/pending_binding/auto_bind_suppressed/superseded/SET NULL与CASCADE语义足够，提供删除事务、历史孤立修复及安全NULL审计精确SQL；无需新索引或M64 sentinel。 |
+| 2026-08-07T21:30:12+08:00 | 04-project-master | review | V083-F1-MIG-SCOUT | accepted: 验收通过：现有0049/0051/0061/0062 schema足以表达F1安全终态；冻结不新增0064、不改迁移与sentinel。实现必须保留entity preview级联删除边界并验证foreign_key_check为空。 |
+| 2026-08-07T21:30:14+08:00 | worker-f1-gate | submit | V083-F1-GATE | 只读全链路审计完成：旧事故根因仍存在；确认删除生命周期非原子、孤立拉取整批回滚、孤立解绑审计FK回滚、解绑重绑旧候选跨案件执行等4项P0，以及UI/错误码/审计迁移决策/网络测试缺口4项P1；报告含事务不变量、网络断言点和8个合成反例。 |
+| 2026-08-07T21:30:37+08:00 | 04-project-master | review | V083-F1-GATE | accepted: 验收通过：确认4项P0与4项P1，冻结CE-1至CE-8反例、事务不变量、稳定错误码和网络门禁。实现必须解决旧候选跨案件执行与生命周期并发边界。 |
+| 2026-08-07T21:31:29+08:00 | 04-project-master | create_task | V083-F1 | created task F1飞书孤立绑定本地安全修复 |
+| 2026-08-07T21:31:31+08:00 | 04-project-master | dispatch | V083-F1 | 0064已冻结为不新增；唯一产品写入窗口，严格按28/29执行 |
+| 2026-08-07T21:31:34+08:00 | worker-f1 | start | V083-F1 | 开始F1唯一写入实现 |
+| 2026-08-07T22:11:37+08:00 | worker-f1 | submit | V083-F1 | F1实现与CE1-CE8完成；Rust定向8+锁1通过，Windows Rust全量393通过，Node122通过，check/clippy/build/source/diff门禁通过；请主控复审稳定码分类与零网络证据 |
+| 2026-08-07T22:12:15+08:00 | 04-project-master | create_task | V083-F1-REVIEW | created task F1最终独立安全复审 |
+| 2026-08-07T22:12:18+08:00 | 04-project-master | dispatch | V083-F1-REVIEW | 只读独立复审；不得修改产品/测试/迁移；必须尝试击穿实现 |
+| 2026-08-07T22:12:20+08:00 | worker-f1-review | start | V083-F1-REVIEW | 开始F1最终独立只读复审 |
+| 2026-08-07T22:20:52+08:00 | worker-f1-review | submit | V083-F1-REVIEW | 最终独立复审拒绝：P0=1（设备同步绕过F1共享锁导致跨生命周期竞态），P1=2（缺inbox孤立解绑不可恢复；CE6缺真实并发反例）。报告：.agent-work/output/V083-F1-REVIEW.md |
+| 2026-08-07T22:22:09+08:00 | 04-project-master | review | V083-F1-REVIEW | accepted: 复审报告验收：确认P0=1、P1=2，必须返工统一设备同步与飞书绑定生命周期并发协议、修复缺inbox孤立解绑并补真实barrier反例。 |
+| 2026-08-07T22:22:11+08:00 | 04-project-master | review | V083-F1 | rejected: 独立复审拒绝：设备同步可绕过FEISHU_WRITE_LOCK改写绑定；active orphan缺inbox唯一解绑失败；CE6缺真实并发覆盖。按报告返工后重新提交。 |
+| 2026-08-07T22:22:42+08:00 | 04-project-master | create_task | V083-F1-R2 | created task F1独立复审返工 |
+| 2026-08-07T22:22:44+08:00 | 04-project-master | dispatch | V083-F1-R2 | 严格按30/31返工；不新增0064，不扩大设备同步功能 |
+| 2026-08-07T22:22:47+08:00 | worker-f1-r2 | start | V083-F1-R2 | 开始F1复审返工 |
+| 2026-08-07T23:02:18+08:00 | worker-f1-r2 | submit | V083-F1-R2 | 完成设备同步与显式飞书动作的统一生命周期协议、生产入口 barrier 并发反例、active orphan 缺 inbox 本地恢复；Windows Rust 394/0、Node 123/0、check/clippy/build/source gate 全通过 |
+| 2026-08-07T23:02:54+08:00 | 04-project-master | create_task | V083-F1-REVIEW-R2 | created task F1返工最终独立复审 |
+| 2026-08-07T23:02:57+08:00 | 04-project-master | dispatch | V083-F1-REVIEW-R2 | 只读复审R2；重点反证所有设备同步绑定写入口、锁序与缺inbox恢复条件 |
+| 2026-08-07T23:03:00+08:00 | worker-f1-review-r2 | start | V083-F1-REVIEW-R2 | 开始F1返工最终独立复审 |
+| 2026-08-07T23:29:55+08:00 | worker-f1-review-r2 | submit | V083-F1-REVIEW-R2 | 独立复审完成：P0=0、P1=0、P2=0；Rust394/0、Node123/0，建议接受 |
+| 2026-08-07T23:30:08+08:00 | 04-project-master | review | V083-F1-REVIEW-R2 | accepted: 验收通过：独立复审P0/P1/P2均为0；共享生命周期协议、真实barrier反例、缺inbox孤立恢复及394/123全门禁闭合。 |
+| 2026-08-07T23:30:10+08:00 | 04-project-master | review | V083-F1-R2 | accepted: 返工验收通过：关闭设备同步绕锁P0与缺inbox/P1；无0064/迁移/sentinel，正式资源未访问。 |

@@ -14,6 +14,9 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::Command;
@@ -24,6 +27,48 @@ use crate::settings::Settings;
 const LARK_CLI_TIMEOUT: Duration = Duration::from_secs(30);
 const BITABLE_MAX_PAGES: usize = 50;
 const BITABLE_FIELD_MAX_PAGES: usize = 5;
+
+#[cfg(test)]
+static F1_HTTP_READ_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static F1_HTTP_WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static F1_HTTP_SPY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+fn record_f1_http_read() {
+    F1_HTTP_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_f1_http_read() {}
+
+#[cfg(test)]
+fn record_f1_http_write() {
+    F1_HTTP_WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(not(test))]
+fn record_f1_http_write() {}
+
+#[cfg(test)]
+pub(crate) fn reset_f1_http_spy() {
+    F1_HTTP_READ_CALLS.store(0, Ordering::Relaxed);
+    F1_HTTP_WRITE_CALLS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn f1_http_spy_counts() -> (usize, usize) {
+    (
+        F1_HTTP_READ_CALLS.load(Ordering::Relaxed),
+        F1_HTTP_WRITE_CALLS.load(Ordering::Relaxed),
+    )
+}
+
+#[cfg(test)]
+pub(crate) async fn f1_http_spy_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    F1_HTTP_SPY_TEST_LOCK.lock().await
+}
 
 /// 飞书日历事件(传给前端月历)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -764,6 +809,7 @@ pub async fn fetch_bitable_record(
     table_id: &str,
     record_id: &str,
 ) -> Result<FeishuRemoteCaseRecord, String> {
+    record_f1_http_read();
     validate_bitable_id(app_token, "App Token")?;
     validate_bitable_id(table_id, "Table ID")?;
     validate_bitable_id(record_id, "Record ID")?;
@@ -854,6 +900,7 @@ pub async fn update_bitable_record_fields(
     record_id: &str,
     fields: Value,
 ) -> Result<(), String> {
+    record_f1_http_write();
     validate_bitable_id(app_token, "App Token")?;
     validate_bitable_id(table_id, "Table ID")?;
     validate_bitable_id(record_id, "Record ID")?;
@@ -943,6 +990,7 @@ pub async fn fetch_active_case_management_records(
     app_token: &str,
     case_table_id: &str,
 ) -> Result<FeishuCaseManagementRecords, String> {
+    record_f1_http_read();
     validate_bitable_id(app_token, "App Token")?;
     validate_bitable_id(case_table_id, "案件总表 Table ID")?;
     if access_token.trim().is_empty() {
@@ -1630,14 +1678,9 @@ mod tests {
             else {
                 continue;
             };
-            let fields = fetch_table_field_metadata(
-                &client,
-                token.expose(),
-                &app_token,
-                table_id,
-            )
-            .await
-            .expect("read copied table fields before writing");
+            let fields = fetch_table_field_metadata(&client, token.expose(), &app_token, table_id)
+                .await
+                .expect("read copied table fields before writing");
             if let Some(field) = fields.iter().find(|field| field.field_type == Some(1)) {
                 writable_target = Some((table_id.to_string(), field.field_name.clone()));
                 break;

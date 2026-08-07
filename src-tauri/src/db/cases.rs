@@ -333,11 +333,20 @@ pub async fn set_summary_if_empty(
 }
 
 /// 删除一个案件(级联删除所有关联表:documents/events/contacts/...)。
-pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+pub async fn delete_case(pool: &SqlitePool, id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "CASE_DELETE_FAILED: 无法开始删除事务".to_string())?;
+    super::feishu_sync::prepare_case_deletion(&mut tx, id).await?;
     sqlx::query("DELETE FROM cases WHERE id = ?")
         .bind(id)
-        .execute(pool)
-        .await?;
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "CASE_DELETE_FAILED: 无法删除案件".to_string())?;
+    tx.commit()
+        .await
+        .map_err(|_| "CASE_DELETE_FAILED: 无法提交删除事务".to_string())?;
     Ok(())
 }
 
