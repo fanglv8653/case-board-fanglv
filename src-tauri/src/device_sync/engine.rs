@@ -16,6 +16,12 @@ use super::{SyncError, SyncStatus};
 const MAX_OPERATIONS_PER_EVENT: usize = 500;
 static SYNC_RUN_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn max_operations_per_event_for_test() -> usize {
+    MAX_OPERATIONS_PER_EVENT
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRunResult {
     pub exported_operations: usize,
@@ -535,4 +541,29 @@ pub(crate) async fn audit(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) async fn quarantine_for_test(
+    pool: &SqlitePool,
+    group_id: &str,
+    source_path: Option<&str>,
+    reason_code: &str,
+    details: serde_json::Value,
+) -> Result<(), SyncError> {
+    quarantine(pool, group_id, source_path, reason_code, details).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) async fn audit_for_test(
+    pool: &SqlitePool,
+    group_id: Option<&str>,
+    device_id: Option<&str>,
+    action: &str,
+    outcome: &str,
+    details: serde_json::Value,
+) -> Result<(), SyncError> {
+    audit(pool, group_id, device_id, action, outcome, details).await
 }

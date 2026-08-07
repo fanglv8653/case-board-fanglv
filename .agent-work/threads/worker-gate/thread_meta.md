@@ -8,9 +8,9 @@
 - title: 独立门禁与冲突审计
 - reviewer: 04-project-master
 - owner_scope: .agent-work\threads\worker-gate
-- codex_thread_id: pending
-- codex_thread_title: pending
-- codex_thread_state: unbound
+- codex_thread_id: /root/worker_gate
+- codex_thread_title: v083-worker-gate
+- codex_thread_state: running
 
 ## 说明
 

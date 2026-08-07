@@ -8,9 +8,9 @@
 - title: 迁移谱系失败夹具与兼容契约
 - reviewer: 04-project-master
 - owner_scope: .agent-work\threads\worker-migration
-- codex_thread_id: pending
-- codex_thread_title: pending
-- codex_thread_state: unbound
+- codex_thread_id: /root/worker_migration
+- codex_thread_title: v083-worker-migration
+- codex_thread_state: running
 
 ## 说明
 

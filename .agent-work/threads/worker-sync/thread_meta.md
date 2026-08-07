@@ -8,9 +8,9 @@
 - title: 设备同步循环外键与分包失败夹具
 - reviewer: 04-project-master
 - owner_scope: .agent-work\threads\worker-sync
-- codex_thread_id: pending
-- codex_thread_title: pending
-- codex_thread_state: unbound
+- codex_thread_id: /root/worker_sync
+- codex_thread_title: v083-worker-sync
+- codex_thread_state: running
 
 ## 说明
 

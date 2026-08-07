@@ -21,6 +21,9 @@ pub mod registry;
 pub mod scheduler;
 pub mod snapshot;
 
+#[cfg(test)]
+mod v083_failure_tests;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

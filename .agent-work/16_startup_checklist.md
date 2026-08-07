@@ -6,4 +6,4 @@
 - [x] 三个 N0 任务已创建
 - [x] Worker first_message 已生成
 - [x] workflow audit 通过
-- [ ] 三个子 Agent 已绑定并开始执行
+- [x] 三个子 Agent 已绑定并开始执行

@@ -332,6 +332,9 @@ impl serde::Serialize for DbError {
 // ============================================================================
 
 #[cfg(test)]
+mod migration_lineage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
