@@ -3,13 +3,13 @@
 ## 项目概览
 
 - project_name: 方律案件看板 v0.8.3 数据安全热修复
-- project_phase: V083-N0
-- project_health: green
+- project_phase: V083-RC-local-accepted
+- project_health: yellow-external-blocked
 - master_window: 00-master
 - project_master: 04-project-master
 - branch: fix/v0.8.3-data-safety
 - baseline_commit: 76e4788627bef621c500a3f82c5c63f6b21dcbed
-- last_sync_at: 2026-08-08T01:01:01+08:00
+- last_sync_at: 2026-08-08T01:02:31+08:00
 
 ## 当前结论
 
@@ -17,6 +17,8 @@
 - 开发顺序固定为 N0→M1→S1→F1→RC，前一阶段未 accepted 不进入下一阶段。
 - 正式数据库、NAS 同步组、成员密钥、飞书正式 Base 和凭据均不属于开发测试对象。
 - 子 Agent 只能提交 `submitted_for_review`，最终 accepted/rejected 由主控裁决。
+- N0、M1、S1、F1 与 RC 本地实现/门禁已完成；RC 独立总复核为 P0=0、P1=0，并已提交 `b91e691`。
+- 两个 rejected 任务均已有后续补验任务闭环，不代表当前本地 RC 失败；正式签名、远端发布、历史 checksum 输入、实机在线升级和物理双端仍为 `blocked_external`。
 
 ## 活跃窗口
 
