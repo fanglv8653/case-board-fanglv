@@ -27,3 +27,5 @@
 | 2026-08-07T15:00:05+08:00 | worker-migration | start | V083-N0-MIG | 修正迁移版本连续性错误假设：按真实嵌入版本集合验收 |
 | 2026-08-07T15:02:07+08:00 | worker-migration | submit | V083-N0-MIG | 已修正迁移连续性错误假设：逐项比对嵌入版本集合，明确61条、最大62、合法缺号36；报告已同步，未运行Cargo |
 | 2026-08-07T15:04:35+08:00 | 04-project-master | review | V083-N0-MIG | accepted: 返工后全新库实际版本集合与sqlx嵌入迁移集合逐项一致，冻结61条/max62/合法缺号36/failed0及49、51、58-62 sentinel；Windows全量Rust门禁中6个迁移夹具全部通过，生产迁移与启动逻辑零变化。 |
+| 2026-08-07T15:12:06+08:00 | 04-project-master | create_task | V083-M1 | created task 数据库迁移谱系与启动恢复 |
+| 2026-08-07T15:13:41+08:00 | 00-master | register_thread | V083-M1 | bound worker-m1 -> /root/worker_migration |
