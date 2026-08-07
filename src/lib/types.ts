@@ -2091,9 +2091,23 @@ export interface DeviceSyncStatus {
   local_device_id: string;
   key_epoch: number;
   paused: boolean;
+  auto_paused: boolean;
+  pause_reason_code: string | null;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
   pending_upload: number;
   conflicts: number;
   quarantined: number;
+  manual_review: number;
+}
+
+export interface DeviceSyncManualReview {
+  id: string;
+  group_id: string;
+  reason_code: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  retry_count: number;
 }
 
 export interface DeviceSyncRunResult {

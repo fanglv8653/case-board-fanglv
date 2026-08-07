@@ -6775,6 +6775,8 @@ pub fn run() {
             team_submit_edit,
             team_revert_edit,
             device_sync::commands::get_device_sync_status,
+            device_sync::commands::list_device_sync_manual_reviews,
+            device_sync::commands::review_device_sync_manual_quarantine,
             device_sync::commands::validate_device_sync_nas_path,
             device_sync::commands::create_device_sync_group,
             device_sync::commands::set_device_sync_paused,

@@ -53,3 +53,52 @@
 | 2026-08-07T16:47:10+08:00 | 04-project-master | create_task | V083-S1 | created task 设备同步循环引用、分包与隔离生命周期 |
 | 2026-08-07T16:47:12+08:00 | 04-project-master | register_thread | V083-S1 | bound worker-s1 -> /root/worker_sync |
 | 2026-08-07T16:47:14+08:00 | 04-project-master | dispatch | V083-S1 | M1 accepted后串行派发S1，单实现线程负责0063与同步事务语义 |
+| 2026-08-07T16:48:56+08:00 | worker-s1 | start | V083-S1 | 开始实现设备同步循环引用、依赖闭包、隔离生命周期和准确状态 |
+| 2026-08-07T18:13:02+08:00 | worker-s1 | submit | V083-S1 | 完成两阶段循环外键导入、全pending依赖闭包分包、0063隔离生命周期、确定性错误原子自动暂停、安全审计、resume replay resolve与准确时间/UI语义；S1专项15/15通过，check/clippy零warning，全量仅M1迁移数量62/61失败。 |
+| 2026-08-07T18:14:36+08:00 | 04-project-master | create_task | V083-S1-MIG | created task S1迁移0063与M1门禁集成 |
+| 2026-08-07T18:14:38+08:00 | 04-project-master | register_thread | V083-S1-MIG | bound worker-s1-mig -> /root/worker_migration |
+| 2026-08-07T18:14:40+08:00 | 04-project-master | dispatch | V083-S1-MIG | S1实现提交后串行集成0063到M1迁移门禁 |
+| 2026-08-07T18:15:57+08:00 | worker-s1-mig | start | V083-S1-MIG | 已完整读取任务、S1报告、0063及M1安全/测试文件，开始集成迁移63集合、sentinel和main-only夹具 |
+| 2026-08-07T18:26:26+08:00 | worker-s1-mig | submit | V083-S1-MIG | 已集成0063迁移门禁：嵌入集合62条/max63/合法缺36；新增组/隔离生命周期及活动唯一partial索引语义sentinel；main-only VACUUM INTO夹具稳定重开；M63失败指纹夹具；定向13 passed/0 failed/0 ignored |
+| 2026-08-07T18:26:47+08:00 | 04-project-master | create_task | V083-S1-REVIEW | created task S1独立只读安全审计 |
+| 2026-08-07T18:26:49+08:00 | 04-project-master | register_thread | V083-S1-REVIEW | bound worker-s1-review -> /root/worker_gate |
+| 2026-08-07T18:26:52+08:00 | 04-project-master | dispatch | V083-S1-REVIEW | S1与0063集成提交后独立阻断级只读审计 |
+| 2026-08-07T18:27:09+08:00 | worker-s1-review | start | V083-S1-REVIEW | 开始S1独立只读安全审计，完整核对报告、验收量表与真实diff |
+| 2026-08-07T18:34:00+08:00 | worker-s1-review | submit | V083-S1-REVIEW | 独立只读审计完成：发现2项P0、3项P1、3项P2，不建议accepted；报告见.agent-work/output/V083-S1-REVIEW.md |
+| 2026-08-07T18:34:42+08:00 | 04-project-master | review | V083-S1-REVIEW | accepted: 独立审计覆盖S1全部事务、分包、隔离和0063，发现2项P0与3项P1并给出精确反例，报告范围合规。 |
+| 2026-08-07T18:34:44+08:00 | 04-project-master | review | V083-S1-MIG | accepted: 0063已串行集成M1迁移门禁：62条/max63/缺36、关键列和部分唯一索引sentinel、确定性main-only重开，迁移定向13/13且集成Windows全量通过。 |
+| 2026-08-07T18:34:47+08:00 | 04-project-master | review | V083-S1 | rejected: 独立审计发现2P0/3P1：历史依赖证明未考虑后续tombstone；event/manifest先落盘后DB提交不可恢复且错误绝对路径透传UI；duplicate预检非幂等、同包tombstone顺序、隔离键缺设备身份。必须修复并补反例后重提。 |
+| 2026-08-07T18:37:38+08:00 | worker-s1 | start | V083-S1 | 主控rejected后开始返工A：关闭历史证明、接收重复身份与顺序、隔离完整身份、导出自动暂停，不做durable export |
+| 2026-08-07T19:18:16+08:00 | worker-s1 | submit | V083-S1 | 返工A完成：历史最终动作证明、精确重复身份与签名顺序、完整隔离身份/严格解除审计、导出规划自动暂停、manual_review可见；S1定向22/22，check/clippy通过；P0-2 durable export未实施 |
+| 2026-08-07T19:19:07+08:00 | 04-project-master | review | V083-S1 | rejected: 返工A专项证据通过，但S1整体仍有P0-2 durable export与UI路径脱敏未关闭；M63新身份键sentinel待迁移线程吸收，暂不接受。 |
+| 2026-08-07T19:19:09+08:00 | 04-project-master | create_task | V083-S1-MIG-R2 | created task S1隔离身份迁移哨兵复核 |
+| 2026-08-07T19:19:11+08:00 | 04-project-master | dispatch | V083-S1-MIG-R2 | 仅迁移lineage/sentinel与测试，不改S1产品实现或0063 SQL。 |
+| 2026-08-07T19:19:14+08:00 | worker-s1-mig | start | V083-S1-MIG-R2 | 开始吸收0063新身份键、manual_review状态、索引/约束语义并跑迁移定向。 |
+| 2026-08-07T19:19:37+08:00 | 04-project-master | create_task | V083-S1-REVIEW-R2 | created task S1返工A独立安全复审 |
+| 2026-08-07T19:19:40+08:00 | 04-project-master | dispatch | V083-S1-REVIEW-R2 | 只读复审返工A，静态追踪与反例充分性；不编辑产品。 |
+| 2026-08-07T19:19:42+08:00 | worker-s1-review | start | V083-S1-REVIEW-R2 | 开始独立复审返工A，P0-2不在本轮实现验收范围但继续列为S1阻断。 |
+| 2026-08-07T19:26:17+08:00 | worker-s1-review | submit | V083-S1-REVIEW-R2 | 返工A独立复审完成：旧P0-1与原P1主体关闭，但新增1项规划无限重试P0、4项P1；durable export P0-2仍未关闭，不建议accepted。报告见.agent-work/output/V083-S1-REVIEW-R2.md |
+| 2026-08-07T19:26:31+08:00 | 04-project-master | review | V083-S1-REVIEW-R2 | accepted: 独立复审证据充分：返工A关闭旧P0-1/P1主体，同时发现1项新P0和4项P1；这些与durable export合并返工。 |
+| 2026-08-07T19:32:53+08:00 | worker-s1-mig | submit | V083-S1-MIG-R2 | 已完成0063当前身份键与迁移契约加固：精确DDL/字段/FK/索引sentinel、两个同名近似索引反例、legacy manual_review保留测试；定向15/15，全量Windows Rust 340 passed、0 failed、3 ignored。 |
+| 2026-08-07T19:33:26+08:00 | 04-project-master | review | V083-S1-MIG-R2 | accepted: 当前0063身份键阶段sentinel与反例通过，Windows Rust 340/340；返工B扩展0063后必须再做R3。 |
+| 2026-08-07T19:33:28+08:00 | worker-s1 | start | V083-S1 | 启动返工B：关闭durable export P0-2及R2新增1P0/4P1；按24/25任务包执行。 |
+| 2026-08-07T20:25:45+08:00 | 04-project-master | create_task | V083-S1-MIG-R3 | created task S1 durable export迁移哨兵终验 |
+| 2026-08-07T20:25:48+08:00 | 04-project-master | dispatch | V083-S1-MIG-R3 | 仅迁移lineage/sentinel/fixture；吸收capture_sequence、legacy脱敏、export draft表。 |
+| 2026-08-07T20:25:50+08:00 | worker-s1-mig | start | V083-S1-MIG-R3 | 开始R3最终迁移语义与全量Rust恢复。 |
+| 2026-08-07T20:25:53+08:00 | 04-project-master | create_task | V083-S1-REVIEW-R3 | created task S1返工B最终独立安全审计 |
+| 2026-08-07T20:25:55+08:00 | 04-project-master | dispatch | V083-S1-REVIEW-R3 | 只读最终审计，重点故障恢复、并发、顺序、脱敏、manual review与测试充分性。 |
+| 2026-08-07T20:25:58+08:00 | worker-s1-review | start | V083-S1-REVIEW-R3 | 开始S1返工B最终独立只读审计。 |
+| 2026-08-07T20:26:32+08:00 | worker-s1 | submit | V083-S1 | 返工B已提交：S1 35/35、契约53/53、check/clippy/Node/build/source/diff通过；Windows唯一R3迁移fixture失败已转交。 |
+| 2026-08-07T20:32:09+08:00 | worker-s1-review | submit | V083-S1-REVIEW-R3 | R3最终安全审计完成：拒绝验收，发现2项P0、3项P1、2项P2；详见.agent-work/output/V083-S1-REVIEW-R3.md |
+| 2026-08-07T20:33:19+08:00 | 04-project-master | review | V083-S1-REVIEW-R3 | accepted: 最终独立审计有效发现2P0/3P1：no-replace竞态、草稿密码学自证不足、生产编排/捕获并发/目录持久化证据缺口。 |
+| 2026-08-07T20:33:21+08:00 | 04-project-master | review | V083-S1 | rejected: 返工B专项通过但R3审计发现2P0/3P1，必须完成原子no-replace、draft open验签/解密/协议校验、生产编排故障测试、捕获并发序列化和目录持久化后复验。 |
+| 2026-08-07T20:33:57+08:00 | worker-s1 | start | V083-S1 | 启动返工C：关闭R3审计2P0/3P1，按26/27任务包执行。 |
+| 2026-08-07T20:39:30+08:00 | worker-s1-mig | submit | V083-S1-MIG-R3 | 已完成0063 durable export迁移终验：outbox capture顺序、legacy白名单脱敏、export draft完整DDL/列/FK/PK/索引sentinel及六类反例；定向21/21，Windows Rust全量374 passed、0 failed、3 ignored。 |
+| 2026-08-07T20:39:46+08:00 | 04-project-master | review | V083-S1-MIG-R3 | accepted: 0063最终结构sentinel与lookalike通过；迁移定向21/21，Windows Rust 374/374，3项计划内ignored。返工C不改schema。 |
+| 2026-08-07T21:15:29+08:00 | worker-s1 | submit | V083-S1 | 返工C完成：真实NAS no-replace、草稿完整密码学校验、生产export_pending故障注入、capture_sequence多连接并发与耐久边界均已关闭；39/39、NAS 3/3、契约59/59、Windows全量325+0+59、Node119/119及check/clippy/build/source/diff全部通过。 |
+| 2026-08-07T21:16:07+08:00 | 04-project-master | create_task | V083-S1-REVIEW-R4 | created task S1返工C最终独立复验 |
+| 2026-08-07T21:16:09+08:00 | 04-project-master | dispatch | V083-S1-REVIEW-R4 | 只读终验no-replace、draft密码学、生产hook、capture并发与范围。 |
+| 2026-08-07T21:16:11+08:00 | worker-s1-review | start | V083-S1-REVIEW-R4 | 开始S1返工C最终独立复验。 |
+| 2026-08-07T21:19:11+08:00 | worker-s1-review | submit | V083-S1-REVIEW-R4 | R4最终复验完成：R3的2P0/3P1均关闭，未发现新P0/P1，建议验收通过；保留2项非阻断P2。详见.agent-work/output/V083-S1-REVIEW-R4.md |
+| 2026-08-07T21:19:45+08:00 | 04-project-master | review | V083-S1-REVIEW-R4 | accepted: R4独立复验确认R3审计2P0/3P1全部关闭，无新P0/P1；两项P2记录为非阻断后续加固。 |
+| 2026-08-07T21:19:47+08:00 | 04-project-master | review | V083-S1 | accepted: S1经返工A/B/C及R4独立审计通过：迁移、原子导入、依赖闭包、隔离生命周期、durable export、no-replace、密码学恢复、脱敏与并发序列均达标；正式双设备NAS验证延后RC。 |

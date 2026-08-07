@@ -64,6 +64,7 @@ fn remote_operation(field: &str, value: serde_json::Value, base_hash: String) ->
         atomic_group: None,
         author_device_id: "remote".to_string(),
         logical_time: 2,
+        capture_sequence: 2,
         schema_version: 1,
     }
 }
@@ -256,6 +257,7 @@ async fn incoming_tombstone_removes_business_row_and_db_rejects_unknown_entity()
         atomic_group: None,
         author_device_id: "remote".to_string(),
         logical_time: 1,
+        capture_sequence: 1,
         schema_version: 1,
     };
     let mut tx = pool.begin().await.unwrap();

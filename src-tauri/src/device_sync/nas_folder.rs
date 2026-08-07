@@ -92,6 +92,22 @@ impl MountedFolder {
         Ok(target)
     }
 
+    pub(crate) fn write_event_bytes(
+        &self,
+        group_id: &str,
+        device_id: &str,
+        sequence: u64,
+        bytes: &[u8],
+    ) -> Result<PathBuf, SyncError> {
+        validate_segment(device_id)?;
+        let directory = self.group_root(group_id)?.join("events").join(device_id);
+        fs::create_dir_all(&directory)
+            .map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
+        let target = directory.join(format!("{sequence:020}.cbe"));
+        atomic_write(&target, bytes)?;
+        Ok(target)
+    }
+
     pub fn list_events_after(
         &self,
         group_id: &str,
@@ -149,6 +165,22 @@ impl MountedFolder {
         let bytes = serde_json::to_vec(envelope)
             .map_err(|error| SyncError::Serialization(error.to_string()))?;
         atomic_write(&target, &bytes)?;
+        Ok(target)
+    }
+
+    pub(crate) fn write_manifest_bytes(
+        &self,
+        group_id: &str,
+        device_id: &str,
+        sequence: u64,
+        bytes: &[u8],
+    ) -> Result<PathBuf, SyncError> {
+        validate_segment(device_id)?;
+        let directory = self.group_root(group_id)?.join("manifests").join(device_id);
+        fs::create_dir_all(&directory)
+            .map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
+        let target = directory.join(format!("{sequence:020}.cbm"));
+        atomic_write(&target, bytes)?;
         Ok(target)
     }
 
@@ -322,16 +354,24 @@ fn validate_segment(value: &str) -> Result<(), SyncError> {
 }
 
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), SyncError> {
+    atomic_write_inner(target, bytes, None)
+}
+
+fn atomic_write_inner(
+    target: &Path,
+    bytes: &[u8],
+    #[cfg(test)] before_publish: Option<&std::sync::Barrier>,
+    #[cfg(not(test))] _before_publish: Option<&()>,
+) -> Result<(), SyncError> {
     if target.exists() {
         let existing =
             fs::read(target).map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
         if existing == bytes {
             return Ok(());
         }
-        return Err(SyncError::Integrity(format!(
-            "拒绝覆盖已有同步对象: {}",
-            target.display()
-        )));
+        return Err(SyncError::Integrity(
+            "同序列同步对象已存在但内容不一致".to_string(),
+        ));
     }
     let parent = target
         .parent()
@@ -355,12 +395,64 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), SyncError> {
             .map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
         file.sync_all()
             .map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
-        fs::rename(&temp, target).map_err(|error| SyncError::NasUnavailable(error.to_string()))
+        #[cfg(test)]
+        if let Some(barrier) = before_publish {
+            barrier.wait();
+        }
+        publish_no_replace(&temp, target, parent).or_else(|error| {
+            if target.exists() {
+                let winner = fs::read(target)
+                    .map_err(|read_error| SyncError::NasUnavailable(read_error.to_string()))?;
+                if winner == bytes {
+                    return Ok(());
+                }
+                return Err(SyncError::Integrity(
+                    "同序列同步对象已存在但内容不一致".to_string(),
+                ));
+            }
+            Err(error)
+        })
     })();
-    if result.is_err() {
+    if temp.exists() {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(target_os = "windows")]
+fn publish_no_replace(temp: &Path, target: &Path, _parent: &Path) -> Result<(), SyncError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let temp_wide = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temp_wide.as_ptr()),
+            PCWSTR(target_wide.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| SyncError::NasUnavailable(error.to_string()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn publish_no_replace(temp: &Path, target: &Path, parent: &Path) -> Result<(), SyncError> {
+    fs::hard_link(temp, target).map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
+    fs::remove_file(temp).map_err(|error| SyncError::NasUnavailable(error.to_string()))?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| SyncError::NasUnavailable(error.to_string()))
 }
 
 #[cfg(test)]
@@ -398,5 +490,55 @@ mod tests {
         assert!(folder
             .read_envelope(&temp.path().join("outside.cbe"))
             .is_err());
+    }
+
+    #[test]
+    fn concurrent_no_replace_keeps_one_complete_winner_and_rejects_other_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        for round in 0..20 {
+            let target = directory.path().join(format!("race-{round}.cbe"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let left_target = target.clone();
+            let left_barrier = barrier.clone();
+            let right_target = target.clone();
+            let right_barrier = barrier.clone();
+            let left = std::thread::spawn(move || {
+                atomic_write_inner(&left_target, b"complete-left", Some(&left_barrier))
+            });
+            let right = std::thread::spawn(move || {
+                atomic_write_inner(&right_target, b"complete-right", Some(&right_barrier))
+            });
+            let results = [left.join().unwrap(), right.join().unwrap()];
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|result| matches!(result, Err(SyncError::Integrity(_))))
+                    .count(),
+                1
+            );
+            let winner = fs::read(&target).unwrap();
+            assert!(winner == b"complete-left" || winner == b"complete-right");
+        }
+    }
+
+    #[test]
+    fn concurrent_no_replace_accepts_identical_bytes_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("same.cbe");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let left_target = target.clone();
+        let left_barrier = barrier.clone();
+        let right_target = target.clone();
+        let right_barrier = barrier.clone();
+        let left = std::thread::spawn(move || {
+            atomic_write_inner(&left_target, b"same-complete-bytes", Some(&left_barrier))
+        });
+        let right = std::thread::spawn(move || {
+            atomic_write_inner(&right_target, b"same-complete-bytes", Some(&right_barrier))
+        });
+        assert!(left.join().unwrap().is_ok());
+        assert!(right.join().unwrap().is_ok());
+        assert_eq!(fs::read(target).unwrap(), b"same-complete-bytes");
     }
 }

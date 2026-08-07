@@ -6,6 +6,21 @@ use super::operations::{fetch_entity, hash_fields, OperationAction, SyncOperatio
 use super::registry;
 use super::SyncError;
 
+pub(crate) async fn lock_capture_sequence_group(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    group_id: &str,
+) -> Result<(), SyncError> {
+    let locked = sqlx::query("UPDATE device_sync_groups SET updated_at=updated_at WHERE id=?1")
+        .bind(group_id)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    if locked != 1 {
+        return Err(SyncError::NotFound("同步组不存在".to_string()));
+    }
+    Ok(())
+}
+
 #[derive(Debug, FromRow)]
 struct DirtyRow {
     entity_type: String,
@@ -81,6 +96,7 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
     let mut captured = 0;
     for row in dirty {
         let mut tx = pool.begin().await?;
+        lock_capture_sequence_group(&mut tx, group_id).await?;
         let revision: Option<(i64, String, i64)> = sqlx::query_as(
             "SELECT revision, field_hashes_json, tombstoned
              FROM device_sync_entity_revisions
@@ -166,6 +182,14 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
             sqlx::query_scalar("SELECT CAST(strftime('%s','now') AS INTEGER) * 1000")
                 .fetch_one(&mut *tx)
                 .await?;
+        let capture_sequence: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(capture_sequence),0)+1
+             FROM device_sync_outbox
+             WHERE group_id=?1",
+        )
+        .bind(group_id)
+        .fetch_one(&mut *tx)
+        .await?;
         let operation = SyncOperation {
             operation_id: uuid::Uuid::new_v4().to_string(),
             entity_type: row.entity_type.clone(),
@@ -178,14 +202,16 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
             atomic_group,
             author_device_id: local_device_id.clone(),
             logical_time,
+            capture_sequence,
             schema_version: 1,
         };
         sqlx::query(
             "INSERT INTO device_sync_outbox (
                  operation_id, group_id, entity_type, entity_id, case_id, action,
                  base_revision, changed_fields_json, base_field_hashes_json,
-                 atomic_group, author_device_id, logical_time, schema_version
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1)",
+                 atomic_group, author_device_id, logical_time, capture_sequence,
+                 schema_version
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1)",
         )
         .bind(&operation.operation_id)
         .bind(group_id)
@@ -202,6 +228,7 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
         .bind(&operation.atomic_group)
         .bind(&operation.author_device_id)
         .bind(operation.logical_time)
+        .bind(operation.capture_sequence)
         .execute(&mut *tx)
         .await?;
         sqlx::query(

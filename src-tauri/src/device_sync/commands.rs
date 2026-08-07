@@ -9,8 +9,8 @@ use sqlx::{FromRow, SqlitePool};
 use super::nas_folder::MountedFolder;
 use super::{engine, operations, pairing, recovery, snapshot, SyncError, SyncStatus};
 
-fn command_error(error: SyncError) -> String {
-    format!("[{}] {error}", error.code())
+pub(crate) fn command_error(error: SyncError) -> String {
+    format!("[{}] {}", error.code(), error.public_message())
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +97,31 @@ pub async fn get_device_sync_status(
             .map_err(command_error),
         None => Ok(None),
     }
+}
+
+#[tauri::command]
+pub async fn list_device_sync_manual_reviews(
+    pool: tauri::State<'_, SqlitePool>,
+    group_id: String,
+) -> Result<Vec<super::queries::ManualReviewSummary>, String> {
+    super::queries::list_manual_reviews(pool.inner(), &group_id)
+        .await
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub async fn review_device_sync_manual_quarantine(
+    pool: tauri::State<'_, SqlitePool>,
+    group_id: String,
+    review_id: String,
+    action: String,
+) -> Result<SyncStatus, String> {
+    super::queries::review_manual_quarantine(pool.inner(), &group_id, &review_id, &action)
+        .await
+        .map_err(command_error)?;
+    engine::get_status(pool.inner(), &group_id)
+        .await
+        .map_err(command_error)
 }
 
 #[tauri::command]

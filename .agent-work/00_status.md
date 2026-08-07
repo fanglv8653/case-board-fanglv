@@ -9,7 +9,7 @@
 - project_master: 04-project-master
 - branch: fix/v0.8.3-data-safety
 - baseline_commit: 76e4788627bef621c500a3f82c5c63f6b21dcbed
-- last_sync_at: 2026-08-07T16:47:14+08:00
+- last_sync_at: 2026-08-07T21:21:49+08:00
 
 ## 当前结论
 
@@ -29,10 +29,10 @@
 
 | metric | value |
 | --- | --- |
-| total_tasks | 7 |
+| total_tasks | 14 |
 | todo_tasks | 0 |
-| dispatched_tasks | 1 |
+| dispatched_tasks | 0 |
 | in_progress_tasks | 0 |
 | submitted_tasks | 0 |
-| accepted_tasks | 6 |
+| accepted_tasks | 14 |
 | rejected_tasks | 0 |

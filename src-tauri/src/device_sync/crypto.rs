@@ -73,6 +73,13 @@ pub fn sign_detached(signing_secret: &[u8], message: &[u8]) -> Result<String, Sy
     Ok(B64.encode(signing.sign(message).to_bytes()))
 }
 
+pub fn signing_public_from_secret(signing_secret: &[u8]) -> Result<String, SyncError> {
+    let secret: [u8; 32] = signing_secret
+        .try_into()
+        .map_err(|_| SyncError::Crypto("设备签名私钥长度错误".to_string()))?;
+    Ok(B64.encode(SigningKey::from_bytes(&secret).verifying_key().to_bytes()))
+}
+
 pub fn verify_detached(
     signing_public_b64: &str,
     message: &[u8],
@@ -263,9 +270,7 @@ mod tests {
         } else {
             "f"
         };
-        envelope
-            .ciphertext_sha256
-            .replace_range(0..1, replacement);
+        envelope.ciphertext_sha256.replace_range(0..1, replacement);
         assert!(open(&envelope, &key, &device.signing_public_b64).is_err());
     }
 

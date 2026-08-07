@@ -122,6 +122,7 @@ import type {
   DeviceSyncJoinCompletion,
   DeviceSyncJoinRequest,
   DeviceSyncMember,
+  DeviceSyncManualReview,
   DeviceSyncRecoveryPreview,
   DeviceSyncRestorePreview,
   DeviceSyncRunResult,
@@ -146,6 +147,20 @@ import type {
 /* V0.8.1 我的设备同步：命令契约集中在此，便于与 Tauri 注册层一一核对。 */
 export function getDeviceSyncStatus(): Promise<DeviceSyncStatus | null> {
   return invoke("get_device_sync_status");
+}
+
+export function listDeviceSyncManualReviews(
+  groupId: string,
+): Promise<DeviceSyncManualReview[]> {
+  return invoke("list_device_sync_manual_reviews", { groupId });
+}
+
+export function reviewDeviceSyncManualQuarantine(
+  groupId: string,
+  reviewId: string,
+  action: "archive" | "retain",
+): Promise<DeviceSyncStatus> {
+  return invoke("review_device_sync_manual_quarantine", { groupId, reviewId, action });
 }
 
 export function validateDeviceSyncNasPath(

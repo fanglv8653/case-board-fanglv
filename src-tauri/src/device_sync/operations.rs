@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -23,6 +23,8 @@ pub struct SyncOperation {
     pub atomic_group: Option<String>,
     pub author_device_id: String,
     pub logical_time: i64,
+    #[serde(default)]
+    pub capture_sequence: i64,
     pub schema_version: u32,
 }
 
@@ -181,6 +183,7 @@ pub async fn enqueue_operation(
     fields: Map<String, Value>,
     changed_field_names: &[String],
 ) -> Result<String, SyncError> {
+    super::capture::lock_capture_sequence_group(tx, group_id).await?;
     let clean = registry::sanitize_fields(entity_type, &fields)?;
     let current_revision: Option<(i64, String)> = sqlx::query_as(
         "SELECT revision, field_hashes_json
@@ -244,12 +247,19 @@ pub async fn enqueue_operation(
             .bind(group_id)
             .fetch_one(&mut **tx)
             .await?;
+    let capture_sequence: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(capture_sequence),0)+1
+         FROM device_sync_outbox WHERE group_id=?1",
+    )
+    .bind(group_id)
+    .fetch_one(&mut **tx)
+    .await?;
     sqlx::query(
         "INSERT INTO device_sync_outbox (
              operation_id, group_id, entity_type, entity_id, case_id, action,
              base_revision, changed_fields_json, base_field_hashes_json, atomic_group,
-             author_device_id, logical_time, schema_version
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1)",
+             author_device_id, logical_time, capture_sequence, schema_version
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1)",
     )
     .bind(&operation_id)
     .bind(group_id)
@@ -266,9 +276,452 @@ pub async fn enqueue_operation(
     .bind(atomic_group)
     .bind(local_device_id)
     .bind(logical_time)
+    .bind(capture_sequence)
     .execute(&mut **tx)
     .await?;
     Ok(operation_id)
+}
+
+#[derive(Debug, Clone)]
+struct VirtualJudgeState {
+    entity_exists: bool,
+    judge_id: Option<String>,
+}
+
+fn dependency_value<'a>(
+    operation: &'a SyncOperation,
+    field: &str,
+) -> Result<Option<&'a str>, SyncError> {
+    match operation.changed_fields.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.as_str())),
+        Some(Value::String(_)) => Err(SyncError::Protocol(format!(
+            "依赖字段不能为空: {}/{}",
+            operation.entity_type, field
+        ))),
+        Some(_) => Err(SyncError::Protocol(format!(
+            "依赖字段必须是字符串或 null: {}/{}",
+            operation.entity_type, field
+        ))),
+    }
+}
+
+fn hash_json_value(value: &Value) -> String {
+    Sha256::digest(serde_json::to_vec(value).unwrap_or_default())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn load_virtual_judge_state(
+    tx: &mut Transaction<'_, Sqlite>,
+    case_id: &str,
+) -> Result<VirtualJudgeState, SyncError> {
+    let row: Option<Option<String>> = sqlx::query_scalar("SELECT judge_id FROM cases WHERE id=?1")
+        .bind(case_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(match row {
+        Some(judge_id) => VirtualJudgeState {
+            entity_exists: true,
+            judge_id,
+        },
+        None => VirtualJudgeState {
+            entity_exists: false,
+            judge_id: None,
+        },
+    })
+}
+
+async fn record_judge_conflict(
+    tx: &mut Transaction<'_, Sqlite>,
+    group_id: &str,
+    operation: &SyncOperation,
+    local_judge: Option<&str>,
+    remote_judge: Option<&str>,
+) -> Result<(), SyncError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO device_sync_conflicts (
+             id, group_id, operation_id, entity_type, entity_id, case_id,
+             field_key, atomic_group, base_value_hash, local_value_json, remote_value_json
+         ) VALUES (?1,?2,?3,'case',?4,?5,'judge_id',?6,?7,?8,?9)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(group_id)
+    .bind(&operation.operation_id)
+    .bind(&operation.entity_id)
+    .bind(&operation.case_id)
+    .bind(&operation.atomic_group)
+    .bind(operation.base_field_hashes.get("judge_id"))
+    .bind(
+        local_judge
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null)
+            .to_string(),
+    )
+    .bind(
+        remote_judge
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null)
+            .to_string(),
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn receiver_has_entity(
+    tx: &mut Transaction<'_, Sqlite>,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<bool, SyncError> {
+    let sql = match entity_type {
+        "case" => "SELECT EXISTS(SELECT 1 FROM cases WHERE id=?1)",
+        "contact" => "SELECT EXISTS(SELECT 1 FROM contacts WHERE id=?1)",
+        _ => return Err(SyncError::Protocol("未知依赖实体类型".to_string())),
+    };
+    Ok(sqlx::query_scalar::<_, i64>(sql)
+        .bind(entity_id)
+        .fetch_one(&mut **tx)
+        .await?
+        != 0)
+}
+
+async fn validate_package_dependencies(
+    tx: &mut Transaction<'_, Sqlite>,
+    operations: &[SyncOperation],
+) -> Result<(), SyncError> {
+    let mut package_final_actions = BTreeMap::new();
+    for operation in operations {
+        package_final_actions.insert(
+            (operation.entity_type.as_str(), operation.entity_id.as_str()),
+            operation.action,
+        );
+    }
+
+    for operation in operations {
+        if operation.action != OperationAction::Upsert {
+            continue;
+        }
+        let dependency = match operation.entity_type.as_str() {
+            "case" => {
+                dependency_value(operation, "judge_id")?.map(|entity_id| ("contact", entity_id))
+            }
+            "contact" => {
+                dependency_value(operation, "case_id")?.map(|entity_id| ("case", entity_id))
+            }
+            _ => None,
+        };
+        let Some((entity_type, entity_id)) = dependency else {
+            continue;
+        };
+        if let Some(final_action) = package_final_actions.get(&(entity_type, entity_id)) {
+            if *final_action == OperationAction::Upsert {
+                continue;
+            }
+            return Err(SyncError::PackageDependencyConflict);
+        }
+        if receiver_has_entity(tx, entity_type, entity_id).await? {
+            continue;
+        }
+        return Err(SyncError::PackageDependencyMissing);
+    }
+    Ok(())
+}
+
+async fn classify_package_operations(
+    tx: &mut Transaction<'_, Sqlite>,
+    source_device_id: &str,
+    source_sequence: u64,
+    operations: &[SyncOperation],
+    payload_hash: &str,
+) -> Result<(Vec<usize>, Vec<Option<ApplyOutcome>>), SyncError> {
+    let mut package_ids = BTreeSet::new();
+    if operations
+        .iter()
+        .any(|operation| !package_ids.insert(operation.operation_id.as_str()))
+    {
+        return Err(SyncError::Integrity(
+            "signed event contains duplicate operation_id".to_string(),
+        ));
+    }
+    let mut pending = Vec::new();
+    let mut outcomes = vec![None; operations.len()];
+    for (index, operation) in operations.iter().enumerate() {
+        let already: Option<(String, i64, String)> = sqlx::query_as(
+            "SELECT source_device_id,source_sequence,payload_hash
+             FROM device_sync_applied_operations WHERE operation_id=?1",
+        )
+        .bind(&operation.operation_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match already {
+            None => pending.push(index),
+            Some((device, sequence, hash))
+                if device == source_device_id
+                    && sequence == source_sequence as i64
+                    && hash == payload_hash =>
+            {
+                outcomes[index] = Some(ApplyOutcome {
+                    operation_id: operation.operation_id.clone(),
+                    applied_fields: Vec::new(),
+                    conflict_fields: Vec::new(),
+                    duplicate: true,
+                });
+            }
+            Some(_) => {
+                return Err(SyncError::Integrity(
+                    "operation_id 已被不同来源或载荷使用".to_string(),
+                ));
+            }
+        }
+    }
+    Ok((pending, outcomes))
+}
+
+fn stable_dependency_order(
+    operations: &[SyncOperation],
+    pending: &[usize],
+) -> Result<Vec<usize>, SyncError> {
+    let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
+    let mut entity_operations: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    for index in pending {
+        let operation = &operations[*index];
+        entity_operations
+            .entry((&operation.entity_type, &operation.entity_id))
+            .or_default()
+            .push(*index);
+    }
+    let mut edges = BTreeSet::new();
+    for indexes in entity_operations.values() {
+        for pair in indexes.windows(2) {
+            edges.insert((pair[0], pair[1]));
+        }
+    }
+    for index in pending {
+        let operation = &operations[*index];
+        if operation.action != OperationAction::Upsert || operation.entity_type != "contact" {
+            continue;
+        }
+        let Some(case_id) = dependency_value(operation, "case_id")? else {
+            continue;
+        };
+        if let Some(provider) = entity_operations
+            .get(&("case", case_id))
+            .and_then(|indexes| indexes.last())
+        {
+            edges.insert((*provider, *index));
+        }
+    }
+
+    let mut outgoing: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut indegree = pending
+        .iter()
+        .map(|index| (*index, 0_usize))
+        .collect::<BTreeMap<_, _>>();
+    for (from, to) in edges {
+        if from == to || !pending_set.contains(&from) || !pending_set.contains(&to) {
+            continue;
+        }
+        outgoing.entry(from).or_default().push(to);
+        *indegree.get_mut(&to).expect("pending node") += 1;
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(index, degree)| (*degree == 0).then_some(*index))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(pending.len());
+    while let Some(index) = ready.pop_first() {
+        order.push(index);
+        for next in outgoing.get(&index).into_iter().flatten() {
+            let degree = indegree.get_mut(next).expect("pending node");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.insert(*next);
+            }
+        }
+    }
+    if order.len() != pending.len() {
+        return Err(SyncError::PackageDependencyConflict);
+    }
+    Ok(order)
+}
+
+/// Applies one authenticated event as a dependency-checked atomic package.
+///
+/// The caller owns the transaction so member sequence advancement can commit
+/// with the business rows. No writes occur before the complete package dependency
+/// preflight succeeds.
+pub(crate) async fn apply_incoming_package(
+    tx: &mut Transaction<'_, Sqlite>,
+    group_id: &str,
+    source_device_id: &str,
+    source_sequence: u64,
+    operations: &[SyncOperation],
+    payload_hash: &str,
+) -> Result<Vec<ApplyOutcome>, SyncError> {
+    let (pending, mut outcomes) = classify_package_operations(
+        tx,
+        source_device_id,
+        source_sequence,
+        operations,
+        payload_hash,
+    )
+    .await?;
+    if pending.is_empty() {
+        return outcomes
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| SyncError::Integrity("同步包重复结果不完整".to_string()));
+    }
+    let pending_operations = pending
+        .iter()
+        .map(|index| operations[*index].clone())
+        .collect::<Vec<_>>();
+    validate_package_dependencies(tx, &pending_operations).await?;
+    let order = stable_dependency_order(operations, &pending)?;
+    let mut judge_states: BTreeMap<String, VirtualJudgeState> = BTreeMap::new();
+
+    for index in order {
+        let operation = &operations[index];
+        let judge_change = if operation.entity_type == "case"
+            && operation.action == OperationAction::Upsert
+            && operation.changed_fields.contains_key("judge_id")
+        {
+            Some(dependency_value(operation, "judge_id")?.map(str::to_string))
+        } else {
+            None
+        };
+        if operation.entity_type == "case" && !judge_states.contains_key(&operation.entity_id) {
+            judge_states.insert(
+                operation.entity_id.clone(),
+                load_virtual_judge_state(tx, &operation.entity_id).await?,
+            );
+        }
+        let mut judge_conflict = false;
+        if judge_change.is_some() {
+            let local_revision: i64 = sqlx::query_scalar(
+                "SELECT COALESCE((SELECT revision FROM device_sync_entity_revisions
+                  WHERE group_id=?1 AND entity_type='case' AND entity_id=?2),0)",
+            )
+            .bind(group_id)
+            .bind(&operation.entity_id)
+            .fetch_one(&mut **tx)
+            .await?;
+            if local_revision > operation.base_revision {
+                let state = judge_states
+                    .get(&operation.entity_id)
+                    .expect("case judge state loaded");
+                let current_hash = state.entity_exists.then(|| {
+                    hash_json_value(
+                        &state
+                            .judge_id
+                            .as_ref()
+                            .map(|value| Value::String(value.clone()))
+                            .unwrap_or(Value::Null),
+                    )
+                });
+                judge_conflict =
+                    operation.base_field_hashes.get("judge_id") != current_hash.as_ref();
+            }
+        }
+        let mut safe_operation = operation.clone();
+        if judge_change.is_some() {
+            safe_operation.changed_fields.remove("judge_id");
+            safe_operation.base_field_hashes.remove("judge_id");
+        }
+        let mut outcome = apply_incoming(
+            tx,
+            group_id,
+            source_device_id,
+            source_sequence,
+            &safe_operation,
+            payload_hash,
+        )
+        .await?;
+        if operation.entity_type == "case" {
+            let state = judge_states
+                .get_mut(&operation.entity_id)
+                .expect("case judge state loaded");
+            if operation.action == OperationAction::Tombstone {
+                if outcome
+                    .applied_fields
+                    .iter()
+                    .any(|field| field == "_tombstone")
+                {
+                    state.entity_exists = false;
+                    state.judge_id = None;
+                }
+            } else {
+                state.entity_exists = true;
+            }
+            if let Some(intended_judge) = judge_change {
+                if judge_conflict {
+                    record_judge_conflict(
+                        tx,
+                        group_id,
+                        operation,
+                        state.judge_id.as_deref(),
+                        intended_judge.as_deref(),
+                    )
+                    .await?;
+                    outcome.conflict_fields.push("judge_id".to_string());
+                } else {
+                    state.judge_id = intended_judge;
+                    outcome.applied_fields.push("judge_id".to_string());
+                }
+            }
+        }
+        outcomes[index] = Some(outcome);
+    }
+
+    let case_policy = registry::policy("case")?;
+    for (case_id, state) in judge_states {
+        if !state.entity_exists {
+            continue;
+        }
+        let affected = sqlx::query("UPDATE cases SET judge_id=?1 WHERE id=?2")
+            .bind(&state.judge_id)
+            .bind(&case_id)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected();
+        if affected != 1 {
+            return Err(SyncError::PackageDependencyMissing);
+        }
+        let after = fetch_entity(tx, case_policy, &case_id)
+            .await?
+            .ok_or(SyncError::PackageDependencyMissing)?;
+        let hashes = hash_fields(&after);
+        let revised = sqlx::query(
+            "UPDATE device_sync_entity_revisions
+             SET field_hashes_json=?1,updated_at=datetime('now')
+             WHERE group_id=?2 AND entity_type='case' AND entity_id=?3",
+        )
+        .bind(serde_json::to_string(&hashes)?)
+        .bind(group_id)
+        .bind(&case_id)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+        if revised != 1 {
+            return Err(SyncError::Integrity(
+                "deferred case judge patch is missing revision".to_string(),
+            ));
+        }
+        sqlx::query(
+            "DELETE FROM device_sync_dirty_entities
+             WHERE entity_type='case' AND entity_id=?1",
+        )
+        .bind(&case_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    outcomes
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| SyncError::Integrity("同步包结果不完整".to_string()))
 }
 
 pub async fn apply_incoming(
@@ -279,19 +732,26 @@ pub async fn apply_incoming(
     operation: &SyncOperation,
     payload_hash: &str,
 ) -> Result<ApplyOutcome, SyncError> {
-    let already: Option<(String,)> = sqlx::query_as(
-        "SELECT operation_id FROM device_sync_applied_operations WHERE operation_id=?1",
+    let already: Option<(String, i64, String)> = sqlx::query_as(
+        "SELECT source_device_id,source_sequence,payload_hash
+         FROM device_sync_applied_operations WHERE operation_id=?1",
     )
     .bind(&operation.operation_id)
     .fetch_optional(&mut **tx)
     .await?;
-    if already.is_some() {
-        return Ok(ApplyOutcome {
-            operation_id: operation.operation_id.clone(),
-            applied_fields: Vec::new(),
-            conflict_fields: Vec::new(),
-            duplicate: true,
-        });
+    if let Some((device, sequence, hash)) = already {
+        if device == source_device_id && sequence == source_sequence as i64 && hash == payload_hash
+        {
+            return Ok(ApplyOutcome {
+                operation_id: operation.operation_id.clone(),
+                applied_fields: Vec::new(),
+                conflict_fields: Vec::new(),
+                duplicate: true,
+            });
+        }
+        return Err(SyncError::Integrity(
+            "operation_id 已被不同来源或载荷使用".to_string(),
+        ));
     }
     if operation.author_device_id != source_device_id {
         return Err(SyncError::Integrity("操作作者与信封设备不一致".to_string()));

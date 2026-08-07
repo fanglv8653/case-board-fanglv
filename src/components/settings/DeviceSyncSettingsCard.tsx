@@ -27,10 +27,12 @@ import {
   getDeviceSyncStatus,
   listDeviceSyncConflicts,
   listDeviceSyncMembers,
+  listDeviceSyncManualReviews,
   listDeviceSyncSnapshots,
   previewDeviceSyncRecovery,
   previewDeviceSyncRestore,
   resolveDeviceSyncConflict,
+  reviewDeviceSyncManualQuarantine,
   revokeDeviceSyncMember,
   runDeviceSync,
   setDeviceSyncPaused,
@@ -41,6 +43,7 @@ import type {
   DeviceSyncInvite,
   DeviceSyncJoinRequest,
   DeviceSyncMember,
+  DeviceSyncManualReview,
   DeviceSyncRecoveryPreview,
   DeviceSyncRestorePreview,
   DeviceSyncSnapshot,
@@ -69,6 +72,12 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function syncTime(value: string | null) {
+  if (!value) return "无";
+  const parsed = new Date(value.endsWith("Z") ? value : `${value}Z`);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+}
+
 async function chooseDirectory(): Promise<string | null> {
   const result = await open({ directory: true, multiple: false });
   return typeof result === "string" ? result : null;
@@ -82,6 +91,7 @@ async function chooseFile(): Promise<string | null> {
 export function DeviceSyncSettingsCard() {
   const [status, setStatus] = useState<DeviceSyncStatus | null>(null);
   const [members, setMembers] = useState<DeviceSyncMember[]>([]);
+  const [manualReviews, setManualReviews] = useState<DeviceSyncManualReview[]>([]);
   const [conflicts, setConflicts] = useState<DeviceSyncConflict[]>([]);
   const [snapshots, setSnapshots] = useState<DeviceSyncSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
@@ -111,19 +121,22 @@ export function DeviceSyncSettingsCard() {
       const next = await getDeviceSyncStatus();
       setStatus(next);
       if (next) {
-        const [nextMembers, nextConflicts, nextSnapshots] = await Promise.all([
+        const [nextMembers, nextConflicts, nextSnapshots, nextManualReviews] = await Promise.all([
           listDeviceSyncMembers(next.group_id),
           listDeviceSyncConflicts(next.group_id),
           listDeviceSyncSnapshots(next.group_id),
+          listDeviceSyncManualReviews(next.group_id),
         ]);
         setMembers(nextMembers);
         setConflicts(nextConflicts);
         setSnapshots(nextSnapshots);
+        setManualReviews(nextManualReviews);
         setNasPath(next.connector_root);
       } else {
         setMembers([]);
         setConflicts([]);
         setSnapshots([]);
+        setManualReviews([]);
       }
     } catch (e) {
       setError(errorText(e));
@@ -145,7 +158,9 @@ export function DeviceSyncSettingsCard() {
       setNotice(message);
       await refresh();
     } catch (e) {
-      setError(errorText(e));
+      const message = errorText(e);
+      await refresh();
+      setError(message);
     } finally {
       setBusy("");
     }
@@ -186,7 +201,7 @@ export function DeviceSyncSettingsCard() {
             <div className="font-medium">连接与运行状态</div>
             {status ? (
               <p className="mt-1 text-xs text-muted-foreground">
-                {status.paused ? "已暂停" : "运行中"} · 待上传 {status.pending_upload} · 冲突 {status.conflicts} · 隔离 {status.quarantined} · 密钥代次 {status.key_epoch}
+                {status.auto_paused ? "已自动暂停" : status.paused ? "已手动暂停" : "运行中"} · 待上传 {status.pending_upload} · 冲突 {status.conflicts} · 活动隔离 {status.quarantined} · 待人工复核 {status.manual_review} · 密钥代次 {status.key_epoch}
               </p>
             ) : (
               <p className="mt-1 text-xs text-muted-foreground">尚未创建或加入设备同步组。NAS 未挂载时可暂不配置。</p>
@@ -206,12 +221,36 @@ export function DeviceSyncSettingsCard() {
             )}
           </div>
         </div>
+        {status && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            最近尝试：{syncTime(status.last_attempt_at)} · 最近成功：{syncTime(status.last_success_at)}
+            {status.pause_reason_code ? ` · 暂停原因：${status.pause_reason_code}` : ""}
+          </p>
+        )}
         <div className="mt-3 flex gap-2">
           <input className={inputClass} value={nasPath} onChange={(e) => setNasPath(e.target.value)} placeholder="NAS 挂载盘符路径或 UNC 路径" />
           <Button variant="outline" onClick={async () => { const path = await chooseDirectory(); if (path) setNasPath(path); }}><FolderOpen />选择</Button>
           <Button variant="outline" disabled={!nasPath.trim() || Boolean(busy)} onClick={() => void run("validate", () => validateDeviceSyncNasPath(nasPath.trim()), "NAS 目录可访问、可写入。")}>验证绑定</Button>
         </div>
       </div>
+
+      {status && manualReviews.length > 0 && (
+        <div className={subCard}>
+          <div className="flex items-center gap-2 font-medium"><AlertTriangle className="size-4 text-amber-600" />旧版隔离记录待人工复核</div>
+          <p className="mt-1 text-xs text-muted-foreground">仅显示脱敏编号、稳定原因码与时间；旧路径和底层错误正文不会返回前端。</p>
+          <div className="mt-3 space-y-2">
+            {manualReviews.map((item) => (
+              <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-2 text-xs">
+                <span>{item.reason_code} · 首次 {syncTime(item.first_seen_at)} · 重试 {item.retry_count}</span>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" disabled={Boolean(busy)} onClick={() => void run(`retain-${item.id}`, () => reviewDeviceSyncManualQuarantine(status.group_id, item.id, "retain"), "已保留待复核并记录审计。")}>保留待核</Button>
+                  <Button variant="outline" size="sm" disabled={Boolean(busy)} onClick={() => void run(`archive-${item.id}`, () => reviewDeviceSyncManualQuarantine(status.group_id, item.id, "archive"), "已确认归档并记录审计。")}>确认归档</Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {!status && (
         <div className={subCard}>

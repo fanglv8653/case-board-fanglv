@@ -5,6 +5,13 @@ use tokio::task::JoinHandle;
 
 use super::engine;
 
+pub(crate) async fn eligible_group_ids(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar("SELECT id FROM device_sync_groups WHERE paused=0 ORDER BY created_at")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+}
+
 /// Starts the single background scheduler used by the desktop runtime.
 ///
 /// - first tick is immediate (application startup);
@@ -37,12 +44,7 @@ pub fn start(pool: SqlitePool) -> JoinHandle<()> {
             if !periodic_due && !dirty_ready {
                 continue;
             }
-            let groups: Vec<String> = sqlx::query_scalar(
-                "SELECT id FROM device_sync_groups WHERE paused=0 ORDER BY created_at",
-            )
-            .fetch_all(&pool)
-            .await
-            .unwrap_or_default();
+            let groups = eligible_group_ids(&pool).await;
             for group_id in groups {
                 match engine::sync_once(&pool, &group_id).await {
                     Ok(_)
@@ -53,7 +55,7 @@ pub fn start(pool: SqlitePool) -> JoinHandle<()> {
                             "[device-sync] scheduled group {} failed [{}]: {}",
                             group_id,
                             error.code(),
-                            error
+                            error.public_message()
                         );
                     }
                 }

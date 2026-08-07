@@ -33,9 +33,14 @@ pub struct SyncStatus {
     pub local_device_id: String,
     pub key_epoch: u32,
     pub paused: bool,
+    pub auto_paused: bool,
+    pub pause_reason_code: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
     pub pending_upload: u64,
     pub conflicts: u64,
     pub quarantined: u64,
+    pub manual_review: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +73,14 @@ pub enum SyncError {
     Busy,
     #[error("异常变更熔断: {0}")]
     FuseTriggered(String),
+    #[error("同步包依赖在当前包和接收端均不存在")]
+    PackageDependencyMissing,
+    #[error("sync package dependency closure exceeds the event capacity")]
+    PackageTooLarge,
+    #[error("同步包内依赖实体的最终动作与引用关系冲突")]
+    PackageDependencyConflict,
+    #[error("同步组因确定性同步错误已自动暂停")]
+    GroupAutoPaused,
     #[error("未找到: {0}")]
     NotFound(String),
 }
@@ -89,14 +102,42 @@ impl SyncError {
             Self::Paused => "SYNC_PAUSED",
             Self::Busy => "SYNC_BUSY",
             Self::FuseTriggered(_) => "SYNC_FUSE_TRIGGERED",
+            Self::PackageDependencyMissing => "SYNC_PACKAGE_DEPENDENCY_MISSING",
+            Self::PackageTooLarge => "SYNC_PACKAGE_TOO_LARGE",
+            Self::PackageDependencyConflict => "SYNC_PACKAGE_DEPENDENCY_CONFLICT",
+            Self::GroupAutoPaused => "SYNC_GROUP_AUTO_PAUSED",
             Self::NotFound(_) => "SYNC_NOT_FOUND",
+        }
+    }
+
+    pub fn public_message(&self) -> &'static str {
+        match self {
+            Self::Database(_) => "设备同步暂时无法访问本地数据库",
+            Self::Serialization(_) => "设备同步数据格式无效",
+            Self::Crypto(_) => "设备同步加密处理失败",
+            Self::Integrity(_) => "同步数据完整性校验失败",
+            Self::Protocol(_) => "设备同步协议数据无效",
+            Self::EntityNotAllowed(_) => "该类数据不允许设备同步",
+            Self::FieldNotAllowed { .. } => "该字段不允许设备同步",
+            Self::InvalidNasPath(_) => "请选择有效的设备同步目录",
+            Self::NasUnavailable(_) => "设备同步目录当前不可用",
+            Self::CredentialStore(_) => "设备同步密钥暂时不可用",
+            Self::UnsupportedPlatform => "当前系统不支持设备同步密钥存储",
+            Self::Paused => "设备同步已暂停",
+            Self::Busy => "设备同步任务正在运行或状态已变化",
+            Self::FuseTriggered(_) => "设备同步因异常变更已停止",
+            Self::PackageDependencyMissing => "同步包缺少必要的依赖数据",
+            Self::PackageTooLarge => "同步包超出容量限制",
+            Self::PackageDependencyConflict => "同步包的依赖状态冲突",
+            Self::GroupAutoPaused => "同步组因可重现错误已自动暂停",
+            Self::NotFound(_) => "未找到所需的设备同步数据",
         }
     }
 }
 
 impl serde::Serialize for SyncError {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format!("{}: {}", self.code(), self))
+        serializer.serialize_str(&format!("[{}] {}", self.code(), self.public_message()))
     }
 }
 

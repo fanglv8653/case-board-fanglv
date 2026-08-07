@@ -19,6 +19,84 @@ struct MissingSentinel {
     code: &'static str,
 }
 
+const M63_QUARANTINE_TABLE_SQL: &str = r#"
+CREATE TABLE device_sync_quarantine (
+    id TEXT PRIMARY KEY NOT NULL,
+    group_id TEXT,
+    source_path TEXT,
+    source_device_id TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL,
+    reason_code TEXT NOT NULL,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK(status IN ('active','resolved','manual_review')),
+    first_seen_at TEXT NOT NULL DEFAULT(datetime('now')),
+    last_seen_at TEXT NOT NULL DEFAULT(datetime('now')),
+    retry_count INTEGER NOT NULL DEFAULT 1 CHECK(retry_count >= 1),
+    resolved_at TEXT,
+    last_error_code TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT(datetime('now')),
+    FOREIGN KEY(group_id) REFERENCES device_sync_groups(id) ON DELETE SET NULL
+)
+"#;
+
+const M63_ACTIVE_INDEX_SQL: &str = r#"
+CREATE UNIQUE INDEX idx_device_sync_quarantine_active_key
+ON device_sync_quarantine(
+    COALESCE(group_id,''), source_device_id, source_sequence, reason_code
+)
+WHERE status='active'
+"#;
+
+const M63_GROUP_STATUS_INDEX_SQL: &str = r#"
+CREATE INDEX idx_device_sync_quarantine_group_status
+ON device_sync_quarantine(group_id, status, last_seen_at DESC)
+"#;
+
+const M63_OUTBOX_CAPTURE_INDEX_SQL: &str = r#"
+CREATE UNIQUE INDEX idx_device_sync_outbox_capture_sequence
+ON device_sync_outbox(group_id, capture_sequence)
+"#;
+
+const M63_OUTBOX_PENDING_CAPTURE_INDEX_SQL: &str = r#"
+CREATE INDEX idx_device_sync_outbox_pending_capture
+ON device_sync_outbox(group_id, state, capture_sequence)
+"#;
+
+const M63_EXPORT_DRAFTS_TABLE_SQL: &str = r#"
+CREATE TABLE device_sync_export_drafts (
+    group_id TEXT NOT NULL,
+    local_device_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence >= 1),
+    key_epoch INTEGER NOT NULL CHECK(key_epoch >= 1),
+    previous_manifest_hash TEXT,
+    event_envelope_bytes BLOB NOT NULL,
+    manifest_envelope_bytes BLOB NOT NULL,
+    event_ciphertext_sha256 TEXT NOT NULL,
+    manifest_ciphertext_sha256 TEXT NOT NULL,
+    operation_ids_json TEXT NOT NULL,
+    operation_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'prepared'
+        CHECK(state IN ('prepared','finalized')),
+    created_at TEXT NOT NULL DEFAULT(datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT(datetime('now')),
+    finalized_at TEXT,
+    PRIMARY KEY(group_id, local_device_id, sequence),
+    FOREIGN KEY(group_id) REFERENCES device_sync_groups(id) ON DELETE CASCADE
+)
+"#;
+
+const M63_EXPORT_DRAFTS_STATE_INDEX_SQL: &str = r#"
+CREATE INDEX idx_device_sync_export_drafts_state
+ON device_sync_export_drafts(group_id, local_device_id, state, sequence)
+"#;
+
+const M63_EXPORT_DRAFTS_ONE_PREPARED_INDEX_SQL: &str = r#"
+CREATE UNIQUE INDEX idx_device_sync_export_drafts_one_prepared
+ON device_sync_export_drafts(group_id)
+WHERE state='prepared'
+"#;
+
 fn compatibility_error(
     code: &'static str,
     version: Option<i64>,
@@ -324,6 +402,11 @@ async fn collect_missing_sentinels(
             "M62.table.feishu_sync_entity_previews",
             "feishu_sync_entity_previews",
         ),
+        (
+            63,
+            "M63.table.device_sync_export_drafts",
+            "device_sync_export_drafts",
+        ),
     ] {
         if applied_versions.contains(&version) && !object_exists(pool, "table", table).await? {
             missing.push(MissingSentinel {
@@ -402,11 +485,406 @@ async fn collect_missing_sentinels(
             "feishu_sync_entity_previews",
             "review_status",
         ),
+        (
+            63,
+            "M63.column.groups.last_attempt_at",
+            "device_sync_groups",
+            "last_attempt_at",
+        ),
+        (
+            63,
+            "M63.column.groups.last_success_at",
+            "device_sync_groups",
+            "last_success_at",
+        ),
+        (
+            63,
+            "M63.column.groups.auto_paused",
+            "device_sync_groups",
+            "auto_paused",
+        ),
+        (
+            63,
+            "M63.column.groups.pause_reason_code",
+            "device_sync_groups",
+            "pause_reason_code",
+        ),
+        (
+            63,
+            "M63.column.outbox.capture_sequence",
+            "device_sync_outbox",
+            "capture_sequence",
+        ),
+        (
+            63,
+            "M63.column.quarantine.source_device_id",
+            "device_sync_quarantine",
+            "source_device_id",
+        ),
+        (
+            63,
+            "M63.column.quarantine.source_sequence",
+            "device_sync_quarantine",
+            "source_sequence",
+        ),
+        (
+            63,
+            "M63.column.quarantine.status",
+            "device_sync_quarantine",
+            "status",
+        ),
+        (
+            63,
+            "M63.column.quarantine.first_seen_at",
+            "device_sync_quarantine",
+            "first_seen_at",
+        ),
+        (
+            63,
+            "M63.column.quarantine.last_seen_at",
+            "device_sync_quarantine",
+            "last_seen_at",
+        ),
+        (
+            63,
+            "M63.column.quarantine.retry_count",
+            "device_sync_quarantine",
+            "retry_count",
+        ),
+        (
+            63,
+            "M63.column.quarantine.resolved_at",
+            "device_sync_quarantine",
+            "resolved_at",
+        ),
+        (
+            63,
+            "M63.column.quarantine.last_error_code",
+            "device_sync_quarantine",
+            "last_error_code",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.group_id",
+            "device_sync_export_drafts",
+            "group_id",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.local_device_id",
+            "device_sync_export_drafts",
+            "local_device_id",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.sequence",
+            "device_sync_export_drafts",
+            "sequence",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.key_epoch",
+            "device_sync_export_drafts",
+            "key_epoch",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.previous_manifest_hash",
+            "device_sync_export_drafts",
+            "previous_manifest_hash",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.event_envelope_bytes",
+            "device_sync_export_drafts",
+            "event_envelope_bytes",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.manifest_envelope_bytes",
+            "device_sync_export_drafts",
+            "manifest_envelope_bytes",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.event_ciphertext_sha256",
+            "device_sync_export_drafts",
+            "event_ciphertext_sha256",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.manifest_ciphertext_sha256",
+            "device_sync_export_drafts",
+            "manifest_ciphertext_sha256",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.operation_ids_json",
+            "device_sync_export_drafts",
+            "operation_ids_json",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.operation_fingerprint",
+            "device_sync_export_drafts",
+            "operation_fingerprint",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.state",
+            "device_sync_export_drafts",
+            "state",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.created_at",
+            "device_sync_export_drafts",
+            "created_at",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.updated_at",
+            "device_sync_export_drafts",
+            "updated_at",
+        ),
+        (
+            63,
+            "M63.column.export_drafts.finalized_at",
+            "device_sync_export_drafts",
+            "finalized_at",
+        ),
     ] {
         if applied_versions.contains(&version) && !column_exists(pool, table, column).await? {
             missing.push(MissingSentinel {
                 migration_version: version,
                 code,
+            });
+        }
+    }
+
+    if applied_versions.contains(&63) {
+        for (code, table, column, expected_type, not_null, default_value) in [
+            (
+                "M63.column.groups.auto_paused.definition",
+                "device_sync_groups",
+                "auto_paused",
+                "INTEGER",
+                true,
+                Some("0"),
+            ),
+            (
+                "M63.column.outbox.capture_sequence.definition",
+                "device_sync_outbox",
+                "capture_sequence",
+                "INTEGER",
+                true,
+                Some("0"),
+            ),
+            (
+                "M63.column.quarantine.source_device_id.definition",
+                "device_sync_quarantine",
+                "source_device_id",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.quarantine.source_sequence.definition",
+                "device_sync_quarantine",
+                "source_sequence",
+                "INTEGER",
+                true,
+                None,
+            ),
+            (
+                "M63.column.quarantine.status.definition",
+                "device_sync_quarantine",
+                "status",
+                "TEXT",
+                true,
+                Some("'active'"),
+            ),
+            (
+                "M63.column.quarantine.retry_count.definition",
+                "device_sync_quarantine",
+                "retry_count",
+                "INTEGER",
+                true,
+                Some("1"),
+            ),
+            (
+                "M63.column.quarantine.last_error_code.definition",
+                "device_sync_quarantine",
+                "last_error_code",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.group_id.definition",
+                "device_sync_export_drafts",
+                "group_id",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.local_device_id.definition",
+                "device_sync_export_drafts",
+                "local_device_id",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.sequence.definition",
+                "device_sync_export_drafts",
+                "sequence",
+                "INTEGER",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.key_epoch.definition",
+                "device_sync_export_drafts",
+                "key_epoch",
+                "INTEGER",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.previous_manifest_hash.definition",
+                "device_sync_export_drafts",
+                "previous_manifest_hash",
+                "TEXT",
+                false,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.event_envelope_bytes.definition",
+                "device_sync_export_drafts",
+                "event_envelope_bytes",
+                "BLOB",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.manifest_envelope_bytes.definition",
+                "device_sync_export_drafts",
+                "manifest_envelope_bytes",
+                "BLOB",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.event_ciphertext_sha256.definition",
+                "device_sync_export_drafts",
+                "event_ciphertext_sha256",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.manifest_ciphertext_sha256.definition",
+                "device_sync_export_drafts",
+                "manifest_ciphertext_sha256",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.operation_ids_json.definition",
+                "device_sync_export_drafts",
+                "operation_ids_json",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.operation_fingerprint.definition",
+                "device_sync_export_drafts",
+                "operation_fingerprint",
+                "TEXT",
+                true,
+                None,
+            ),
+            (
+                "M63.column.export_drafts.state.definition",
+                "device_sync_export_drafts",
+                "state",
+                "TEXT",
+                true,
+                Some("'prepared'"),
+            ),
+            (
+                "M63.column.export_drafts.created_at.definition",
+                "device_sync_export_drafts",
+                "created_at",
+                "TEXT",
+                true,
+                Some("datetime('now')"),
+            ),
+            (
+                "M63.column.export_drafts.updated_at.definition",
+                "device_sync_export_drafts",
+                "updated_at",
+                "TEXT",
+                true,
+                Some("datetime('now')"),
+            ),
+            (
+                "M63.column.export_drafts.finalized_at.definition",
+                "device_sync_export_drafts",
+                "finalized_at",
+                "TEXT",
+                false,
+                None,
+            ),
+        ] {
+            if !column_definition_matches(
+                pool,
+                table,
+                column,
+                expected_type,
+                not_null,
+                default_value,
+            )
+            .await?
+            {
+                missing.push(MissingSentinel {
+                    migration_version: 63,
+                    code,
+                });
+            }
+        }
+
+        if !schema_object_sql_matches(
+            pool,
+            "table",
+            "device_sync_quarantine",
+            "device_sync_quarantine",
+            M63_QUARANTINE_TABLE_SQL,
+        )
+        .await?
+        {
+            missing.push(MissingSentinel {
+                migration_version: 63,
+                code: "M63.table.device_sync_quarantine.definition",
+            });
+        }
+
+        if !schema_object_sql_matches(
+            pool,
+            "table",
+            "device_sync_export_drafts",
+            "device_sync_export_drafts",
+            M63_EXPORT_DRAFTS_TABLE_SQL,
+        )
+        .await?
+        {
+            missing.push(MissingSentinel {
+                migration_version: 63,
+                code: "M63.table.device_sync_export_drafts.definition",
             });
         }
     }
@@ -443,6 +921,66 @@ async fn collect_missing_sentinels(
                 migration_version: version,
                 code,
             });
+        }
+    }
+
+    if applied_versions.contains(&63) {
+        for (code, table, index, unique, partial, expected_sql) in [
+            (
+                "M63.index.idx_device_sync_quarantine_active_key",
+                "device_sync_quarantine",
+                "idx_device_sync_quarantine_active_key",
+                true,
+                true,
+                M63_ACTIVE_INDEX_SQL,
+            ),
+            (
+                "M63.index.idx_device_sync_quarantine_group_status",
+                "device_sync_quarantine",
+                "idx_device_sync_quarantine_group_status",
+                false,
+                false,
+                M63_GROUP_STATUS_INDEX_SQL,
+            ),
+            (
+                "M63.index.idx_device_sync_outbox_capture_sequence",
+                "device_sync_outbox",
+                "idx_device_sync_outbox_capture_sequence",
+                true,
+                false,
+                M63_OUTBOX_CAPTURE_INDEX_SQL,
+            ),
+            (
+                "M63.index.idx_device_sync_outbox_pending_capture",
+                "device_sync_outbox",
+                "idx_device_sync_outbox_pending_capture",
+                false,
+                false,
+                M63_OUTBOX_PENDING_CAPTURE_INDEX_SQL,
+            ),
+            (
+                "M63.index.idx_device_sync_export_drafts_state",
+                "device_sync_export_drafts",
+                "idx_device_sync_export_drafts_state",
+                false,
+                false,
+                M63_EXPORT_DRAFTS_STATE_INDEX_SQL,
+            ),
+            (
+                "M63.index.idx_device_sync_export_drafts_one_prepared",
+                "device_sync_export_drafts",
+                "idx_device_sync_export_drafts_one_prepared",
+                true,
+                true,
+                M63_EXPORT_DRAFTS_ONE_PREPARED_INDEX_SQL,
+            ),
+        ] {
+            if !index_definition_matches(pool, table, index, unique, partial, expected_sql).await? {
+                missing.push(MissingSentinel {
+                    migration_version: 63,
+                    code,
+                });
+            }
         }
     }
 
@@ -529,15 +1067,6 @@ async fn collect_missing_sentinels(
             "CASCADE",
         ),
         (
-            58,
-            "M58.fk.quarantine.group_id",
-            "device_sync_quarantine",
-            "group_id",
-            "device_sync_groups",
-            "id",
-            "SET NULL",
-        ),
-        (
             61,
             "M61.fk.operation_audit.preview_id",
             "feishu_sync_operation_audits",
@@ -555,10 +1084,42 @@ async fn collect_missing_sentinels(
             "id",
             "CASCADE",
         ),
+        (
+            63,
+            "M63.fk.export_drafts.group_id",
+            "device_sync_export_drafts",
+            "group_id",
+            "device_sync_groups",
+            "id",
+            "CASCADE",
+        ),
     ] {
         if applied_versions.contains(&version)
             && !foreign_key_exists(pool, table, from, target_table, target_column, on_delete)
                 .await?
+        {
+            missing.push(MissingSentinel {
+                migration_version: version,
+                code,
+            });
+        }
+    }
+
+    if applied_versions.contains(&58) {
+        let (version, code) = if applied_versions.contains(&63) {
+            (63, "M63.fk.quarantine.group_id")
+        } else {
+            (58, "M58.fk.quarantine.group_id")
+        };
+        if !foreign_key_exists(
+            pool,
+            "device_sync_quarantine",
+            "group_id",
+            "device_sync_groups",
+            "id",
+            "SET NULL",
+        )
+        .await?
         {
             missing.push(MissingSentinel {
                 migration_version: version,
@@ -612,6 +1173,98 @@ async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<b
         }
     }
     Ok(false)
+}
+
+async fn column_definition_matches(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    expected_type: &str,
+    expected_not_null: bool,
+    expected_default: Option<&str>,
+) -> Result<bool, DbError> {
+    let query = format!("PRAGMA table_info(\"{table}\")");
+    let rows = sqlx::query(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(schema_metadata_unreadable)?;
+    for row in rows {
+        let name: String = row.try_get("name").map_err(schema_metadata_unreadable)?;
+        if name != column {
+            continue;
+        }
+        let data_type: String = row.try_get("type").map_err(schema_metadata_unreadable)?;
+        let not_null: i64 = row.try_get("notnull").map_err(schema_metadata_unreadable)?;
+        let default_value: Option<String> = row
+            .try_get("dflt_value")
+            .map_err(schema_metadata_unreadable)?;
+        return Ok(data_type.eq_ignore_ascii_case(expected_type)
+            && (not_null == 1) == expected_not_null
+            && default_value.as_deref().map(normalize_schema_sql)
+                == expected_default.map(normalize_schema_sql));
+    }
+    Ok(false)
+}
+
+async fn index_definition_matches(
+    pool: &SqlitePool,
+    table: &str,
+    index: &str,
+    expected_unique: bool,
+    expected_partial: bool,
+    expected_sql: &str,
+) -> Result<bool, DbError> {
+    let query = format!("PRAGMA index_list(\"{table}\")");
+    let rows = sqlx::query(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(schema_metadata_unreadable)?;
+    let mut flags_match = false;
+    for row in rows {
+        let row_name: String = row.try_get("name").map_err(schema_metadata_unreadable)?;
+        if row_name != index {
+            continue;
+        }
+        let unique: i64 = row.try_get("unique").map_err(schema_metadata_unreadable)?;
+        let partial: i64 = row.try_get("partial").map_err(schema_metadata_unreadable)?;
+        flags_match = (unique == 1) == expected_unique && (partial == 1) == expected_partial;
+        break;
+    }
+    if !flags_match {
+        return Ok(false);
+    }
+
+    schema_object_sql_matches(pool, "index", index, table, expected_sql).await
+}
+
+async fn schema_object_sql_matches(
+    pool: &SqlitePool,
+    object_type: &str,
+    name: &str,
+    table: &str,
+    expected_sql: &str,
+) -> Result<bool, DbError> {
+    let sql: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(sql, '') FROM sqlite_master \
+         WHERE type = ?1 AND name = ?2 AND tbl_name = ?3",
+    )
+    .bind(object_type)
+    .bind(name)
+    .bind(table)
+    .fetch_optional(pool)
+    .await
+    .map_err(schema_metadata_unreadable)?;
+    let Some(sql) = sql else {
+        return Ok(false);
+    };
+    Ok(normalize_schema_sql(&sql) == normalize_schema_sql(expected_sql))
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 async fn foreign_key_exists(
