@@ -5,9 +5,9 @@
 //! read-write/WAL pool can mutate migration history, schema or business rows.
 
 use super::{
-    init_pool, DbError, DbMigrationCompatibilityError, DB_MIGRATION_APPLIED_VERSION_UNKNOWN,
-    DB_MIGRATION_CHECKSUM_UNKNOWN, DB_MIGRATION_LINEAGE_INCOMPATIBLE,
-    DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
+    init_pool, install_init_pool_after_preflight_hook, DbError, DbMigrationCompatibilityError,
+    DB_MIGRATION_APPLIED_VERSION_UNKNOWN, DB_MIGRATION_CHECKSUM_UNKNOWN,
+    DB_MIGRATION_LINEAGE_INCOMPATIBLE, DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
 };
 use sha2::{Digest, Sha384};
 use sqlx::migrate::Migrator;
@@ -29,6 +29,18 @@ ON device_sync_export_drafts(group_id)
 WHERE state='prepared';
 "#;
 const RC_MIGRATION_CHILD_DATABASE_ENV: &str = "CASEBOARD_RC_MIGRATION_CHILD_DATABASE";
+const COMPAT36_MIGRATION_CHILD_DATABASE_ENV: &str = "CASEBOARD_COMPAT36_MIGRATION_CHILD_DATABASE";
+const LEGACY_MIGRATION_36_CHECKSUM_HEX: &str =
+    "84F859102447ACB5DBEE9E179A0AE3493D7ED2483B28A447BDF0F4F9360CC2399FC1F7AA08CBA2F0BE50F444F4841480";
+const LEGACY_MIGRATION_36_TABLE_SQL: &str = r#"
+CREATE TABLE feishu_reminder_runs (
+    sent_date TEXT PRIMARY KEY NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    item_count INTEGER NOT NULL DEFAULT 0
+)
+"#;
+
+type RawMigrationHistoryRow = (i64, String, String, i64, Vec<u8>, i64);
 
 #[derive(Debug, PartialEq, Eq)]
 struct DatabaseFingerprint {
@@ -70,6 +82,17 @@ struct LegacyQuarantineRow {
 
 fn synthetic_divergent_checksum() -> Vec<u8> {
     Sha384::digest(SYNTHETIC_DIVERGENT_SQL).to_vec()
+}
+
+fn legacy_migration_36_checksum() -> Vec<u8> {
+    LEGACY_MIGRATION_36_CHECKSUM_HEX
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).expect("legacy checksum is ASCII");
+            u8::from_str_radix(text, 16).expect("legacy checksum is valid hex")
+        })
+        .collect()
 }
 
 async fn migrated_fixture(label: &str) -> (TempDir, PathBuf) {
@@ -189,6 +212,25 @@ fn run_rc_production_init_child(database: &Path) {
     assert!(
         output.status.success(),
         "production-init child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_compat36_production_init_child(database: &Path) {
+    let output =
+        Command::new(std::env::current_exe().expect("resolve current Rust test executable"))
+            .arg("db::migration_lineage_tests::compat36_production_init_child")
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(COMPAT36_MIGRATION_CHILD_DATABASE_ENV, database)
+            .output()
+            .expect("run version-36 production init in an isolated application-process fixture");
+    assert!(
+        output.status.success(),
+        "version-36 production-init child failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -358,6 +400,34 @@ async fn assert_m63_sentinel_failure_without_write(database: &Path, expected_cod
     assert_failure_fingerprints_unchanged(database, before_physical, before).await;
 }
 
+async fn assert_compat36_failure_without_write(
+    database: &Path,
+    expected_code: &str,
+    expected_version: i64,
+    expected_reason: &str,
+    expected_sentinel: Option<&str>,
+) {
+    let before_physical = physical_fingerprint(database);
+    let before = database_fingerprint(database).await;
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("malformed legacy migration-36 fixture must fail closed");
+    let compatibility = expect_compatibility(&error, expected_code);
+    assert_eq!(compatibility.version, Some(expected_version));
+    assert_eq!(compatibility.reason, expected_reason);
+    if let Some(sentinel) = expected_sentinel {
+        assert!(
+            compatibility
+                .missing_sentinels
+                .iter()
+                .any(|code| code == sentinel),
+            "expected sentinel {sentinel}, got {:?}",
+            compatibility.missing_sentinels
+        );
+    }
+    assert_failure_fingerprints_unchanged(database, before_physical, before).await;
+}
+
 async fn replace_export_drafts_table_definition(pool: &SqlitePool, from: &str, to: &str) {
     let original: String = sqlx::query_scalar(
         "SELECT sql FROM sqlite_master \
@@ -380,6 +450,107 @@ async fn replace_export_drafts_table_definition(pool: &SqlitePool, from: &str, t
         .execute(pool)
         .await
         .expect("restore correctly named export-drafts indexes");
+}
+
+async fn legacy_migration_36_fixture(label: &str) -> (TempDir, PathBuf) {
+    let directory = tempfile::Builder::new()
+        .prefix(&format!("caseboard-v083-compat36-{label}-"))
+        .tempdir()
+        .expect("create isolated legacy migration-36 fixture directory");
+    let staging_database = directory.path().join("staging.db");
+    let database = directory.path().join("caseboard.db");
+    std::fs::File::create(&staging_database).expect("create legacy migration-36 staging file");
+
+    let embedded = sqlx::migrate!("./migrations");
+    let pre_0063 = Migrator {
+        migrations: Cow::Owned(
+            embedded
+                .iter()
+                .filter(|migration| migration.version <= 62)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    let fixture = fixture_pool(&staging_database, true).await;
+    pre_0063
+        .run(&fixture)
+        .await
+        .expect("apply current embedded migrations through 0062");
+    sqlx::raw_sql(LEGACY_MIGRATION_36_TABLE_SQL)
+        .execute(&fixture)
+        .await
+        .expect("install audited legacy migration-36 table shape");
+    let audited_table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type='table' AND name='feishu_reminder_runs'",
+    )
+    .fetch_one(&fixture)
+    .await
+    .expect("verify audited legacy migration-36 table fixture was created");
+    assert_eq!(audited_table_count, 1);
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations
+         (version, description, installed_on, success, checksum, execution_time)
+         VALUES (36, 'feishu reminder runs', '2026-08-08T08:36:00Z', 1, ?1, 36)",
+    )
+    .bind(legacy_migration_36_checksum())
+    .execute(&fixture)
+    .await
+    .expect("install audited legacy migration-36 history tuple");
+    sqlx::query(
+        "INSERT INTO cases (id,name,case_type,source_folder,legal_domain,domain_source)
+         VALUES ('compat36-marker','Compatibility 36 marker','诉讼',
+                 'synthetic://compat36','civil','manual')",
+    )
+    .execute(&fixture)
+    .await
+    .expect("insert de-identified compatibility marker");
+    sqlx::query("VACUUM INTO ?1")
+        .bind(database.to_str().expect("UTF-8 fixture path"))
+        .execute(&fixture)
+        .await
+        .expect("freeze a main-only legacy migration-36 fixture");
+    fixture.close().await;
+    assert_sidecars_absent(&database);
+    (directory, database)
+}
+
+async fn replace_legacy_migration_36_table(pool: &SqlitePool, replacement_sql: &str) {
+    sqlx::query("DROP TABLE feishu_reminder_runs")
+        .execute(pool)
+        .await
+        .expect("drop audited legacy migration-36 table");
+    sqlx::raw_sql(replacement_sql)
+        .execute(pool)
+        .await
+        .expect("install synthetic legacy migration-36 schema variant");
+    let variant_table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type='table' AND name='feishu_reminder_runs'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("verify synthetic legacy migration-36 schema variant was created");
+    assert_eq!(variant_table_count, 1);
+}
+
+async fn assert_legacy_migration_36_schema_variant_rejected(label: &str, replacement_sql: &str) {
+    let (_directory, database) = legacy_migration_36_fixture(label).await;
+    let pool = fixture_pool(&database, true).await;
+    replace_legacy_migration_36_table(&pool, replacement_sql).await;
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
+        36,
+        "applied_migration_schema_missing",
+        Some("M36.table.feishu_reminder_runs.exact_definition"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -544,6 +715,323 @@ fn rc_local_production_init_child() {
             .is_empty());
         pool.close().await;
     });
+}
+
+#[tokio::test]
+async fn audited_legacy_migration_36_upgrades_through_production_init_and_preserves_history() {
+    let (_directory, database) = legacy_migration_36_fixture("production-upgrade").await;
+    let before_pool = fixture_pool(&database, true).await;
+    let before_legacy_row: RawMigrationHistoryRow = sqlx::query_as(
+        "SELECT version, description, installed_on, success, checksum, execution_time
+         FROM _sqlx_migrations WHERE version=36",
+    )
+    .fetch_one(&before_pool)
+    .await
+    .expect("save complete raw legacy migration-36 row before production init");
+    before_pool.close().await;
+
+    run_compat36_production_init_child(&database);
+    assert_sidecars_absent(&database);
+
+    let pool = fixture_pool(&database, true).await;
+    let state: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*), max(version),
+                sum(CASE WHEN version=36 THEN 1 ELSE 0 END),
+                sum(CASE WHEN version=63 THEN 1 ELSE 0 END)
+         FROM _sqlx_migrations WHERE success=1",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect upgraded compatibility lineage");
+    assert_eq!(state, (63, 63, 1, 1));
+    let after_legacy_row: RawMigrationHistoryRow = sqlx::query_as(
+        "SELECT version, description, installed_on, success, checksum, execution_time
+         FROM _sqlx_migrations WHERE version=36",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read preserved legacy migration-36 row");
+    assert_eq!(before_legacy_row.0, 36);
+    assert_eq!(before_legacy_row.1, "feishu reminder runs");
+    assert_eq!(before_legacy_row.2, "2026-08-08T08:36:00Z");
+    assert_eq!(before_legacy_row.3, 1);
+    assert_eq!(before_legacy_row.4, legacy_migration_36_checksum());
+    assert_eq!(before_legacy_row.5, 36);
+    assert_eq!(after_legacy_row, before_legacy_row);
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn authorized_preflight_then_missing_v36_fails_without_forging_history() {
+    let (_authorized_directory, database) =
+        legacy_migration_36_fixture("authorized-before-replacement").await;
+    let (_replacement_directory, replacement_database) =
+        migrated_fixture("replacement-without-v36").await;
+    let replacement_bytes =
+        std::fs::read(&replacement_database).expect("read current-lineage replacement fixture");
+
+    install_init_pool_after_preflight_hook(database.clone(), move |target| {
+        std::fs::copy(&replacement_database, target)
+            .expect("replace target after authorized immutable preflight");
+        assert_eq!(
+            std::fs::read(target).expect("read target immediately after replacement"),
+            replacement_bytes,
+            "test hook must expose the current lineage without applied version 36"
+        );
+    });
+
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("unconditionally invalid synthetic version-36 SQL must fail");
+    match error {
+        DbError::Migrate(message) => assert!(
+            message.to_ascii_lowercase().contains("syntax"),
+            "expected unconditional SQLite syntax failure, got: {message}"
+        ),
+        other => panic!("expected migration syntax failure, got: {other}"),
+    }
+
+    let pool = fixture_pool(&database, true).await;
+    let migration_state: (i64, i64) = sqlx::query_as(
+        "SELECT SUM(CASE WHEN version=36 THEN 1 ELSE 0 END), MAX(version)
+         FROM _sqlx_migrations",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("inspect migration history after unconditional placeholder failure");
+    assert_eq!(migration_state, (0, 63));
+    pool.close().await;
+}
+
+#[test]
+#[ignore = "invoked by the migration-36 parent fixture in a fresh process"]
+fn compat36_production_init_child() {
+    let database = std::env::var_os(COMPAT36_MIGRATION_CHILD_DATABASE_ENV)
+        .map(PathBuf::from)
+        .expect("migration-36 child database path must be provided");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create migration-36 child runtime");
+    runtime.block_on(async {
+        let pool = init_pool(database.to_str().expect("UTF-8 fixture path"))
+            .await
+            .expect("production init upgrades audited legacy migration-36 lineage");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT name FROM cases WHERE id='compat36-marker'",)
+                .fetch_one(&pool)
+                .await
+                .expect("read preserved compatibility marker"),
+            "Compatibility 36 marker"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("PRAGMA quick_check")
+                .fetch_one(&pool)
+                .await
+                .expect("run compatibility quick_check"),
+            "ok"
+        );
+        assert!(sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&pool)
+            .await
+            .expect("run compatibility foreign_key_check")
+            .is_empty());
+        pool.close().await;
+    });
+}
+
+#[tokio::test]
+async fn legacy_migration_36_wrong_checksum_fails_before_physical_write() {
+    let (_directory, database) = legacy_migration_36_fixture("wrong-checksum").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("UPDATE _sqlx_migrations SET checksum=?1 WHERE version=36")
+        .bind(synthetic_divergent_checksum())
+        .execute(&pool)
+        .await
+        .expect("replace legacy migration-36 checksum");
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_CHECKSUM_UNKNOWN,
+        36,
+        "checksum_not_allowlisted",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_wrong_description_fails_before_physical_write() {
+    let (_directory, database) = legacy_migration_36_fixture("wrong-description").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("UPDATE _sqlx_migrations SET description='wrong description' WHERE version=36")
+        .execute(&pool)
+        .await
+        .expect("replace legacy migration-36 description");
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_APPLIED_VERSION_UNKNOWN,
+        36,
+        "applied_version_not_embedded",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_noncanonical_success_fails_before_physical_write() {
+    let (_directory, database) = legacy_migration_36_fixture("noncanonical-success").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("UPDATE _sqlx_migrations SET success=2 WHERE version=36")
+        .execute(&pool)
+        .await
+        .expect("replace legacy migration-36 success flag");
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_LINEAGE_INCOMPATIBLE,
+        36,
+        "failed_history_row",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_missing_table_fails_before_physical_write() {
+    let (_directory, database) = legacy_migration_36_fixture("missing-table").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("DROP TABLE feishu_reminder_runs")
+        .execute(&pool)
+        .await
+        .expect("remove legacy migration-36 table");
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
+        36,
+        "applied_migration_schema_missing",
+        Some("M36.table.feishu_reminder_runs.exact_definition"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_wrong_schema_fails_before_physical_write() {
+    let (_directory, database) = legacy_migration_36_fixture("wrong-schema").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("ALTER TABLE feishu_reminder_runs ADD COLUMN unexpected TEXT")
+        .execute(&pool)
+        .await
+        .expect("add forbidden legacy migration-36 column");
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
+        36,
+        "applied_migration_schema_missing",
+        Some("M36.table.feishu_reminder_runs.exact_definition"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_without_rowid_variant_fails_before_physical_write() {
+    assert_legacy_migration_36_schema_variant_rejected(
+        "without-rowid",
+        r#"CREATE TABLE feishu_reminder_runs (
+                sent_date TEXT PRIMARY KEY NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+                item_count INTEGER NOT NULL DEFAULT 0
+            ) WITHOUT ROWID"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_strict_variant_fails_before_physical_write() {
+    assert_legacy_migration_36_schema_variant_rejected(
+        "strict",
+        r#"CREATE TABLE feishu_reminder_runs (
+                sent_date TEXT PRIMARY KEY NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+                item_count INTEGER NOT NULL DEFAULT 0
+            ) STRICT"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_extra_check_variant_fails_before_physical_write() {
+    assert_legacy_migration_36_schema_variant_rejected(
+        "extra-check",
+        r#"CREATE TABLE feishu_reminder_runs (
+                sent_date TEXT PRIMARY KEY NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+                item_count INTEGER NOT NULL DEFAULT 0,
+                CHECK (item_count >= 0)
+            )"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_extra_unique_variant_fails_before_physical_write() {
+    assert_legacy_migration_36_schema_variant_rejected(
+        "extra-unique",
+        r#"CREATE TABLE feishu_reminder_runs (
+                sent_date TEXT PRIMARY KEY NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+                item_count INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (sent_at)
+            )"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_nocase_collation_variant_fails_before_physical_write() {
+    assert_legacy_migration_36_schema_variant_rejected(
+        "nocase-collation",
+        r#"CREATE TABLE feishu_reminder_runs (
+                sent_date TEXT COLLATE NOCASE PRIMARY KEY NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+                item_count INTEGER NOT NULL DEFAULT 0
+            )"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn legacy_migration_36_with_extra_unknown_version_fails_before_physical_write() {
+    let (_directory, database) = legacy_migration_36_fixture("extra-unknown-version").await;
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations
+         (version, description, installed_on, success, checksum, execution_time)
+         VALUES (?1, 'synthetic unknown', datetime('now'), 1, ?2, 0)",
+    )
+    .bind(UNKNOWN_APPLIED_VERSION)
+    .bind(synthetic_divergent_checksum())
+    .execute(&pool)
+    .await
+    .expect("insert extra unknown migration beside legacy version 36");
+    pool.close().await;
+
+    assert_compat36_failure_without_write(
+        &database,
+        DB_MIGRATION_APPLIED_VERSION_UNKNOWN,
+        UNKNOWN_APPLIED_VERSION,
+        "applied_version_not_embedded",
+        None,
+    )
+    .await;
 }
 
 #[tokio::test]

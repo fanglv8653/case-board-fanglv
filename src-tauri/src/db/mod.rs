@@ -11,15 +11,68 @@
 //!
 //! 测试模式可以传 `sqlite::memory:` 跑内存库,不污染本机文件系统。
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 mod migration_safety;
+
+#[cfg(test)]
+type InitPoolAfterPreflightAction = Box<dyn FnOnce(&Path) + Send + 'static>;
+
+#[cfg(test)]
+struct InitPoolAfterPreflightHook {
+    database_path: PathBuf,
+    action: InitPoolAfterPreflightAction,
+}
+
+#[cfg(test)]
+static INIT_POOL_AFTER_PREFLIGHT_HOOK: std::sync::Mutex<Option<InitPoolAfterPreflightHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn install_init_pool_after_preflight_hook(
+    database_path: PathBuf,
+    action: impl FnOnce(&Path) + Send + 'static,
+) {
+    let mut slot = INIT_POOL_AFTER_PREFLIGHT_HOOK
+        .lock()
+        .expect("init_pool after-preflight hook mutex poisoned");
+    assert!(
+        slot.is_none(),
+        "an init_pool after-preflight hook is already installed"
+    );
+    *slot = Some(InitPoolAfterPreflightHook {
+        database_path,
+        action: Box::new(action),
+    });
+}
+
+#[cfg(test)]
+fn run_init_pool_after_preflight_hook(database_path: &Path) {
+    let hook = {
+        let mut slot = INIT_POOL_AFTER_PREFLIGHT_HOOK
+            .lock()
+            .expect("init_pool after-preflight hook mutex poisoned");
+        if slot
+            .as_ref()
+            .is_some_and(|hook| hook.database_path.as_path() == database_path)
+        {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        (hook.action)(database_path);
+    }
+}
 
 pub mod bookmarks;
 pub mod calendar_events;
@@ -231,8 +284,15 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     // fail-closed boundary: incompatible lineage must not reach a connection
     // option or migration step that can write the database header, WAL, schema,
     // migration history or business tables.
+    let migration_preflight = if is_existing_file {
+        migration_safety::preflight_existing_database(Path::new(db_path)).await?
+    } else {
+        migration_safety::MigrationPreflight::default()
+    };
+
+    #[cfg(test)]
     if is_existing_file {
-        migration_safety::preflight_existing_database(Path::new(db_path)).await?;
+        run_init_pool_after_preflight_hook(Path::new(db_path));
     }
 
     let mut options = SqliteConnectOptions::new()
@@ -249,18 +309,49 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     // migration 跑完表只在那一个连接里,其他连接看不到
     let max_connections = if is_memory { 1 } else { 5 };
 
+    if !is_memory {
+        // Close the preflight-to-write sidecar window as far as this process
+        // can without claiming an OS-wide SQLite lock. A sidecar created after
+        // immutable preflight must be refused before the read-write pool opens.
+        migration_safety::ensure_no_wal_sidecars(Path::new(db_path))?;
+    }
+
     let pool = SqlitePoolOptions::new()
         .max_connections(max_connections)
         .connect_with(options)
         .await
         .map_err(|e| DbError::Connect(e.to_string()))?;
 
-    // Unknown applied versions have already been rejected by the read-only
-    // preflight. Keep sqlx's default ignore_missing=false as a second guard.
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| DbError::Migrate(e.to_string()))?;
+    let embedded_migrator = sqlx::migrate!("./migrations");
+    if migration_preflight.allow_missing_legacy_migration_36 {
+        // Add only the fixed compatibility metadata. `ignore_missing` remains
+        // false, so SQLx still rejects every unknown applied version other than
+        // the explicitly represented version 36. Its placeholder SQL is
+        // an unconditional SQLite syntax error if a different file without
+        // applied v36 is substituted after immutable preflight.
+        let mut migrations: Vec<_> = embedded_migrator.iter().cloned().collect();
+        let legacy_migration = migration_safety::legacy_migration_36_metadata();
+        let insertion_index =
+            migrations.partition_point(|migration| migration.version < legacy_migration.version);
+        migrations.insert(insertion_index, legacy_migration);
+        let compatible_migrator = Migrator {
+            migrations: Cow::Owned(migrations),
+            ignore_missing: false,
+            locking: embedded_migrator.locking,
+            no_tx: embedded_migrator.no_tx,
+        };
+        compatible_migrator
+            .run(&pool)
+            .await
+            .map_err(|e| DbError::Migrate(e.to_string()))?;
+    } else {
+        // Unknown applied versions have already been rejected by the read-only
+        // preflight. Keep sqlx's default ignore_missing=false as a second guard.
+        embedded_migrator
+            .run(&pool)
+            .await
+            .map_err(|e| DbError::Migrate(e.to_string()))?;
+    }
 
     // A process cannot safely prove that previously-running external work is
     // still alive. Move it to an explicit user-reviewed recovery state in one

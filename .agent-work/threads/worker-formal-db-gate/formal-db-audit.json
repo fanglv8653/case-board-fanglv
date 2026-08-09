@@ -1,0 +1,1501 @@
+{
+  "snapshot_database": "D:\\CodexWorkspace\\008案件看板应用\\case-board-v0.8.3-dev\\.agent-work\\threads\\worker-formal-db-gate\\formal-db-snapshot-20260809\\caseboard.db",
+  "sqlite": {
+    "sqlite_version": "3.53.1",
+    "journal_mode": "wal",
+    "page_size": 4096,
+    "page_count": 135931,
+    "freelist_count": 124722,
+    "quick_check": [
+      "ok"
+    ],
+    "foreign_key_violation_count": 0
+  },
+  "migration_summary": {
+    "count": 62,
+    "max_version": 62,
+    "failed_count": 0,
+    "checksum_mismatch_versions": [
+      36
+    ],
+    "unknown_applied_versions": [
+      36
+    ],
+    "migration_history_sha256": "3B0153F793EECD5BD0E7D1F2E901679179F2F929016131002865B5A4A0F1EBED"
+  },
+  "migrations": [
+    {
+      "version": 1,
+      "description": "initial",
+      "success": true,
+      "stored_checksum_sha384": "EB7E24C5E33D82E530D2F459A515E0C91D1BF1AFABBC5643063E08EBA52730A5136BE83C3DC38E570A8620D97FCCE8A8",
+      "current_file": "0001_initial.sql",
+      "current_checksum_sha384": "EB7E24C5E33D82E530D2F459A515E0C91D1BF1AFABBC5643063E08EBA52730A5136BE83C3DC38E570A8620D97FCCE8A8",
+      "checksum_matches_current": true,
+      "execution_time": 2691300
+    },
+    {
+      "version": 2,
+      "description": "aggregation and milestones",
+      "success": true,
+      "stored_checksum_sha384": "DEC89F34BA36CBC45D999FF7E87DCDCB1F71788FD7DCBA7B71B7CFB267E0207689AE31518D5DB6AC18642B04948CC029",
+      "current_file": "0002_aggregation_and_milestones.sql",
+      "current_checksum_sha384": "DEC89F34BA36CBC45D999FF7E87DCDCB1F71788FD7DCBA7B71B7CFB267E0207689AE31518D5DB6AC18642B04948CC029",
+      "checksum_matches_current": true,
+      "execution_time": 5540800
+    },
+    {
+      "version": 3,
+      "description": "supporting tables",
+      "success": true,
+      "stored_checksum_sha384": "811CAF789913DDBEC13FFD0DEB5CEF3ADC02392CA9799A5783EA7BA88B0DBF8B088A9A0F8857AB0987631A2193258E61",
+      "current_file": "0003_supporting_tables.sql",
+      "current_checksum_sha384": "811CAF789913DDBEC13FFD0DEB5CEF3ADC02392CA9799A5783EA7BA88B0DBF8B088A9A0F8857AB0987631A2193258E61",
+      "checksum_matches_current": true,
+      "execution_time": 2362400
+    },
+    {
+      "version": 4,
+      "description": "fts search",
+      "success": true,
+      "stored_checksum_sha384": "2C3BC6B595B810EE1616E0736810876285C6C4C6EFB875F5C5964FA597D245F1E485619AB34D63045D6D18C5D37B6124",
+      "current_file": "0004_fts_search.sql",
+      "current_checksum_sha384": "2C3BC6B595B810EE1616E0736810876285C6C4C6EFB875F5C5964FA597D245F1E485619AB34D63045D6D18C5D37B6124",
+      "checksum_matches_current": true,
+      "execution_time": 2727400
+    },
+    {
+      "version": 5,
+      "description": "documents cache and softdelete",
+      "success": true,
+      "stored_checksum_sha384": "14969A22D247795BA0F0E1B0330CC844BB3ED5F2410B6F730E1E96B104CDD02E88AD30CBFFE49542F3388E4A72BA98D6",
+      "current_file": "0005_documents_cache_and_softdelete.sql",
+      "current_checksum_sha384": "14969A22D247795BA0F0E1B0330CC844BB3ED5F2410B6F730E1E96B104CDD02E88AD30CBFFE49542F3388E4A72BA98D6",
+      "checksum_matches_current": true,
+      "execution_time": 2382100
+    },
+    {
+      "version": 6,
+      "description": "workflow status",
+      "success": true,
+      "stored_checksum_sha384": "A7A36656A0C5D7C5804D7FCE33076079616F8921F2B123A6B793F44F1C19557FBF2D6AD6C1BA164B45857E154F74E7FF",
+      "current_file": "0006_workflow_status.sql",
+      "current_checksum_sha384": "A7A36656A0C5D7C5804D7FCE33076079616F8921F2B123A6B793F44F1C19557FBF2D6AD6C1BA164B45857E154F74E7FF",
+      "checksum_matches_current": true,
+      "execution_time": 1826000
+    },
+    {
+      "version": 7,
+      "description": "deepseek balance",
+      "success": true,
+      "stored_checksum_sha384": "46C337B48DE80DF35B16786C878F9B085135C753E9A309A979B5C51C14FE869BB40B427A2E46A56BB68609AA4A148E45",
+      "current_file": "0007_deepseek_balance.sql",
+      "current_checksum_sha384": "46C337B48DE80DF35B16786C878F9B085135C753E9A309A979B5C51C14FE869BB40B427A2E46A56BB68609AA4A148E45",
+      "checksum_matches_current": true,
+      "execution_time": 1517600
+    },
+    {
+      "version": 8,
+      "description": "llm global extract",
+      "success": true,
+      "stored_checksum_sha384": "FAF7ECF65070FBCDEC31321B920CB86A7AA5C44E5DFBFAB48B814F653F08BA9D5C5D91173CCD19114A68CF6E1E6B7D93",
+      "current_file": "0008_llm_global_extract.sql",
+      "current_checksum_sha384": "FAF7ECF65070FBCDEC31321B920CB86A7AA5C44E5DFBFAB48B814F653F08BA9D5C5D91173CCD19114A68CF6E1E6B7D93",
+      "checksum_matches_current": true,
+      "execution_time": 3818500
+    },
+    {
+      "version": 9,
+      "description": "deepseek day start balance",
+      "success": true,
+      "stored_checksum_sha384": "B6B2297A646FC4A7DD2E804599B4338F9DACCE714F1703324BA4A111BE6339F2D06813F8183A8904A1C10A737B8E3DB8",
+      "current_file": "0009_deepseek_day_start_balance.sql",
+      "current_checksum_sha384": "B6B2297A646FC4A7DD2E804599B4338F9DACCE714F1703324BA4A111BE6339F2D06813F8183A8904A1C10A737B8E3DB8",
+      "checksum_matches_current": true,
+      "execution_time": 2164600
+    },
+    {
+      "version": 10,
+      "description": "yuandian assessment",
+      "success": true,
+      "stored_checksum_sha384": "6991483B074056B8AF2D4CFC1C68B21389C3C6474341C2A3A053E99896135F20ADA6F5B599E39E72EC90B2236F504656",
+      "current_file": "0010_yuandian_assessment.sql",
+      "current_checksum_sha384": "6991483B074056B8AF2D4CFC1C68B21389C3C6474341C2A3A053E99896135F20ADA6F5B599E39E72EC90B2236F504656",
+      "checksum_matches_current": true,
+      "execution_time": 2145900
+    },
+    {
+      "version": 11,
+      "description": "yuandian deepdive",
+      "success": true,
+      "stored_checksum_sha384": "332CA90A57C1B936B32092F8D1702227C375BC3D90770C200477DAF7E1739204690918FB8286B21F333F3D4AE63739CE",
+      "current_file": "0011_yuandian_deepdive.sql",
+      "current_checksum_sha384": "332CA90A57C1B936B32092F8D1702227C375BC3D90770C200477DAF7E1739204690918FB8286B21F333F3D4AE63739CE",
+      "checksum_matches_current": true,
+      "execution_time": 2226800
+    },
+    {
+      "version": 12,
+      "description": "case payments",
+      "success": true,
+      "stored_checksum_sha384": "933F6D6E91F3C966B3C0B1C28F05907696F33F6674F05F0A12CCEAC08B56E8D8EA95E4D7DCB99AD3B93977E2E0D3983D",
+      "current_file": "0012_case_payments.sql",
+      "current_checksum_sha384": "933F6D6E91F3C966B3C0B1C28F05907696F33F6674F05F0A12CCEAC08B56E8D8EA95E4D7DCB99AD3B93977E2E0D3983D",
+      "checksum_matches_current": true,
+      "execution_time": 2105600
+    },
+    {
+      "version": 13,
+      "description": "full report",
+      "success": true,
+      "stored_checksum_sha384": "BA0D7118BF69FD5992E83E1B67505F5A91DE2A4D13BF075F79338FBF473AD15B96CF4B10FFB5F4B4E8720FB5D4A65CBA",
+      "current_file": "0013_full_report.sql",
+      "current_checksum_sha384": "BA0D7118BF69FD5992E83E1B67505F5A91DE2A4D13BF075F79338FBF473AD15B96CF4B10FFB5F4B4E8720FB5D4A65CBA",
+      "checksum_matches_current": true,
+      "execution_time": 2191300
+    },
+    {
+      "version": 14,
+      "description": "documents last error",
+      "success": true,
+      "stored_checksum_sha384": "27414CD5B03A84F3686A83802A9B34E4014543A20A9770BC3BAE320B59439DD689011D6BCF26DD25AF81A754F14F4910",
+      "current_file": "0014_documents_last_error.sql",
+      "current_checksum_sha384": "27414CD5B03A84F3686A83802A9B34E4014543A20A9770BC3BAE320B59439DD689011D6BCF26DD25AF81A754F14F4910",
+      "checksum_matches_current": true,
+      "execution_time": 2107900
+    },
+    {
+      "version": 15,
+      "description": "extraction metrics",
+      "success": true,
+      "stored_checksum_sha384": "1D47F0447B1F9FB5234866B028ED4CFEF5C6F3AC081812E007592C2682D74A7FFFA874A1230B5939C52C4748FEA929C6",
+      "current_file": "0015_extraction_metrics.sql",
+      "current_checksum_sha384": "1D47F0447B1F9FB5234866B028ED4CFEF5C6F3AC081812E007592C2682D74A7FFFA874A1230B5939C52C4748FEA929C6",
+      "checksum_matches_current": true,
+      "execution_time": 2689800
+    },
+    {
+      "version": 16,
+      "description": "case user overrides",
+      "success": true,
+      "stored_checksum_sha384": "5206CC110CF455E1A029F599EBAFD9DD76F0998F3D26068499F4008D49CA66E63922EE3EEAFEDBDBF05E09CBEE201D5B",
+      "current_file": "0016_case_user_overrides.sql",
+      "current_checksum_sha384": "5206CC110CF455E1A029F599EBAFD9DD76F0998F3D26068499F4008D49CA66E63922EE3EEAFEDBDBF05E09CBEE201D5B",
+      "checksum_matches_current": true,
+      "execution_time": 3848600
+    },
+    {
+      "version": 17,
+      "description": "chat messages",
+      "success": true,
+      "stored_checksum_sha384": "6057D7FB873CB03FB641E86B5AF621B7B9E89E3A3EB4CC95B195789CB5F1E868DBB5D88D8D0C5A1A16335A1F5C2B8874",
+      "current_file": "0017_chat_messages.sql",
+      "current_checksum_sha384": "6057D7FB873CB03FB641E86B5AF621B7B9E89E3A3EB4CC95B195789CB5F1E868DBB5D88D8D0C5A1A16335A1F5C2B8874",
+      "checksum_matches_current": true,
+      "execution_time": 2619300
+    },
+    {
+      "version": 18,
+      "description": "chat v2 attach tools kb",
+      "success": true,
+      "stored_checksum_sha384": "8A00AE040D882C7E813630EEB54A8EDE8EEA258678E4D3AAE59C9F4666267392CBBAC5D789B07DFD0F7651A54D865153",
+      "current_file": "0018_chat_v2_attach_tools_kb.sql",
+      "current_checksum_sha384": "8A00AE040D882C7E813630EEB54A8EDE8EEA258678E4D3AAE59C9F4666267392CBBAC5D789B07DFD0F7651A54D865153",
+      "checksum_matches_current": true,
+      "execution_time": 4567900
+    },
+    {
+      "version": 19,
+      "description": "documents multi case",
+      "success": true,
+      "stored_checksum_sha384": "35E7E93477F962CF9D1221D64BE21BBAE94F6C5BD11A9419FD5EE6326F84DB21B797D223A96C25E0C178828CF7909D1B",
+      "current_file": "0019_documents_multi_case.sql",
+      "current_checksum_sha384": "35E7E93477F962CF9D1221D64BE21BBAE94F6C5BD11A9419FD5EE6326F84DB21B797D223A96C25E0C178828CF7909D1B",
+      "checksum_matches_current": true,
+      "execution_time": 3017400
+    },
+    {
+      "version": 20,
+      "description": "team sync",
+      "success": true,
+      "stored_checksum_sha384": "D46D075F29BC3D6650A5FB003E736270236393C045442CBB9B209B0264AD8D104D154CE47757F6E6261A207C29FDA343",
+      "current_file": "0020_team_sync.sql",
+      "current_checksum_sha384": "D46D075F29BC3D6650A5FB003E736270236393C045442CBB9B209B0264AD8D104D154CE47757F6E6261A207C29FDA343",
+      "checksum_matches_current": true,
+      "execution_time": 3901100
+    },
+    {
+      "version": 21,
+      "description": "team edits",
+      "success": true,
+      "stored_checksum_sha384": "EF132F01D1EB2169B9E3236C7A640AD67E4A977612C6AA19485A81721CCC8FF66E876A54C947E1BBB6FA639914B6C8D0",
+      "current_file": "0021_team_edits.sql",
+      "current_checksum_sha384": "EF132F01D1EB2169B9E3236C7A640AD67E4A977612C6AA19485A81721CCC8FF66E876A54C947E1BBB6FA639914B6C8D0",
+      "checksum_matches_current": true,
+      "execution_time": 2749800
+    },
+    {
+      "version": 22,
+      "description": "case instances",
+      "success": true,
+      "stored_checksum_sha384": "C914889EFD4491AC8AF4DD2F20CC954DE4A20D9F3BCBFDD14BF566C9E639653773034EAEEF0ED066EEA7E66125FA2642",
+      "current_file": "0022_case_instances.sql",
+      "current_checksum_sha384": "C914889EFD4491AC8AF4DD2F20CC954DE4A20D9F3BCBFDD14BF566C9E639653773034EAEEF0ED066EEA7E66125FA2642",
+      "checksum_matches_current": true,
+      "execution_time": 2726700
+    },
+    {
+      "version": 23,
+      "description": "case our side",
+      "success": true,
+      "stored_checksum_sha384": "6335D9C554E1BB352C689058DFEFA90450F139D233FDB8FEFEBF2BF184A7C248D0A1ED8D1694EF3F0028D3DB0E3D22CF",
+      "current_file": "0023_case_our_side.sql",
+      "current_checksum_sha384": "6335D9C554E1BB352C689058DFEFA90450F139D233FDB8FEFEBF2BF184A7C248D0A1ED8D1694EF3F0028D3DB0E3D22CF",
+      "checksum_matches_current": true,
+      "execution_time": 4102800
+    },
+    {
+      "version": 24,
+      "description": "case todos",
+      "success": true,
+      "stored_checksum_sha384": "85BCD80FF642AB712C522C7D236262CFB36AB057071CC3E3688211EAECDF8EB0752D42F641405D176C37C0AC8E40CC99",
+      "current_file": "0024_case_todos.sql",
+      "current_checksum_sha384": "85BCD80FF642AB712C522C7D236262CFB36AB057071CC3E3688211EAECDF8EB0752D42F641405D176C37C0AC8E40CC99",
+      "checksum_matches_current": true,
+      "execution_time": 1882700
+    },
+    {
+      "version": 25,
+      "description": "workflow status lock",
+      "success": true,
+      "stored_checksum_sha384": "1C91C05B59A0670648EF5B03E3B1F7BFFE963AA897BF4578D95AB2C3DAB46E116F3969206C6BE69AC69EF40C518D39B9",
+      "current_file": "0025_workflow_status_lock.sql",
+      "current_checksum_sha384": "1C91C05B59A0670648EF5B03E3B1F7BFFE963AA897BF4578D95AB2C3DAB46E116F3969206C6BE69AC69EF40C518D39B9",
+      "checksum_matches_current": true,
+      "execution_time": 3411700
+    },
+    {
+      "version": 26,
+      "description": "doc ocr backend override",
+      "success": true,
+      "stored_checksum_sha384": "4BE8FC71EB925E893D9B00CFC7782090D616DF3712558B813BD3C4B409F6845025865F26079A7851D7CF4FE414C74D7C",
+      "current_file": "0026_doc_ocr_backend_override.sql",
+      "current_checksum_sha384": "4BE8FC71EB925E893D9B00CFC7782090D616DF3712558B813BD3C4B409F6845025865F26079A7851D7CF4FE414C74D7C",
+      "checksum_matches_current": true,
+      "execution_time": 2248300
+    },
+    {
+      "version": 27,
+      "description": "todo due date",
+      "success": true,
+      "stored_checksum_sha384": "E90E0864FC749A05EE876E5A6BF96364D754DE41EC633C186731A61A611184CA8092D26E7AF5166A22758E12AED87CE6",
+      "current_file": "0027_todo_due_date.sql",
+      "current_checksum_sha384": "E90E0864FC749A05EE876E5A6BF96364D754DE41EC633C186731A61A611184CA8092D26E7AF5166A22758E12AED87CE6",
+      "checksum_matches_current": true,
+      "execution_time": 2660400
+    },
+    {
+      "version": 28,
+      "description": "calendar events",
+      "success": true,
+      "stored_checksum_sha384": "CB8A8498D3BD6F82ED6C298B1C0BF7672AF96D4102F76486A7DD447FA6CDF11280FC3FF37CBD2568C7CD5C895849CBDA",
+      "current_file": "0028_calendar_events.sql",
+      "current_checksum_sha384": "CB8A8498D3BD6F82ED6C298B1C0BF7672AF96D4102F76486A7DD447FA6CDF11280FC3FF37CBD2568C7CD5C895849CBDA",
+      "checksum_matches_current": true,
+      "execution_time": 1988200
+    },
+    {
+      "version": 29,
+      "description": "court filing jobs",
+      "success": true,
+      "stored_checksum_sha384": "A0E2C65807B51D459CB092D40F80DCA624BFBC006B0C8321510D1172109E45C1AB41091AA4AD4F73683DAFAC75E2E64F",
+      "current_file": "0029_court_filing_jobs.sql",
+      "current_checksum_sha384": "A0E2C65807B51D459CB092D40F80DCA624BFBC006B0C8321510D1172109E45C1AB41091AA4AD4F73683DAFAC75E2E64F",
+      "checksum_matches_current": true,
+      "execution_time": 2776700
+    },
+    {
+      "version": 30,
+      "description": "lawyer profiles",
+      "success": true,
+      "stored_checksum_sha384": "1F06D18EFA13FF3D0ADBDDB7146C8EDF0EE17C22A7E6B0BC24825ADAE5BC9BB19CE5482E2F95522086889A09C2DC80F7",
+      "current_file": "0030_lawyer_profiles.sql",
+      "current_checksum_sha384": "1F06D18EFA13FF3D0ADBDDB7146C8EDF0EE17C22A7E6B0BC24825ADAE5BC9BB19CE5482E2F95522086889A09C2DC80F7",
+      "checksum_matches_current": true,
+      "execution_time": 1803200
+    },
+    {
+      "version": 31,
+      "description": "contract drafts",
+      "success": true,
+      "stored_checksum_sha384": "5092641E85C90EF0ABBA366CF310543EE21A153A7CB4F784E0EC9EE76F8ADC46A8463D2B9DBA36B4942B1D548BCB17F1",
+      "current_file": "0031_contract_drafts.sql",
+      "current_checksum_sha384": "5092641E85C90EF0ABBA366CF310543EE21A153A7CB4F784E0EC9EE76F8ADC46A8463D2B9DBA36B4942B1D548BCB17F1",
+      "checksum_matches_current": true,
+      "execution_time": 1830400
+    },
+    {
+      "version": 32,
+      "description": "contract preferences",
+      "success": true,
+      "stored_checksum_sha384": "23A9E586D08CC629C363C41FA4EE4F5CA9CEA6E7210EAB45EABBAA11A3399D15E45FB6DC77731514F92E0F9E120531C6",
+      "current_file": "0032_contract_preferences.sql",
+      "current_checksum_sha384": "23A9E586D08CC629C363C41FA4EE4F5CA9CEA6E7210EAB45EABBAA11A3399D15E45FB6DC77731514F92E0F9E120531C6",
+      "checksum_matches_current": true,
+      "execution_time": 1758900
+    },
+    {
+      "version": 33,
+      "description": "document tags",
+      "success": true,
+      "stored_checksum_sha384": "B187709D2876A92A3E1323AF8C4E0BDC57C7874B313C4DF1EF20C9439830D729B45115FD969593535C51842E4CE8BDE9",
+      "current_file": "0033_document_tags.sql",
+      "current_checksum_sha384": "B187709D2876A92A3E1323AF8C4E0BDC57C7874B313C4DF1EF20C9439830D729B45115FD969593535C51842E4CE8BDE9",
+      "checksum_matches_current": true,
+      "execution_time": 1705800
+    },
+    {
+      "version": 34,
+      "description": "document display name",
+      "success": true,
+      "stored_checksum_sha384": "2C5BB9C1032AF1046BD2151B3171606F0F37C511E51C956C6D9D61358F2595F1E257B2FAF5E14CC1A53E179C7F5D880A",
+      "current_file": "0034_document_display_name.sql",
+      "current_checksum_sha384": "2C5BB9C1032AF1046BD2151B3171606F0F37C511E51C956C6D9D61358F2595F1E257B2FAF5E14CC1A53E179C7F5D880A",
+      "checksum_matches_current": true,
+      "execution_time": 2922600
+    },
+    {
+      "version": 35,
+      "description": "document bookmarks",
+      "success": true,
+      "stored_checksum_sha384": "5B4F3EE95AED7D96841B0FF2651B34EEA84DF5D011ACC5510C272EFEDCF5465D1ABD32E0AC7983B77266CFA9344CC5D3",
+      "current_file": "0035_document_bookmarks.sql",
+      "current_checksum_sha384": "5B4F3EE95AED7D96841B0FF2651B34EEA84DF5D011ACC5510C272EFEDCF5465D1ABD32E0AC7983B77266CFA9344CC5D3",
+      "checksum_matches_current": true,
+      "execution_time": 1973200
+    },
+    {
+      "version": 36,
+      "description": "feishu reminder runs",
+      "success": true,
+      "stored_checksum_sha384": "84F859102447ACB5DBEE9E179A0AE3493D7ED2483B28A447BDF0F4F9360CC2399FC1F7AA08CBA2F0BE50F444F4841480",
+      "current_file": null,
+      "current_checksum_sha384": null,
+      "checksum_matches_current": false,
+      "execution_time": 5205500
+    },
+    {
+      "version": 37,
+      "description": "case income records",
+      "success": true,
+      "stored_checksum_sha384": "C851E0966A91F858089126203107DCF132D9B18ED122D1267E60C44090C3C143F5943D0EB3D08E74C22D238235D3F74A",
+      "current_file": "0037_case_income_records.sql",
+      "current_checksum_sha384": "C851E0966A91F858089126203107DCF132D9B18ED122D1267E60C44090C3C143F5943D0EB3D08E74C22D238235D3F74A",
+      "checksum_matches_current": true,
+      "execution_time": 1991000
+    },
+    {
+      "version": 38,
+      "description": "case work items",
+      "success": true,
+      "stored_checksum_sha384": "F5CD73CA184BE7F5D7D5CA2D6DF85887FEFB57835CD75794B603E16C0F6C1B2A26C40809346E8D3E22A91DE8589B1AEC",
+      "current_file": "0038_case_work_items.sql",
+      "current_checksum_sha384": "F5CD73CA184BE7F5D7D5CA2D6DF85887FEFB57835CD75794B603E16C0F6C1B2A26C40809346E8D3E22A91DE8589B1AEC",
+      "checksum_matches_current": true,
+      "execution_time": 2468300
+    },
+    {
+      "version": 39,
+      "description": "criminal case core",
+      "success": true,
+      "stored_checksum_sha384": "E8BB35C6C3107397A979FA0E60061256F78409CB567861D23FC97C79E16FD1F7F38C54033266333A43B14F844AD42686",
+      "current_file": "0039_criminal_case_core.sql",
+      "current_checksum_sha384": "E8BB35C6C3107397A979FA0E60061256F78409CB567861D23FC97C79E16FD1F7F38C54033266333A43B14F844AD42686",
+      "checksum_matches_current": true,
+      "execution_time": 2588400
+    },
+    {
+      "version": 40,
+      "description": "case work item confirmation",
+      "success": true,
+      "stored_checksum_sha384": "CE5A51B4F64C2BDB094591CCED6CFAB4472B073C6E3265979519E803A50CB08E4129EDE7BF5FE6CAEDCD2CD8CDA565B2",
+      "current_file": "0040_case_work_item_confirmation.sql",
+      "current_checksum_sha384": "CE5A51B4F64C2BDB094591CCED6CFAB4472B073C6E3265979519E803A50CB08E4129EDE7BF5FE6CAEDCD2CD8CDA565B2",
+      "checksum_matches_current": true,
+      "execution_time": 3659300
+    },
+    {
+      "version": 41,
+      "description": "income invoice sync",
+      "success": true,
+      "stored_checksum_sha384": "13C44FA2584099DDFBC6CCD8D9FF31F41BB328AFD6216B7B84F31D964D20D076D6758D158834E0308D25551729FC9169",
+      "current_file": "0041_income_invoice_sync.sql",
+      "current_checksum_sha384": "13C44FA2584099DDFBC6CCD8D9FF31F41BB328AFD6216B7B84F31D964D20D076D6758D158834E0308D25551729FC9169",
+      "checksum_matches_current": true,
+      "execution_time": 8350900
+    },
+    {
+      "version": 42,
+      "description": "criminal v062",
+      "success": true,
+      "stored_checksum_sha384": "BBF863D3FF5C05B51D328BDA7FD572927E11469251ABA41A4C1F071C3AEB2A6011488781D1FFDFC08C93BBF6D7F81C2A",
+      "current_file": "0042_criminal_v062.sql",
+      "current_checksum_sha384": "BBF863D3FF5C05B51D328BDA7FD572927E11469251ABA41A4C1F071C3AEB2A6011488781D1FFDFC08C93BBF6D7F81C2A",
+      "checksum_matches_current": true,
+      "execution_time": 15005100
+    },
+    {
+      "version": 43,
+      "description": "criminal extraction candidates",
+      "success": true,
+      "stored_checksum_sha384": "C055242A30CBB612A950A5F1EB1A07DCCDB191FF2B9120FE333057AB188303581C305CD08FD7DD546453C954A269D0EA",
+      "current_file": "0043_criminal_extraction_candidates.sql",
+      "current_checksum_sha384": "C055242A30CBB612A950A5F1EB1A07DCCDB191FF2B9120FE333057AB188303581C305CD08FD7DD546453C954A269D0EA",
+      "checksum_matches_current": true,
+      "execution_time": 6853300
+    },
+    {
+      "version": 44,
+      "description": "lpr reference cache",
+      "success": true,
+      "stored_checksum_sha384": "6E83016F5716D997D752497224BA0011F90768413E32106B46935626448B75E7D202079566EE706C48496773003270D5",
+      "current_file": "0044_lpr_reference_cache.sql",
+      "current_checksum_sha384": "6E83016F5716D997D752497224BA0011F90768413E32106B46935626448B75E7D202079566EE706C48496773003270D5",
+      "checksum_matches_current": true,
+      "execution_time": 5710000
+    },
+    {
+      "version": 45,
+      "description": "criminal sentencing estimates",
+      "success": true,
+      "stored_checksum_sha384": "34D8F342D9A321C062A174C1B4B9D799C5B8D03B47C2136129618A03E2DA2D217AD7270EDE0B6220B52679EF28BF4369",
+      "current_file": "0045_criminal_sentencing_estimates.sql",
+      "current_checksum_sha384": "34D8F342D9A321C062A174C1B4B9D799C5B8D03B47C2136129618A03E2DA2D217AD7270EDE0B6220B52679EF28BF4369",
+      "checksum_matches_current": true,
+      "execution_time": 3099100
+    },
+    {
+      "version": 46,
+      "description": "criminal workflow sop",
+      "success": true,
+      "stored_checksum_sha384": "001CE9380531A959E355B3BF5138181356B7F82A112F5EB4E17F70717A2DB1A83F6A35D1D46C1ECEE028A9A8678A60A9",
+      "current_file": "0046_criminal_workflow_sop.sql",
+      "current_checksum_sha384": "001CE9380531A959E355B3BF5138181356B7F82A112F5EB4E17F70717A2DB1A83F6A35D1D46C1ECEE028A9A8678A60A9",
+      "checksum_matches_current": true,
+      "execution_time": 2701200
+    },
+    {
+      "version": 47,
+      "description": "case legal domain",
+      "success": true,
+      "stored_checksum_sha384": "7C859E982563E09EC8400D4475985F5C5C682A97EEEA367B8DB4A89FC4AECAFDD03424BD22607D7316E1B33807C0B465",
+      "current_file": "0047_case_legal_domain.sql",
+      "current_checksum_sha384": "7C859E982563E09EC8400D4475985F5C5C682A97EEEA367B8DB4A89FC4AECAFDD03424BD22607D7316E1B33807C0B465",
+      "checksum_matches_current": true,
+      "execution_time": 8365700
+    },
+    {
+      "version": 48,
+      "description": "criminal defense workspace",
+      "success": true,
+      "stored_checksum_sha384": "560F92033B9F5CF14AF743D1F8C63505141C02F379B7BFC0C51157D8ED5BA1353E04AED4572C89EFBDBD5DF169E5B513",
+      "current_file": "0048_criminal_defense_workspace.sql",
+      "current_checksum_sha384": "560F92033B9F5CF14AF743D1F8C63505141C02F379B7BFC0C51157D8ED5BA1353E04AED4572C89EFBDBD5DF169E5B513",
+      "checksum_matches_current": true,
+      "execution_time": 7046000
+    },
+    {
+      "version": 49,
+      "description": "feishu case management sync",
+      "success": true,
+      "stored_checksum_sha384": "5391DEE7120F0715473530F80C0D3C336778BD29CDE4C51CF7F367E4C3A5C85CC1A66483103E84850783EEEE2641497C",
+      "current_file": "0049_feishu_case_management_sync.sql",
+      "current_checksum_sha384": "5391DEE7120F0715473530F80C0D3C336778BD29CDE4C51CF7F367E4C3A5C85CC1A66483103E84850783EEEE2641497C",
+      "checksum_matches_current": true,
+      "execution_time": 10560900
+    },
+    {
+      "version": 50,
+      "description": "feishu sync field previews",
+      "success": true,
+      "stored_checksum_sha384": "2104CB8AA3E5523816994504876A45B23DF166267E5CBFA6E60191C967F405E07339AEE45805D0A126A9402415DD9D88",
+      "current_file": "0050_feishu_sync_field_previews.sql",
+      "current_checksum_sha384": "2104CB8AA3E5523816994504876A45B23DF166267E5CBFA6E60191C967F405E07339AEE45805D0A126A9402415DD9D88",
+      "checksum_matches_current": true,
+      "execution_time": 2510400
+    },
+    {
+      "version": 51,
+      "description": "feishu manual binding",
+      "success": true,
+      "stored_checksum_sha384": "480CBA0C5B59775E7CA65FF30BE83E7C57B53F221085229BB75173F7A5F0C687B6297AAE7B7E1F3E16A047EB4458B144",
+      "current_file": "0051_feishu_manual_binding.sql",
+      "current_checksum_sha384": "480CBA0C5B59775E7CA65FF30BE83E7C57B53F221085229BB75173F7A5F0C687B6297AAE7B7E1F3E16A047EB4458B144",
+      "checksum_matches_current": true,
+      "execution_time": 3506300
+    },
+    {
+      "version": 52,
+      "description": "feishu inbound entities",
+      "success": true,
+      "stored_checksum_sha384": "0B2515CF4E1D8BFB8E7E090CF8127011EDE92BA70B246773B871D0C064D17C6B9EF4BE505FB186874A67EB254082FE16",
+      "current_file": "0052_feishu_inbound_entities.sql",
+      "current_checksum_sha384": "0B2515CF4E1D8BFB8E7E090CF8127011EDE92BA70B246773B871D0C064D17C6B9EF4BE505FB186874A67EB254082FE16",
+      "checksum_matches_current": true,
+      "execution_time": 19364600
+    },
+    {
+      "version": 53,
+      "description": "material queue control",
+      "success": true,
+      "stored_checksum_sha384": "BEB3C65CDE515B93DC50412D3AF1C739DEF3D2656B847B595B90CD3C8727641EA8143DDEA5863F9EB668EC8B68AD814C",
+      "current_file": "0053_material_queue_control.sql",
+      "current_checksum_sha384": "BEB3C65CDE515B93DC50412D3AF1C739DEF3D2656B847B595B90CD3C8727641EA8143DDEA5863F9EB668EC8B68AD814C",
+      "checksum_matches_current": true,
+      "execution_time": 3722765700
+    },
+    {
+      "version": 54,
+      "description": "scrub court filing credentials",
+      "success": true,
+      "stored_checksum_sha384": "0D54B3BBDD0A94812759718328821DF15E19B3386643A27D665893BCACBD500F06228DA67EC8C59F09A878D433CEA56C",
+      "current_file": "0054_scrub_court_filing_credentials.sql",
+      "current_checksum_sha384": "0D54B3BBDD0A94812759718328821DF15E19B3386643A27D665893BCACBD500F06228DA67EC8C59F09A878D433CEA56C",
+      "checksum_matches_current": true,
+      "execution_time": 1928300
+    },
+    {
+      "version": 55,
+      "description": "yuandian balance snapshots",
+      "success": true,
+      "stored_checksum_sha384": "DF7B7215E29238BFDE66D50184A7A5C93C34C17EFE71820182F1250A088D1C15283962976FB00D65505B8AD38B0678AB",
+      "current_file": "0055_yuandian_balance_snapshots.sql",
+      "current_checksum_sha384": "DF7B7215E29238BFDE66D50184A7A5C93C34C17EFE71820182F1250A088D1C15283962976FB00D65505B8AD38B0678AB",
+      "checksum_matches_current": true,
+      "execution_time": 5376500
+    },
+    {
+      "version": 56,
+      "description": "legal skill packages",
+      "success": true,
+      "stored_checksum_sha384": "356A15F4A231AADB9BBACA5EB2DA7B4351F9668D814F24B1DFDD0306EE8305D1794946497F2D27118E3E174C5240D779",
+      "current_file": "0056_legal_skill_packages.sql",
+      "current_checksum_sha384": "356A15F4A231AADB9BBACA5EB2DA7B4351F9668D814F24B1DFDD0306EE8305D1794946497F2D27118E3E174C5240D779",
+      "checksum_matches_current": true,
+      "execution_time": 3127500
+    },
+    {
+      "version": 57,
+      "description": "case memory mvp",
+      "success": true,
+      "stored_checksum_sha384": "63FF24FD7070C2D94C18F09D6FA79621527499A17AF12C98710A0BDFDF6DFA292B2519CC5D7AD74F9A8BB718318114B5",
+      "current_file": "0057_case_memory_mvp.sql",
+      "current_checksum_sha384": "63FF24FD7070C2D94C18F09D6FA79621527499A17AF12C98710A0BDFDF6DFA292B2519CC5D7AD74F9A8BB718318114B5",
+      "checksum_matches_current": true,
+      "execution_time": 361829000
+    },
+    {
+      "version": 58,
+      "description": "device sync core",
+      "success": true,
+      "stored_checksum_sha384": "A01F490E5D6E6F22673E6A6322F7E3B12EFDDFB928F6D0AD7C11EA342F719DCC99756178E05B41A5FFD430D60EDAD4BA",
+      "current_file": "0058_device_sync_core.sql",
+      "current_checksum_sha384": "A01F490E5D6E6F22673E6A6322F7E3B12EFDDFB928F6D0AD7C11EA342F719DCC99756178E05B41A5FFD430D60EDAD4BA",
+      "checksum_matches_current": true,
+      "execution_time": 5479400
+    },
+    {
+      "version": 59,
+      "description": "device sync security hardening",
+      "success": true,
+      "stored_checksum_sha384": "72DC96D29E32AD8BE8190CABE413E3ED56BD1EEAD0182958EC81A87DDB4CA61ADDF96C0CE5327C75298018EA21F61ADB",
+      "current_file": "0059_device_sync_security_hardening.sql",
+      "current_checksum_sha384": "72DC96D29E32AD8BE8190CABE413E3ED56BD1EEAD0182958EC81A87DDB4CA61ADDF96C0CE5327C75298018EA21F61ADB",
+      "checksum_matches_current": true,
+      "execution_time": 10109400
+    },
+    {
+      "version": 60,
+      "description": "case domain isolation",
+      "success": true,
+      "stored_checksum_sha384": "6F25576042338A79E9BFF1FE111264F6FBEF72C7ED7E3A74B1A02CB57D38D68433236D48AC77F7A729559DA8D7A1C84E",
+      "current_file": "0060_case_domain_isolation.sql",
+      "current_checksum_sha384": "6F25576042338A79E9BFF1FE111264F6FBEF72C7ED7E3A74B1A02CB57D38D68433236D48AC77F7A729559DA8D7A1C84E",
+      "checksum_matches_current": true,
+      "execution_time": 2321900
+    },
+    {
+      "version": 61,
+      "description": "feishu controlled bidirectional",
+      "success": true,
+      "stored_checksum_sha384": "6B2C271A0E22C74D31034587A1D173E867C0722F2CB712253A24EFE14B1577BDDCDFF516D10AFF9E109970D409C4E8AD",
+      "current_file": "0061_feishu_controlled_bidirectional.sql",
+      "current_checksum_sha384": "6B2C271A0E22C74D31034587A1D173E867C0722F2CB712253A24EFE14B1577BDDCDFF516D10AFF9E109970D409C4E8AD",
+      "checksum_matches_current": true,
+      "execution_time": 23926400
+    },
+    {
+      "version": 62,
+      "description": "feishu entity change previews",
+      "success": true,
+      "stored_checksum_sha384": "9FC5EC15F385A4B37B63C0CE40E7F1DA4445EB858052413A49B949140E52FDC92008E5EAD11C85E6A15669FAE8925E6D",
+      "current_file": "0062_feishu_entity_change_previews.sql",
+      "current_checksum_sha384": "9FC5EC15F385A4B37B63C0CE40E7F1DA4445EB858052413A49B949140E52FDC92008E5EAD11C85E6A15669FAE8925E6D",
+      "checksum_matches_current": true,
+      "execution_time": 2218000
+    }
+  ],
+  "schema": {
+    "object_count": 461,
+    "sha256": "FD536BFCADCD2E9289F56DAB6355800B403BB34FA2515AD2A9DD5305FD87446A"
+  },
+  "m63": {
+    "applied": false,
+    "export_drafts_table": false,
+    "columns": {
+      "device_sync_groups": {
+        "last_attempt_at": false,
+        "last_success_at": false,
+        "auto_paused": false,
+        "pause_reason_code": false
+      },
+      "device_sync_outbox": {
+        "capture_sequence": false
+      },
+      "device_sync_quarantine": {
+        "source_path": true,
+        "source_device_id": false,
+        "source_sequence": false,
+        "status": false,
+        "first_seen_at": false,
+        "last_seen_at": false,
+        "retry_count": false,
+        "resolved_at": false,
+        "last_error_code": false
+      },
+      "device_sync_export_drafts": {
+        "group_id": false,
+        "local_device_id": false,
+        "sequence": false,
+        "key_epoch": false,
+        "previous_manifest_hash": false,
+        "event_envelope_bytes": false,
+        "manifest_envelope_bytes": false,
+        "event_ciphertext_sha256": false,
+        "manifest_ciphertext_sha256": false,
+        "operation_ids_json": false,
+        "operation_fingerprint": false,
+        "state": false,
+        "created_at": false,
+        "updated_at": false,
+        "finalized_at": false
+      }
+    },
+    "indexes": {
+      "idx_device_sync_quarantine_active_key": false,
+      "idx_device_sync_quarantine_group_status": false,
+      "idx_device_sync_outbox_capture_sequence": false,
+      "idx_device_sync_outbox_pending_capture": false,
+      "idx_device_sync_export_drafts_state": false,
+      "idx_device_sync_export_drafts_one_prepared": false
+    },
+    "quarantine_group_fk": [
+      [
+        0,
+        0,
+        "device_sync_groups",
+        "group_id",
+        "id",
+        "NO ACTION",
+        "SET NULL",
+        "NONE"
+      ]
+    ],
+    "export_drafts_group_fk": []
+  },
+  "table_counts": {
+    "_sqlx_migrations": 62,
+    "calendar_events": 0,
+    "case_agency_contacts": 13,
+    "case_domain_status_migration_audits": 2,
+    "case_fees": 0,
+    "case_income_records": 9,
+    "case_instances": 4,
+    "case_logs": 0,
+    "case_memory_candidates": 0,
+    "case_memory_items": 0,
+    "case_memory_revisions": 0,
+    "case_memory_sources": 0,
+    "case_payments": 14,
+    "case_preservations": 0,
+    "case_stage_items": 9,
+    "case_stages": 0,
+    "case_todos": 0,
+    "case_work_items": 94,
+    "cases": 6,
+    "chat_messages": 0,
+    "chat_tasks": 0,
+    "contacts": 2,
+    "contract_draft_versions": 0,
+    "contract_drafts": 0,
+    "contract_preferences": 0,
+    "court_filing_jobs": 0,
+    "criminal_analysis_findings": 0,
+    "criminal_analysis_runs": 0,
+    "criminal_case_profiles": 4,
+    "criminal_case_tasks": 3,
+    "criminal_case_workflows": 3,
+    "criminal_deadline_items": 0,
+    "criminal_draft_documents": 0,
+    "criminal_draft_versions": 0,
+    "criminal_evidence_items": 0,
+    "criminal_extraction_candidate_batches": 119,
+    "criminal_extraction_candidate_fields": 148,
+    "criminal_issue_evidence_links": 0,
+    "criminal_issues": 0,
+    "criminal_reminder_deliveries": 0,
+    "criminal_review_notes": 0,
+    "criminal_sentencing_estimates": 0,
+    "criminal_source_citations": 0,
+    "criminal_task_events": 4,
+    "criminal_workflow_template_nodes": 35,
+    "criminal_workflow_template_versions": 1,
+    "criminal_workspace_audit_events": 0,
+    "criminal_workspace_task_links": 0,
+    "deepseek_balance_snapshots": 33,
+    "device_sync_applied_operations": 0,
+    "device_sync_audits": 470,
+    "device_sync_conflicts": 0,
+    "device_sync_dirty_entities": 23,
+    "device_sync_entity_revisions": 205,
+    "device_sync_groups": 1,
+    "device_sync_invites": 1,
+    "device_sync_join_requests": 1,
+    "device_sync_members": 2,
+    "device_sync_outbox": 487,
+    "device_sync_quarantine": 11,
+    "device_sync_receipts": 0,
+    "device_sync_snapshots": 2,
+    "document_bookmarks": 0,
+    "document_tags": 47,
+    "documents": 852,
+    "events": 0,
+    "execution_payments": 0,
+    "execution_targets": 0,
+    "extraction_metrics": 8002,
+    "feishu_reminder_runs": 0,
+    "feishu_sync_binding_audits": 7,
+    "feishu_sync_conflicts": 0,
+    "feishu_sync_entity_audits": 14539,
+    "feishu_sync_entity_previews": 6525,
+    "feishu_sync_field_previews": 8848,
+    "feishu_sync_inbox": 16,
+    "feishu_sync_links": 5,
+    "feishu_sync_operation_audits": 29,
+    "feishu_sync_runs": 325,
+    "feishu_sync_snapshots": 9,
+    "lawyer_profiles": 0,
+    "legal_skill_binding_suppressions": 0,
+    "legal_skill_bindings": 0,
+    "legal_skill_import_audits": 5,
+    "legal_skill_packages": 5,
+    "legal_skill_revisions": 5,
+    "legal_skill_run_audits": 0,
+    "lpr_rate_cache": 1,
+    "lpr_refresh_state": 1,
+    "mail_records": 0,
+    "material_processing_batches": 6,
+    "material_processing_events": 1626,
+    "material_processing_items": 601,
+    "material_source_decisions": 947,
+    "mcp_clients": 0,
+    "memory_audit_events": 0,
+    "memory_injection_case_entries": 0,
+    "memory_injection_preference_entries": 0,
+    "memory_injection_runs": 0,
+    "parties": 0,
+    "personal_tasks": 0,
+    "team_edits": 0,
+    "team_snapshots": 0,
+    "team_state": 0,
+    "user_memory_preference_revisions": 0,
+    "user_memory_preferences": 0,
+    "yuandian_balance_snapshots": 11,
+    "yuandian_credits_monthly": 0
+  },
+  "table_counts_sha256": "012786766C29592F38D362FD56A9BE6591A1CBACB5A7BF1F2F98919E163D8DE4",
+  "business_projection": {
+    "excluded": [
+      "_sqlx_migrations",
+      "device_sync_*",
+      "cases_fts*"
+    ],
+    "table_count": 94,
+    "sha256": "9B9A26C02803252D6FDE2C2FAB06EF5CB02F949720C1DAE9A6DBF805897B218F",
+    "tables": {
+      "calendar_events": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "CBC4F8F4A20B97B54641FAF97DF83796EFB005B7C0FD50E75D39D073495E6015"
+      },
+      "case_agency_contacts": {
+        "rows": 13,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "3EA6AF42A0EB2CD31FB1D35BBF5DD48CE7AD3AF4D22E83035DFD2AD1D0810065"
+      },
+      "case_domain_status_migration_audits": {
+        "rows": 2,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "A79F613E6699A0E23C43E9D6F09F1887441A0F044C3B90C37933D7110292A115"
+      },
+      "case_fees": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "EBEC2D9C8EEE9159DBA7CBB33516998E8FFB67D540BBA0D168D1CB91F4430F9A"
+      },
+      "case_income_records": {
+        "rows": 9,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "AF83F4D16FF944C64819CDE29EFEF3BA523109237748645A9D35ECFAE365BEFF"
+      },
+      "case_instances": {
+        "rows": 4,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "FAE614BA970D86C7BCF3D261A4CE07D144D6396317EAAA082F23F26997C0564C"
+      },
+      "case_logs": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "60DCE6E7ED0701A17833321DEDD45D5F900FC99A8EDB1E0D62D1D4E19C505890"
+      },
+      "case_memory_candidates": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "77CE90900545BF304F6E274DF563782D660BC8320A1317BACAD1ADB712AC8042"
+      },
+      "case_memory_items": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "9193C84D558331CBF06B9D256A8C9A8129DF9DD259888DFEA3C493F01638570E"
+      },
+      "case_memory_revisions": {
+        "rows": 0,
+        "primary_key": [
+          "memory_id",
+          "revision_no"
+        ],
+        "sha256": "8BC08CC86229C9B64288D7ADDDA579EA11A23DBC949113F1A7A1E6F465D2077E"
+      },
+      "case_memory_sources": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "B220EA0280BBE193C16536D14F9E5C7ACF8F24DA976AF1E93687C1A2515B26D8"
+      },
+      "case_payments": {
+        "rows": 14,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "10C598FF325BB98F105833D8208C63341B74527D9CE2537F6F112314823E0C38"
+      },
+      "case_preservations": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "A83037C7F24EC5CA9B27BE7AEF2404FF4CFC01AF06E73EE54C36089BF552E650"
+      },
+      "case_stage_items": {
+        "rows": 9,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "00FFD33B3F7ACFF8061F20640F962B0F2E0508D410AE2A68504BCC53735C4E4D"
+      },
+      "case_stages": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "811C104812EA4F2BDBEEB6239D1E997FD799CFF28A57267549E8FACC0B7F0F22"
+      },
+      "case_todos": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "E51160BC848FF5DB5D5A84ED8E00AD62C4662DCD39F53BBF592BCD41165948A1"
+      },
+      "case_work_items": {
+        "rows": 94,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "4189019C8BFF1F11727F3DA9130F72597A4275DCBE3F00D1D0042AF2FC7249B9"
+      },
+      "cases": {
+        "rows": 6,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "D2F9ADA4501298717B9E09B2B209DBFF5C1238F559B4BB504680C74CD5CF7519"
+      },
+      "chat_messages": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "8ED653DC5F32E422BADD01A4AE20D45AD5D9E8185A87CE15CA9C7B471C118A1D"
+      },
+      "chat_tasks": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "2B4B5866DC5D902C396189F7EE8693A30C72154C86AB5F59424E89AE2681F93A"
+      },
+      "contacts": {
+        "rows": 2,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "007D28F9E73E7431B915FEF6013493FAA969049F68B8E029038E55947C035CE3"
+      },
+      "contract_draft_versions": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "CA701569685D7AC50CB84146EFE7CAD106FB928636EF5D57F4EA63D0855FF7B4"
+      },
+      "contract_drafts": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "80794CDAC29BA3EBB0F19CC837D00F749F248108A222F36614F3E3CB8C262AA0"
+      },
+      "contract_preferences": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "6F952F54ADF26DBCCDFD9016FD0EE78580F06547CD9D51F1F1B901E50C45EC2A"
+      },
+      "court_filing_jobs": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "D2D452EC11DB5163892448A46D99B6FB3328FA9BE7A2292481124AB3664DF725"
+      },
+      "criminal_analysis_findings": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "703F7171F062DA3C89A0C6818013D37D6301D381A91A740F2DB121C4B524872B"
+      },
+      "criminal_analysis_runs": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "B1B52924C0302891DB333810576A9AD14A3363067281CA9190AE09A7D7E1D448"
+      },
+      "criminal_case_profiles": {
+        "rows": 4,
+        "primary_key": [
+          "case_id"
+        ],
+        "sha256": "0C64CCBD48C5AFB05E22FBF168BB620849E76269C5EB263DDBDE8323D3CB5BE3"
+      },
+      "criminal_case_tasks": {
+        "rows": 3,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "789BFAF4D1AB9090E20F697F583BAAE16C02303C4BB9C69B91521F685DE05C48"
+      },
+      "criminal_case_workflows": {
+        "rows": 3,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "48B497E82CA0F300FACE5DD110216D8B89233B3EAAE838C373AC62241078F28C"
+      },
+      "criminal_deadline_items": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "A6E05645DAB18721938F9EE8A67AEF336BF187D820B4983953CC74909BF53270"
+      },
+      "criminal_draft_documents": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "E0CFDAFCD7AB2FAC000FE5249C41F78CDB27BAD30AED83B8A7468ECFBA64B1C6"
+      },
+      "criminal_draft_versions": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "F49CA95884B2E0042EEC9FA29BA7665C8AFA7EB50A9917EFC81DE15BCCEFC44D"
+      },
+      "criminal_evidence_items": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "F6047AEF79CC214C7203B129DF2AF8D025E62994352111392592A83FC3B87042"
+      },
+      "criminal_extraction_candidate_batches": {
+        "rows": 119,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "63C708EE9B57A35B7E25E99E678A748F80EA0B6E5C9EE72274D7E8FC75FF5A02"
+      },
+      "criminal_extraction_candidate_fields": {
+        "rows": 148,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "DA9E272E149932E3A476C404008199E49C02A5FF15C3092D7781CCFCEB7B97C4"
+      },
+      "criminal_issue_evidence_links": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "ABB8C07B1FE3F95EEF1F2404AA06531A865CF34DB0C832E77700F8BE5933C504"
+      },
+      "criminal_issues": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "95000F7A048B7F8B9D9E21BC9806E35120B70952583E1404BE0C9B2CD991B4E0"
+      },
+      "criminal_reminder_deliveries": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "826BF395D740A2722665866C0D8B5B3ACFCC4B5707D274FF6F5DC1CCC579D2CC"
+      },
+      "criminal_review_notes": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "0463944C37F23D91599DCADD60B781977168F4B99862DFE267D25FCB77D2DBCA"
+      },
+      "criminal_sentencing_estimates": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "A0289DDB1A8DFCC78B5215EC11FE8CA6248253E3500E6589D76F667F34EDEF2C"
+      },
+      "criminal_source_citations": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "E25061A4B833B7334613CA780E3930B89C5C9DFAD6F4C143F2BDE28379A51894"
+      },
+      "criminal_task_events": {
+        "rows": 4,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "C1AF1422FD74D68CB6C7B82360BB35732744235F351C38AC19DB4DF3968D940C"
+      },
+      "criminal_workflow_template_nodes": {
+        "rows": 35,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "D3C4CCBC8A0F02272D574E63D74B53380EED01F7817FF8B0607A6330BAA0946D"
+      },
+      "criminal_workflow_template_versions": {
+        "rows": 1,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "A30483EF81A2BE03FD28046F3747200FCF481F7D89B0B77AB6CC244553E967CE"
+      },
+      "criminal_workspace_audit_events": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "7ED956FB2B0708A5C54A91EE30428D80F00529F069D4CA2EB0F1BD0D35D226AC"
+      },
+      "criminal_workspace_task_links": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "D72E05AFA047D09AEB20F6FB3400CCCFE680A4A91F305F71766686D6BAC6A8BC"
+      },
+      "deepseek_balance_snapshots": {
+        "rows": 33,
+        "primary_key": [
+          "date"
+        ],
+        "sha256": "C73FB9C52DE3C67C2338C54A9835BC64B341578440E5CDC54249188B5C9AC471"
+      },
+      "document_bookmarks": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "ECAC3F429AB9CD112F3F7BB692845B6E333A19FEB1D426AA2B548AE1C4DDA66B"
+      },
+      "document_tags": {
+        "rows": 47,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "29EE9C732DD840CC2F0A302710769A8E0859524A626419013FE08F132F174854"
+      },
+      "documents": {
+        "rows": 852,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "85C28C543C201C46F6D9288B5C0DFFA55B9CD5FBE2B12744E435AF375CCA6C14"
+      },
+      "events": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "BB1517B94E135745897A00644E2CC73118E660DD66187D165ECF08F4574D0E17"
+      },
+      "execution_payments": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "84615007E6DE120DA21555F64B0060EF87AD7D83D201CDF6EEEC37AE0F091D41"
+      },
+      "execution_targets": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "B571C40BC9CB3334C7AFFE5ADA7D06C1DE30B07F4554E852DC1A283E6B903E5B"
+      },
+      "extraction_metrics": {
+        "rows": 8002,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "E5895B03D41B283A15E016EBC29C4E09874C39791FA94ED39E70FC4E21ACBC6D"
+      },
+      "feishu_reminder_runs": {
+        "rows": 0,
+        "primary_key": [
+          "sent_date"
+        ],
+        "sha256": "4B0D060193970DD6D36B9663AFCD40068B620A53AECC16DA6460865971B1D6BB"
+      },
+      "feishu_sync_binding_audits": {
+        "rows": 7,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "00717DBBDE5BC128CC8ED826AE0B0ED8192705C33806D6C8F58B5D86977EF3F5"
+      },
+      "feishu_sync_conflicts": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "8DD38ACFB97DEBEEF8CF4C58E1A7AE8E928D5B4316F360BF7535CBBA978FF98A"
+      },
+      "feishu_sync_entity_audits": {
+        "rows": 14539,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "9706457C01C31F5DFE5C8F288E11FE0E9B73D78E239C9242806BBE05B20EE417"
+      },
+      "feishu_sync_entity_previews": {
+        "rows": 6525,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "CCECF4CDED65E074346117BF059A2E2AB73E1B8FBDC19FBB2095E62D48790AFC"
+      },
+      "feishu_sync_field_previews": {
+        "rows": 8848,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "9716CEBE430AB3CD7E5A5C29D2AA8B94E262A88B17AF52C740C9353AEDE7AD24"
+      },
+      "feishu_sync_inbox": {
+        "rows": 16,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "A3DE2FD4C9A4C96E85C058DE2E681F9B1EE10B64F55B51E2AFBDE2F9D6048BBB"
+      },
+      "feishu_sync_links": {
+        "rows": 5,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "1F1DD9F30D6A834F011EBB00A01A22FF315D264AD44BDB6B385E6D8B12C129FA"
+      },
+      "feishu_sync_operation_audits": {
+        "rows": 29,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "C631CF29BE24E8F8C73F524B557A0623009A9D0063264F51D627D0ABA41FC24D"
+      },
+      "feishu_sync_runs": {
+        "rows": 325,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "DBA48E9B0EC467E2A988AB76E0FB061B95B2675F3A3D031A2EF510EA96AF9997"
+      },
+      "feishu_sync_snapshots": {
+        "rows": 9,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "9ABE3F6F058FBD96021D43E5069E55C0C05280E3C166C35EF5837135AE7D8869"
+      },
+      "lawyer_profiles": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "EF3918AFE9295333554ABDF131C46B24D1EF480DCC49CC7DF7A16F05ADA33552"
+      },
+      "legal_skill_binding_suppressions": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "9F544D57B0FF74987E6DBDE6E2BF75B00FD99B6C8288FAA4AF515E95D0B367B0"
+      },
+      "legal_skill_bindings": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "800BE27183AD978FCBCB64546CC01EB1813836337EF5FEC266535A82F47F1C05"
+      },
+      "legal_skill_import_audits": {
+        "rows": 5,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "45D16DC4797B021F6BCFF333112396FA69AA33E0ECEAAE173C6343F0475CF195"
+      },
+      "legal_skill_packages": {
+        "rows": 5,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "6CBAE3F54FB86A6B53C1F8ED34401B20151DFBA376A4F746ADDF54DD45EE6502"
+      },
+      "legal_skill_revisions": {
+        "rows": 5,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "485D3B8F6D3C0FC5E3494A56157B4B908BF5F9B96336F23D9A70F05549299397"
+      },
+      "legal_skill_run_audits": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "27D2296DA99B0C673FBD344A31988EA920DB6D6036503A3C9E6F03EA2F07CC89"
+      },
+      "lpr_rate_cache": {
+        "rows": 1,
+        "primary_key": [
+          "publication_date"
+        ],
+        "sha256": "8094AD6FD05EE44CC440D2F6A8B1D71EC3288ED211A54543E4A092ECD135A9F0"
+      },
+      "lpr_refresh_state": {
+        "rows": 1,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "EC614392E954356FA0E696368ED3F8425A97F81E0D7785209F7EC70601DA43FD"
+      },
+      "mail_records": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "FCD9BC3E92DA299221709996115AEEF6CEC5D21BB5284E52A38458838AB07425"
+      },
+      "material_processing_batches": {
+        "rows": 6,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "594B2EC0BA9F5F715053D23BBA4BFF0D8F4237690EC502F794C9318C38D0BAC3"
+      },
+      "material_processing_events": {
+        "rows": 1626,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "24D1071D29557D5FF07CB02EC1DCF475841E942ECE3BFF0D4D4FB9A68A18A04D"
+      },
+      "material_processing_items": {
+        "rows": 601,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "C1BF2E85FA0238565813F84D4C923164E0CFA8FA385066A5245FB647D4A58B1B"
+      },
+      "material_source_decisions": {
+        "rows": 947,
+        "primary_key": [
+          "case_id",
+          "source_path"
+        ],
+        "sha256": "1325227DDF55BA7CBC093CB78F6EC3EDBF871C7A4B70C8BA13BBD8424D4A2850"
+      },
+      "mcp_clients": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "4965D90445AFD6354A5FCA220899D8C1E136D02FC9546B91AD30AF48633229E7"
+      },
+      "memory_audit_events": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "6EA7A148C9C247A2124A226A77B92D572A40862FB51B063197F20BDCC9A3DF84"
+      },
+      "memory_injection_case_entries": {
+        "rows": 0,
+        "primary_key": [
+          "run_id",
+          "memory_id"
+        ],
+        "sha256": "EE1F9B0E527CAC6AD7341AEDC926C71F2119CC0C418BC2044A96294B6C6789BB"
+      },
+      "memory_injection_preference_entries": {
+        "rows": 0,
+        "primary_key": [
+          "run_id",
+          "preference_id"
+        ],
+        "sha256": "0B9F08A5B24492222CD324187082F5518521ADCF3BD5348F5EA8BF8210E2C258"
+      },
+      "memory_injection_runs": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "2070C62B9A64044A192C416C06250EEC2F5E6A9943DDB03071CA1D25C9A423B7"
+      },
+      "parties": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "BC89771E65DB130BF88E0C6CF565F126CD9379B6661613646A48380EFDF28517"
+      },
+      "personal_tasks": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "22EA31A19762702009129C350DFA6F5D3EB22C31D59198202D10510232E88990"
+      },
+      "team_edits": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "14F82F079BCBB44CFC9252AD7BE2C26F6ED90F8003E0F234777A3CCFA774E4BC"
+      },
+      "team_snapshots": {
+        "rows": 0,
+        "primary_key": [
+          "member_id"
+        ],
+        "sha256": "891D9B720093B7BFAE5809221DEA6F54891813ED4E36AC3D584AEE4FE8C0EC1E"
+      },
+      "team_state": {
+        "rows": 0,
+        "primary_key": [
+          "key"
+        ],
+        "sha256": "73E06EB03426120CE3176EE0EEBE2B7F711A96AA0DE6017DCF424397C5A36102"
+      },
+      "user_memory_preference_revisions": {
+        "rows": 0,
+        "primary_key": [
+          "preference_id",
+          "revision_no"
+        ],
+        "sha256": "6B811D4E420E1AB6DD264D8D56B1A30E17E045ACCEF9620B1AE1F1EBE283A886"
+      },
+      "user_memory_preferences": {
+        "rows": 0,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "DDD3481C36231D92BB8DA77BD9A2379169E563062AD3BF6442D8CA1AAFEC289A"
+      },
+      "yuandian_balance_snapshots": {
+        "rows": 11,
+        "primary_key": [
+          "id"
+        ],
+        "sha256": "B41C030E87BC2B934C56D722FD6E9DFD01408D4A1B1BB95551B4EAE8C57F43B1"
+      },
+      "yuandian_credits_monthly": {
+        "rows": 0,
+        "primary_key": [
+          "year_month"
+        ],
+        "sha256": "DC373B9B29FEBC7D4997AEEAA407C24DCC996232C42C127A453861BCE764E183"
+      }
+    }
+  }
+}

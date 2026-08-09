@@ -1,9 +1,11 @@
 //! Read-only migration-lineage preflight. Existing databases must pass this
 //! module before a read-write/WAL pool is created.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use sqlx::migrate::{Migration, MigrationType};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
@@ -18,6 +20,69 @@ struct MissingSentinel {
     migration_version: i64,
     code: &'static str,
 }
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct TableColumnDefinition {
+    cid: i64,
+    name: String,
+    data_type: String,
+    not_null: i64,
+    default_value: Option<String>,
+    primary_key_order: i64,
+    hidden: i64,
+}
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct TableListDefinition {
+    object_type: String,
+    column_count: i64,
+    without_rowid: i64,
+    strict: i64,
+}
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct IndexListDefinition {
+    sequence: i64,
+    name: String,
+    unique: i64,
+    origin: String,
+    partial: i64,
+}
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct IndexColumnDefinition {
+    sequence: i64,
+    column_id: i64,
+    name: Option<String>,
+    descending: i64,
+    collation: Option<String>,
+    is_key: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MigrationPreflight {
+    pub(crate) allow_missing_legacy_migration_36: bool,
+}
+
+const LEGACY_MIGRATION_36_VERSION: i64 = 36;
+const LEGACY_MIGRATION_36_DESCRIPTION: &str = "feishu reminder runs";
+static LEGACY_MIGRATION_36_CHECKSUM: [u8; 48] = [
+    0x84, 0xf8, 0x59, 0x10, 0x24, 0x47, 0xac, 0xb5, 0xdb, 0xee, 0x9e, 0x17, 0x9a, 0x0a, 0xe3, 0x49,
+    0x3d, 0x7e, 0xd2, 0x48, 0x3b, 0x28, 0xa4, 0x47, 0xbd, 0xf0, 0xf4, 0xf9, 0x36, 0x0c, 0xc2, 0x39,
+    0x9f, 0xc1, 0xf7, 0xaa, 0x08, 0xcb, 0xa2, 0xf0, 0xbe, 0x50, 0xf4, 0x44, 0xf4, 0x84, 0x14, 0x80,
+];
+const LEGACY_MIGRATION_36_SCHEMA_SENTINEL: &str = "M36.table.feishu_reminder_runs.exact_definition";
+const LEGACY_MIGRATION_36_PRIMARY_KEY_INDEX: &str = "sqlite_autoindex_feishu_reminder_runs_1";
+const LEGACY_MIGRATION_36_TABLE_SQL: &str = r#"
+CREATE TABLE feishu_reminder_runs (
+    sent_date TEXT PRIMARY KEY NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    item_count INTEGER NOT NULL DEFAULT 0
+)
+"#;
+const LEGACY_MIGRATION_36_NEVER_EXECUTE_SQL: &str = r#"
+SELECT FROM;
+"#;
 
 const M63_QUARANTINE_TABLE_SQL: &str = r#"
 CREATE TABLE device_sync_quarantine (
@@ -133,6 +198,17 @@ fn checksum_hex(checksum: &[u8]) -> String {
     output
 }
 
+pub(crate) fn legacy_migration_36_metadata() -> Migration {
+    Migration {
+        version: LEGACY_MIGRATION_36_VERSION,
+        description: Cow::Borrowed(LEGACY_MIGRATION_36_DESCRIPTION),
+        migration_type: MigrationType::Simple,
+        sql: Cow::Borrowed(LEGACY_MIGRATION_36_NEVER_EXECUTE_SQL),
+        checksum: Cow::Borrowed(&LEGACY_MIGRATION_36_CHECKSUM),
+        no_tx: false,
+    }
+}
+
 fn schema_metadata_unreadable(_error: sqlx::Error) -> DbError {
     compatibility_error(
         DB_MIGRATION_LINEAGE_INCOMPATIBLE,
@@ -144,7 +220,9 @@ fn schema_metadata_unreadable(_error: sqlx::Error) -> DbError {
     )
 }
 
-pub(crate) async fn preflight_existing_database(database_path: &Path) -> Result<(), DbError> {
+pub(crate) async fn preflight_existing_database(
+    database_path: &Path,
+) -> Result<MigrationPreflight, DbError> {
     // SQLite's immutable mode does not reliably expose committed content that
     // exists only in a WAL. Refuse every sidecar shape before the first SQLite
     // connection; recovery/checkpointing must happen on an isolated copy.
@@ -196,7 +274,7 @@ pub(crate) fn ensure_no_wal_sidecars(database_path: &Path) -> Result<(), DbError
     Ok(())
 }
 
-async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
+async fn preflight_pool(pool: &SqlitePool) -> Result<MigrationPreflight, DbError> {
     if !object_exists(pool, "table", "_sqlx_migrations").await? {
         if has_user_schema_objects_other_than_migration_table(pool).await? {
             return Err(compatibility_error(
@@ -208,10 +286,10 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
                 Vec::new(),
             ));
         }
-        return Ok(());
+        return Ok(MigrationPreflight::default());
     }
 
-    let history: Vec<(i64, String, bool, Vec<u8>)> = sqlx::query_as(
+    let history: Vec<(i64, String, i64, Vec<u8>)> = sqlx::query_as(
         "SELECT version, description, success, checksum \
          FROM _sqlx_migrations ORDER BY version",
     )
@@ -239,7 +317,7 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
                 Vec::new(),
             ));
         }
-        return Ok(());
+        return Ok(MigrationPreflight::default());
     }
 
     let embedded_migrator = sqlx::migrate!("./migrations");
@@ -248,8 +326,9 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
         .map(|migration| (migration.version, migration))
         .collect();
 
-    for (version, _description, success, checksum) in &history {
-        if !success {
+    let mut allow_missing_legacy_migration_36 = false;
+    for (version, description, success, checksum) in &history {
+        if *success != 1 {
             return Err(compatibility_error(
                 DB_MIGRATION_LINEAGE_INCOMPATIBLE,
                 Some(*version),
@@ -262,6 +341,12 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
             ));
         }
         if !embedded_by_version.contains_key(version) {
+            if *version == LEGACY_MIGRATION_36_VERSION
+                && description == LEGACY_MIGRATION_36_DESCRIPTION
+            {
+                allow_missing_legacy_migration_36 = true;
+                continue;
+            }
             return Err(compatibility_error(
                 DB_MIGRATION_APPLIED_VERSION_UNKNOWN,
                 Some(*version),
@@ -312,6 +397,20 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
     }
 
     for (version, _description, _success, stored_checksum) in &history {
+        if *version == LEGACY_MIGRATION_36_VERSION {
+            if stored_checksum.as_slice() == LEGACY_MIGRATION_36_CHECKSUM.as_slice() {
+                continue;
+            }
+            return Err(compatibility_error(
+                DB_MIGRATION_CHECKSUM_UNKNOWN,
+                Some(*version),
+                "checksum_not_allowlisted",
+                Some(stored_checksum),
+                Some(&LEGACY_MIGRATION_36_CHECKSUM),
+                Vec::new(),
+            ));
+        }
+
         let embedded = embedded_by_version
             .get(version)
             .expect("unknown versions were rejected above");
@@ -330,7 +429,9 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<(), DbError> {
         ));
     }
 
-    Ok(())
+    Ok(MigrationPreflight {
+        allow_missing_legacy_migration_36,
+    })
 }
 
 async fn collect_missing_sentinels(
@@ -338,6 +439,15 @@ async fn collect_missing_sentinels(
     applied_versions: &HashSet<i64>,
 ) -> Result<Vec<MissingSentinel>, DbError> {
     let mut missing = Vec::new();
+
+    if applied_versions.contains(&LEGACY_MIGRATION_36_VERSION)
+        && !legacy_migration_36_schema_matches(pool).await?
+    {
+        missing.push(MissingSentinel {
+            migration_version: LEGACY_MIGRATION_36_VERSION,
+            code: LEGACY_MIGRATION_36_SCHEMA_SENTINEL,
+        });
+    }
 
     for (version, code, table) in [
         (49, "M49.table.feishu_sync_links", "feishu_sync_links"),
@@ -1129,6 +1239,135 @@ async fn collect_missing_sentinels(
     }
 
     Ok(missing)
+}
+
+async fn legacy_migration_36_schema_matches(pool: &SqlitePool) -> Result<bool, DbError> {
+    if !object_exists(pool, "table", "feishu_reminder_runs").await? {
+        return Ok(false);
+    }
+
+    let columns: Vec<TableColumnDefinition> = sqlx::query_as(
+        "SELECT cid, name, type AS data_type, \"notnull\" AS not_null, \
+                dflt_value AS default_value, pk AS primary_key_order, hidden \
+         FROM pragma_table_xinfo('feishu_reminder_runs') ORDER BY cid",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(schema_metadata_unreadable)?;
+    let expected_columns = vec![
+        TableColumnDefinition {
+            cid: 0,
+            name: "sent_date".to_string(),
+            data_type: "TEXT".to_string(),
+            not_null: 1,
+            default_value: None,
+            primary_key_order: 1,
+            hidden: 0,
+        },
+        TableColumnDefinition {
+            cid: 1,
+            name: "sent_at".to_string(),
+            data_type: "TEXT".to_string(),
+            not_null: 1,
+            default_value: Some("datetime('now')".to_string()),
+            primary_key_order: 0,
+            hidden: 0,
+        },
+        TableColumnDefinition {
+            cid: 2,
+            name: "item_count".to_string(),
+            data_type: "INTEGER".to_string(),
+            not_null: 1,
+            default_value: Some("0".to_string()),
+            primary_key_order: 0,
+            hidden: 0,
+        },
+    ];
+    if columns != expected_columns {
+        return Ok(false);
+    }
+
+    let table_list: Option<TableListDefinition> = sqlx::query_as(
+        "SELECT type AS object_type, ncol AS column_count, wr AS without_rowid, strict \
+         FROM pragma_table_list WHERE schema='main' AND name='feishu_reminder_runs'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(schema_metadata_unreadable)?;
+    if table_list
+        != Some(TableListDefinition {
+            object_type: "table".to_string(),
+            column_count: 3,
+            without_rowid: 0,
+            strict: 0,
+        })
+    {
+        return Ok(false);
+    }
+
+    let ddl: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master \
+         WHERE type='table' AND name='feishu_reminder_runs' \
+           AND tbl_name='feishu_reminder_runs'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(schema_metadata_unreadable)?;
+    let Some(ddl) = ddl else {
+        return Ok(false);
+    };
+    let normalized_ddl = normalize_schema_sql(&ddl);
+    if normalized_ddl != normalize_schema_sql(LEGACY_MIGRATION_36_TABLE_SQL) {
+        return Ok(false);
+    }
+
+    let indexes: Vec<IndexListDefinition> = sqlx::query_as(
+        "SELECT seq AS sequence, name, \"unique\", origin, partial \
+         FROM pragma_index_list('feishu_reminder_runs') ORDER BY seq",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(schema_metadata_unreadable)?;
+    if indexes
+        != vec![IndexListDefinition {
+            sequence: 0,
+            name: LEGACY_MIGRATION_36_PRIMARY_KEY_INDEX.to_string(),
+            unique: 1,
+            origin: "pk".to_string(),
+            partial: 0,
+        }]
+    {
+        return Ok(false);
+    }
+
+    let index_columns: Vec<IndexColumnDefinition> = sqlx::query_as(
+        "SELECT seqno AS sequence, cid AS column_id, name, \"desc\" AS descending, \
+                coll AS collation, \"key\" AS is_key \
+         FROM pragma_index_xinfo('sqlite_autoindex_feishu_reminder_runs_1') \
+         ORDER BY seqno",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(schema_metadata_unreadable)?;
+    Ok(index_columns
+        == vec![
+            IndexColumnDefinition {
+                sequence: 0,
+                column_id: 0,
+                name: Some("sent_date".to_string()),
+                descending: 0,
+                collation: Some("BINARY".to_string()),
+                is_key: 1,
+            },
+            IndexColumnDefinition {
+                sequence: 1,
+                column_id: -1,
+                name: None,
+                descending: 0,
+                collation: Some("BINARY".to_string()),
+                is_key: 0,
+            },
+        ])
 }
 
 async fn object_exists(pool: &SqlitePool, object_type: &str, name: &str) -> Result<bool, DbError> {

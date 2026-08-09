@@ -157,3 +157,73 @@
 | 2026-08-08T01:00:28+08:00 | worker-rc-review | start | V083-RC-REVIEW | 同步主控看板为独立RC复核执行中。 |
 | 2026-08-08T01:00:31+08:00 | worker-rc-review | submit | V083-RC-REVIEW | 独立总复核完成：P0=0、P1=0、P2=2，建议P2收口后接受本地RC；最终发布保持blocked_external。 |
 | 2026-08-08T01:00:33+08:00 | 04-project-master | review | V083-RC-REVIEW | accepted: 独立总复核P0=0/P1=0；六个状态噪声文件已以索引/工作树同哈希确认并从status清除，旧定向失败日志已在RC报告注明由重编译及Windows全量396项通过覆盖。正式发布继续blocked_external。 |
+| 2026-08-09T21:52:38+08:00 | 04-project-master | create_task | V083-FORMAL-DEVICE-GATE | created task 本设备正式安装与回滚门禁 |
+| 2026-08-09T21:52:40+08:00 | 04-project-master | create_task | V083-FORMAL-DB-GATE | created task 本设备正式数据库谱系与备份门禁 |
+| 2026-08-09T21:52:43+08:00 | 04-project-master | create_task | V083-FORMAL-RELEASE-GATE | created task 0.8.3远端签名发布只读门禁 |
+| 2026-08-09T21:52:46+08:00 | 04-project-master | dispatch | V083-FORMAL-DEVICE-GATE | 用户授权进入正式发布验收，先在本设备只读盘点安装与回滚边界。 |
+| 2026-08-09T21:52:49+08:00 | 04-project-master | dispatch | V083-FORMAL-DB-GATE | 先只读核验正式数据库谱系与一致性备份方案，禁止写入。 |
+| 2026-08-09T21:52:52+08:00 | 04-project-master | dispatch | V083-FORMAL-RELEASE-GATE | 只读核验远端签名发布能力，暂不push/tag/release。 |
+| 2026-08-09T21:53:26+08:00 | worker-formal-device-gate | start | V083-FORMAL-DEVICE-GATE | 开始只读盘点本机正式0.8.2安装、运行状态、数据位置与回滚前置；不读取秘密正文，不启动/停止/安装/修改/删除。 |
+| 2026-08-09T21:53:31+08:00 | worker-formal-release-gate | start | V083-FORMAL-RELEASE-GATE | - |
+| 2026-08-09T21:54:26+08:00 | worker-formal-db-gate | start | V083-FORMAL-DB-GATE | 开始正式数据库只读谱系与一致性备份门禁；不触发init_pool，不修改DB/WAL/SHM |
+| 2026-08-09T22:01:12+08:00 | worker-formal-release-gate | submit | V083-FORMAL-RELEASE-GATE | 正式发布只读 Gate：GitHub API/配额、origin/main、Actions、repo secret 名称、本机 key ACL/公钥与发布脚本均完成核验；当前 NO-GO/blocked_external（候选分支 ahead 13 未远端 CI，tag/Release/0.8.3签名资产不存在，提交范围 diff-check 有1条日志尾部空行）。报告：.agent-work/output/V083-FORMAL-RELEASE-GATE.md |
+| 2026-08-09T22:02:56+08:00 | worker-formal-device-gate | submit | V083-FORMAL-DEVICE-GATE | 已完成本机0.8.2正式安装与回滚门禁只读盘点：版本/卸载项/进程/数据与WebView2位置/凭据和同步元数据存储契约/容量/备份与回滚顺序已落盘。发现正式库存在非零WAL/SHM，且0.8.3正式bundle与签名链未齐，结论blocked_external；未读取秘密正文、未访问NAS、未启动停止安装修改删除。 |
+| 2026-08-09T22:06:45+08:00 | worker-formal-db-gate | submit | V083-FORMAL-DB-GATE | 正式DB只读门禁完成：quick/FK健康、62迁移成功、0063未应用；P1为sidecar前置阻断和缺失version36嵌入，历史checksum已有来源但需M1-COMPAT36后方可升级 |
+| 2026-08-09T22:07:32+08:00 | 04-project-master | review | V083-FORMAL-DEVICE-GATE | accepted: 只读盘点充分确认本机0.8.2、无进程、sidecar/备份/回滚边界；结论为正式安装暂阻断。 |
+| 2026-08-09T22:07:35+08:00 | 04-project-master | review | V083-FORMAL-DB-GATE | accepted: 只读谱系证据完整：quick/FK健康、61个checksum匹配、可信历史version36与sidecar构成两个P1；正式三文件未变。 |
+| 2026-08-09T22:07:38+08:00 | 04-project-master | review | V083-FORMAL-RELEASE-GATE | accepted: 远端只读门禁确认分支可快进、secret名称/公钥/ACL合格；tag/CI/资产未生成，提交卫生问题需先修。 |
+| 2026-08-09T22:08:46+08:00 | 04-project-master | create_task | V083-M1-COMPAT36 | created task 可信历史迁移36兼容实现 |
+| 2026-08-09T22:08:49+08:00 | 04-project-master | dispatch | V083-M1-COMPAT36 | 正式DB Gate发现可信legacy version36，派发唯一兼容实现；禁止正式资源访问。 |
+| 2026-08-09T22:09:13+08:00 | worker-m1-compat36 | start | V083-M1-COMPAT36 | 开始version36来源绑定兼容实现；仅固定tuple和精确schema，其他unknown继续写前fail closed |
+| 2026-08-09T22:10:43+08:00 | 04-project-master | create_task | V083-FORMAL-BACKUP-PREP | created task 本机正式备份与隔离升级执行包 |
+| 2026-08-09T22:10:46+08:00 | 04-project-master | dispatch | V083-FORMAL-BACKUP-PREP | 准备本机正式备份/隔离升级的精确执行包；不得访问或修改正式文件。 |
+| 2026-08-09T22:11:08+08:00 | worker-formal-backup-prep | start | V083-FORMAL-BACKUP-PREP | 开始编制正式备份与sidecar调和执行包；仅审计报告和脚本，不访问正式DB/NAS/凭据，不备份、不启动、不安装、不修改正式状态。 |
+| 2026-08-09T22:16:33+08:00 | worker-formal-backup-prep | submit | V083-FORMAL-BACKUP-PREP | 已完成正式备份与隔离升级执行包：冻结维护窗口、原样数据根/DB-WAL-SHM/安装目录/注册表备份、SQLite online main-only、0.8.2隔离恢复、兼容补丁后0.8.3首启/二启/指纹、同卷目录rename保留sidecar调和及整目录回滚。审计确认现有db_audit与Invoke脚本必须补丁；旧测试7/7通过但覆盖不足。未访问或修改正式DB/NAS/凭据，未实际备份、启动或安装。 |
+| 2026-08-09T22:17:01+08:00 | 04-project-master | review | V083-FORMAL-BACKUP-PREP | accepted: 执行包正确识别现有脚本缺口并给出原样备份、main-only、同卷目录交换与回滚边界；当前仅作为准备结论，不放行正式写入。 |
+| 2026-08-09T22:34:56+08:00 | worker-m1-compat36 | submit | V083-M1-COMPAT36 | version36固定tuple与精确schema兼容已实现；其他unknown继续写前fail closed；报告已如实区分已确认结果与并发误启不计入门禁，交主控串行验收 |
+| 2026-08-09T22:35:15+08:00 | 04-project-master | create_task | V083-M1-COMPAT36-REVIEW | created task 可信历史迁移36独立安全复核 |
+| 2026-08-09T22:35:18+08:00 | 04-project-master | dispatch | V083-M1-COMPAT36-REVIEW | 实现已提交但构建门禁由主控接管；先做独立静态安全复核。 |
+| 2026-08-09T22:35:37+08:00 | worker-m1-compat36-review | start | V083-M1-COMPAT36-REVIEW | - |
+| 2026-08-09T22:40:46+08:00 | worker-m1-compat36-review | submit | V083-M1-COMPAT36-REVIEW | 独立验收拒绝：P0=1（预检授权未绑定且全局 ignore_missing 可在竞态中放过任意 unknown version）、P1=1（table_xinfo 无法识别 WITHOUT ROWID/STRICT/额外约束）、P2=1（正例未以原始类型比较 version36 完整历史行）。报告：.agent-work/output/V083-M1-COMPAT36-REVIEW.md |
+| 2026-08-09T22:43:21+08:00 | 04-project-master | review | V083-M1-COMPAT36-REVIEW | accepted: 独立复核有效发现P0全局ignore_missing竞态、P1 schema绕过及P2整行断言缺口，结论采纳。 |
+| 2026-08-09T22:43:24+08:00 | 04-project-master | review | V083-M1-COMPAT36 | rejected: 退回修复：删除全局ignore_missing，显式补入仅v36迁移元数据并保持unknown二次校验；封闭预检至迁移竞态；补STRICT/WITHOUT ROWID/CHECK/UNIQUE/COLLATE负例和完整原始行断言。 |
+| 2026-08-09T22:47:37+08:00 | 04-project-master | create_task | V083-M1-COMPAT36-R2 | created task v0.8.3 migration 36 compatibility remediation R2 |
+| 2026-08-09T22:47:46+08:00 | 04-project-master | create_task | V083-FORMAL-TOOLING-R1 | created task v0.8.3 formal acceptance tooling R1 |
+| 2026-08-09T22:48:43+08:00 | 04-project-master | dispatch | V083-M1-COMPAT36-R2 | R2 assigned; master owns all Cargo gates |
+| 2026-08-09T22:48:47+08:00 | 04-project-master | dispatch | V083-FORMAL-TOOLING-R1 | Synthetic-only tooling remediation assigned |
+| 2026-08-09T22:49:08+08:00 | worker-m1-compat36-r2 | start | V083-M1-COMPAT36-R2 | 开始R2定点修正；已读派工量表和首轮复核，禁止构建和正式资源访问 |
+| 2026-08-09T22:49:19+08:00 | worker-formal-tooling-r1 | start | V083-FORMAL-TOOLING-R1 | 开始修订windows-upgrade-validation正式备份/隔离升级工具；仅工具、测试和报告，不访问正式DB/凭据/NAS，不启动安装应用，不运行Cargo。 |
+| 2026-08-09T22:52:31+08:00 | worker-m1-compat36-r2 | submit | V083-M1-COMPAT36-R2 | R2已修复P0/P1/P2：显式补入固定v36元数据且ignore_missing=false，写池前二次sidecar拒绝，四层精确schema与五类绕过负例，完整六字段历史行不变；未运行任何构建，待主控串行门禁 |
+| 2026-08-09T22:59:20+08:00 | worker-formal-tooling-r1 | submit | V083-FORMAL-TOOLING-R1 | R1安全最小闭环完成：db_audit改为copy-first trio→staging SQLite online main-only，硬断言正式源三文件不变、目标无sidecar、quick/FK；新增完整迁移/schema/逐表内容指纹/0063/sync审计及同数异内容检测。PowerShell改为显式阶段和SHA绑定resume manifest，无默认正式写、无启动/强杀/删除sidecar/安装/目录移动实现，FormalSwitch/Install在R1显式禁用。Python+PowerShell合成/静态测试13/13通过，PS语法和diff check通过；未访问正式DB/凭据/NAS，未启动安装应用，未运行Cargo。 |
+| 2026-08-09T23:03:00+08:00 | 04-project-master | review | V083-M1-COMPAT36-R2 | rejected: Independent review found two P1 defects: placeholder SQL can be satisfied by attacker-created table; synthetic DDL is invalid on SQLite. R3 required. |
+| 2026-08-09T23:03:43+08:00 | 04-project-master | create_task | V083-M1-COMPAT36-R3 | created task v0.8.3 migration 36 compatibility remediation R3 |
+| 2026-08-09T23:03:46+08:00 | 04-project-master | dispatch | V083-M1-COMPAT36-R3 | R3 narrow remediation; master owns all Cargo gates |
+| 2026-08-09T23:04:08+08:00 | worker-m1-compat36-r3 | start | V083-M1-COMPAT36-R3 | 开始R3两个P1窄修复；保留R2已确认项，禁止构建和正式资源访问 |
+| 2026-08-09T23:07:57+08:00 | worker-m1-compat36-r3 | submit | V083-M1-COMPAT36-R3 | R3两个P1已窄修复：synthetic v36改为不依赖对象的SELECT FROM无条件语法失败，并补preflight后替换缺v36库的生产init_pool不伪造测试；所有兼容DDL统一合法括号默认值并显式断言建表成功；未运行构建 |
+| 2026-08-09T23:10:23+08:00 | 04-project-master | review | V083-FORMAL-TOOLING-R1 | rejected: Independent review found migration hash omissions, forgeable resume chain, and unguarded rollback-journal target. R2 required. |
+| 2026-08-09T23:10:57+08:00 | 04-project-master | create_task | V083-FORMAL-TOOLING-R2 | created task v0.8.3 formal acceptance tooling R2 |
+| 2026-08-09T23:11:01+08:00 | 04-project-master | dispatch | V083-FORMAL-TOOLING-R2 | R2 narrow remediation on synthetic data only |
+| 2026-08-09T23:11:34+08:00 | worker-formal-tooling-r2 | start | V083-FORMAL-TOOLING-R2 | 开始R2窄修复，仅处理R1 review四类阻断；不访问正式DB/凭据/NAS，不启动安装应用，不运行Cargo，不实现FormalSwitch/Install。 |
+| 2026-08-09T23:17:56+08:00 | 04-project-master | review | V083-M1-COMPAT36-R3 | rejected: Windows full gate and independent review agree: table_xinfo default is normalized without outer parentheses. R4 one-line fix required. |
+| 2026-08-09T23:18:00+08:00 | 04-project-master | create_task | V083-M1-COMPAT36-R4 | created task v0.8.3 migration 36 compatibility remediation R4 |
+| 2026-08-09T23:18:02+08:00 | 04-project-master | dispatch | V083-M1-COMPAT36-R4 | One-line metadata normalization fix; master owns gates |
+| 2026-08-09T23:18:46+08:00 | worker-m1-compat36-r4 | start | V083-M1-COMPAT36-R4 | 开始R4单点修复table_xinfo默认值期望；禁止构建和正式资源访问 |
+| 2026-08-09T23:19:23+08:00 | worker-m1-compat36-r4 | submit | V083-M1-COMPAT36-R4 | R4仅修正table_xinfo默认值期望为datetime('now')；sqlite_master合法括号DDL白名单和R3其余逻辑保持不变；未运行构建 |
+| 2026-08-09T23:24:04+08:00 | worker-formal-tooling-r2 | submit | V083-FORMAL-TOOLING-R2 | R2窄修复已完成：migration原始字段与幂等语义、DPAPI-HMAC固定续跑链与artifact SHA、WAL/SHM/journal fail-closed、进程枚举错误即停；合成测试20/20、PowerShell语法与diff-check通过，FormalSwitch/Install继续禁用。报告：.agent-work/output/V083-FORMAL-TOOLING-R2.md |
+| 2026-08-09T23:29:46+08:00 | 04-project-master | review | V083-M1-COMPAT36-R4 | accepted: Independent review P0=0/P1=0; rustfmt targeted, Windows Rust 349+60 passed with 5 ignored, check and clippy -D warnings passed; no migration diff. |
+| 2026-08-09T23:33:18+08:00 | 04-project-master | review | V083-FORMAL-TOOLING-R2 | rejected: R2 backup/audit fixes pass, but caller ExitMode claim can create first/second-start-passed without observed execution. R3 must downgrade to recorded database postcheck only. |
+| 2026-08-09T23:33:21+08:00 | 04-project-master | create_task | V083-FORMAL-TOOLING-R3 | created task v0.8.3 formal acceptance tooling R3 |
+| 2026-08-09T23:33:23+08:00 | 04-project-master | dispatch | V083-FORMAL-TOOLING-R3 | Narrow evidence-semantics remediation; no app launch or formal write |
+| 2026-08-09T23:33:42+08:00 | worker-formal-tooling-r3 | start | V083-FORMAL-TOOLING-R3 | 开始R3窄修复：仅校正未观察应用运行时的recorded证据语义及FormalSwitch父状态边界；保留R2修复，不访问正式资源、不启动/安装应用、不跑Cargo、不实现正式阶段。 |
+| 2026-08-09T23:38:23+08:00 | worker-formal-tooling-r3 | submit | V083-FORMAL-TOOLING-R3 | R3证据语义窄修复完成：未观察应用时仅输出isolated/idempotent-db-postcheck-recorded，ExitMode显式为unverified_external_claim，recorded不能作为FormalSwitch/Install父证据；DPAPI/HMAC信任边界已澄清。完整合成测试20/20、PowerShell语法、diff-check通过；R2修复保留。报告：.agent-work/output/V083-FORMAL-TOOLING-R3.md |
+| 2026-08-09T23:41:25+08:00 | 04-project-master | review | V083-FORMAL-TOOLING-R3 | accepted: Independent review P0/P1/P2=0; master reran 20/20 synthetic tests, PowerShell parse and diff-check passed; no formal writes. |
+| 2026-08-09T23:43:17+08:00 | 04-project-master | create_task | V083-FORMAL-BACKUP-EXECUTE | created task v0.8.3 formal device backup execution |
+| 2026-08-09T23:43:20+08:00 | 04-project-master | dispatch | V083-FORMAL-BACKUP-EXECUTE | Authorized formal read/copy backup only; no app launch, install, switch, NAS or credential access |
+| 2026-08-09T23:44:11+08:00 | worker-formal-backup-execute | start | V083-FORMAL-BACKUP-EXECUTE | 开始固定批次V083-20260809-234237正式只读/复制备份；先执行进程、源trio、journal、目标、空间、rollback SHA门禁，不启动/安装/切换/删除sidecar/访问NAS或凭据内容。 |
+| 2026-08-09T23:51:09+08:00 | worker-formal-backup-execute | submit | V083-FORMAL-BACKUP-EXECUTE | 固定批次V083-20260809-234237正式原样备份与main-only已完成：源trio全阶段前后facts不变、raw逐项SHA一致、journal仍无、应用0；Backup/Audit SHA-HMAC父链通过；迁移62/max62/failed0、可信v36、m63未应用；补充2001条逐文件SHA复验0 mismatch；EFS/ACL递归0 violation。未启动/安装/切换/删除sidecar/访问NAS或凭据内容。报告：.agent-work/output/V083-FORMAL-BACKUP-EXECUTE.md |
+| 2026-08-09T23:57:54+08:00 | 04-project-master | review | V083-FORMAL-BACKUP-EXECUTE | accepted: Independent full recomputation P0=0/P1=0; 2001 file hashes, source/raw trio, manifest chain, main-only audit, EFS/ACL passed. P2 robocopy exit-code JSON typing is non-blocking. |
+| 2026-08-10T00:00:14+08:00 | 04-project-master | create_task | V083-CANDIDATE-SCOPE-REVIEW | created task v0.8.3 candidate scope review |
+| 2026-08-10T00:00:17+08:00 | 04-project-master | dispatch | V083-CANDIDATE-SCOPE-REVIEW | Read-only freeze scope audit |
+| 2026-08-10T00:00:28+08:00 | worker-candidate-scope-review | start | V083-CANDIDATE-SCOPE-REVIEW | 开始候选冻结前只读范围审计；核对diff/untracked/版本/敏感内容，不访问正式数据 |
+| 2026-08-10T00:04:17+08:00 | worker-candidate-scope-review | submit | V083-CANDIDATE-SCOPE-REVIEW | 候选范围审计完成：P0=0 P1=0 P2=2；实质产品仅COMPAT36三Rust，正式工具六文件，其余workflow证据；迁移/备份/秘密/业务正文零进入，版本边界正确，tracked diff-check通过 |
+| 2026-08-10T00:04:45+08:00 | 04-project-master | review | V083-CANDIDATE-SCOPE-REVIEW | accepted: P0=0/P1=0; explicit allowlist staging will exclude 27 status-only line-ending noise files. P2 EOF hints non-blocking. |
