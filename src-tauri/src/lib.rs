@@ -6880,8 +6880,15 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             match event {
-                // App 退出时清理子进程(llama-server)
-                tauri::WindowEvent::Destroyed => lifecycle::shutdown(),
+                // 主窗口正常退出时先关闭数据库连接池，让 SQLite 自然完成 WAL
+                // checkpoint 并清理 sidecar；异常终止仍保留 sidecar 供下次启动阻断。
+                tauri::WindowEvent::Destroyed => {
+                    lifecycle::shutdown();
+                    if window.label() == "main" {
+                        let pool = window.state::<SqlitePool>();
+                        tauri::async_runtime::block_on(pool.close());
+                    }
+                }
                 // 切回 App(窗口重新获得焦点)→ 触发一次滴答同步(已连接 + 开了自动同步才真跑)。
                 tauri::WindowEvent::Focused(true) => {
                     ticktick::sync_on_focus(window.app_handle().clone());
