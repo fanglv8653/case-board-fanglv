@@ -4,12 +4,13 @@
 //! incompatible files must fail during the read-only preflight, before a
 //! read-write/WAL pool can mutate migration history, schema or business rows.
 
+use super::migration_safety::{preflight_existing_database, recover_complete_wal_pair};
 use super::{
     init_pool, install_init_pool_after_preflight_hook, DbError, DbMigrationCompatibilityError,
     DB_MIGRATION_APPLIED_VERSION_UNKNOWN, DB_MIGRATION_CHECKSUM_UNKNOWN,
     DB_MIGRATION_LINEAGE_INCOMPATIBLE, DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
 };
-use sha2::{Digest, Sha384};
+use sha2::{Digest, Sha256, Sha384};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -320,6 +321,160 @@ async fn frozen_wal_fixture(
         std::fs::copy(&live_shm, sidecar_path(&frozen_database, "-shm"))
             .expect("freeze synthetic SHM sidecar");
     }
+    pool.close().await;
+    (directory, frozen_database)
+}
+
+async fn frozen_pre_0063_wal_fixture(label: &str) -> (TempDir, PathBuf) {
+    let directory = tempfile::Builder::new()
+        .prefix(&format!("caseboard-v083-pre62-wal-{label}-"))
+        .tempdir()
+        .expect("create pre-0063 WAL fixture directory");
+    let live_database = directory.path().join("live.db");
+    let frozen_database = directory.path().join("caseboard.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&live_database)
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open pre-0063 WAL fixture");
+    let embedded = sqlx::migrate!("./migrations");
+    let pre_0063 = Migrator {
+        migrations: Cow::Owned(
+            embedded
+                .iter()
+                .filter(|migration| migration.version <= 62)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    pre_0063
+        .run(&pool)
+        .await
+        .expect("apply real migrations through 0062 in WAL");
+    pool.close().await;
+
+    // Reopen only after the complete v62 lineage is durable in the main file,
+    // so corruption tests cannot pass merely because the main file is empty.
+    let wal_options = SqliteConnectOptions::new()
+        .filename(&live_database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(wal_options)
+        .await
+        .expect("reopen checkpointed v62 fixture in WAL mode");
+    sqlx::query("PRAGMA wal_autocheckpoint = 0")
+        .execute(&pool)
+        .await
+        .expect("disable WAL autocheckpoint");
+    sqlx::query(
+        "INSERT INTO cases (id,name,case_type,source_folder,legal_domain,domain_source) \
+         VALUES ('wal-bridge-marker','WAL bridge marker','诉讼', \
+                 'synthetic://wal-bridge','civil','manual')",
+    )
+    .execute(&pool)
+    .await
+    .expect("commit synthetic business row only represented by complete trio");
+    std::fs::copy(&live_database, &frozen_database).expect("freeze pre-0063 main database");
+    std::fs::copy(
+        sidecar_path(&live_database, "-wal"),
+        sidecar_path(&frozen_database, "-wal"),
+    )
+    .expect("freeze pre-0063 WAL");
+    std::fs::copy(
+        sidecar_path(&live_database, "-shm"),
+        sidecar_path(&frozen_database, "-shm"),
+    )
+    .expect("freeze pre-0063 SHM");
+    pool.close().await;
+    (directory, frozen_database)
+}
+
+fn sha256_file(path: &Path) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(path).expect("read fixture for SHA-256"))
+    )
+}
+
+fn expected_wal_backup_directory(database: &Path) -> PathBuf {
+    let paths = [database.to_path_buf(), sidecar_path(database, "-wal")];
+    let mut identity = Sha256::new();
+    for path in paths {
+        let bytes = std::fs::read(path).expect("read recovery input");
+        identity.update((bytes.len() as u64).to_le_bytes());
+        identity.update(format!("{:x}", Sha256::digest(&bytes)).as_bytes());
+    }
+    database.parent().expect("database parent").join(format!(
+        ".caseboard-v083-wal-recovery-{}",
+        &format!("{:x}", identity.finalize())[..20]
+    ))
+}
+
+async fn frozen_current_wal_fixture(label: &str) -> (TempDir, PathBuf) {
+    let (directory, pre_0063_database) = frozen_pre_0063_wal_fixture(label).await;
+    let live_database = directory.path().join("v63-live.db");
+    let frozen_database = directory.path().join("current-with-wal.db");
+    // The pre-0063 helper's main file is already a complete v62 lineage. Copy
+    // only that main file, then apply v63 into a new WAL so max(version)=63 is
+    // visible exclusively through the sidecar pair.
+    std::fs::copy(&pre_0063_database, &live_database).expect("copy checkpointed v62 main");
+    let options = SqliteConnectOptions::new()
+        .filename(&live_database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open current WAL fixture");
+    sqlx::query("PRAGMA wal_autocheckpoint = 0")
+        .execute(&pool)
+        .await
+        .expect("disable WAL autocheckpoint");
+    let embedded = sqlx::migrate!("./migrations");
+    let only_0063 = Migrator {
+        migrations: Cow::Owned(
+            embedded
+                .iter()
+                .filter(|migration| migration.version == 63)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: true,
+        locking: true,
+        no_tx: false,
+    };
+    only_0063
+        .run(&pool)
+        .await
+        .expect("apply migration 63 only into WAL");
+    sqlx::query(
+        "INSERT INTO cases (id,name,case_type,source_folder,legal_domain,domain_source) \
+         VALUES ('v63-wal-marker','v63 WAL marker','诉讼', \
+                 'synthetic://v63-wal','civil','manual')",
+    )
+    .execute(&pool)
+    .await
+    .expect("commit current WAL marker");
+    std::fs::copy(&live_database, &frozen_database).expect("freeze current main");
+    std::fs::copy(
+        sidecar_path(&live_database, "-wal"),
+        sidecar_path(&frozen_database, "-wal"),
+    )
+    .expect("freeze current WAL");
+    std::fs::copy(
+        sidecar_path(&live_database, "-shm"),
+        sidecar_path(&frozen_database, "-shm"),
+    )
+    .expect("freeze current SHM");
     pool.close().await;
     (directory, frozen_database)
 }
@@ -1095,8 +1250,409 @@ async fn empty_migration_history_with_existing_schema_fails_closed_before_any_wr
 }
 
 #[tokio::test]
-async fn complete_wal_and_shm_are_blocked_before_sqlite_connection() {
-    assert_sidecar_shape_is_blocked("complete", true, true).await;
+async fn complete_pre_0063_wal_pair_is_backed_up_recovered_and_idempotent() {
+    let (_directory, database) = frozen_pre_0063_wal_fixture("recover").await;
+    let input_hashes = [
+        sha256_file(&database),
+        sha256_file(&sidecar_path(&database, "-wal")),
+    ];
+    let partial_directory = expected_wal_backup_directory(&database);
+    std::fs::create_dir(&partial_directory).expect("create interrupted backup directory");
+    std::fs::copy(
+        &database,
+        partial_directory.join(database.file_name().expect("database file name")),
+    )
+    .expect("preserve the already completed backup member");
+
+    let backup = recover_complete_wal_pair(&database)
+        .await
+        .expect("complete 0.8.2 trio must recover")
+        .expect("first recovery creates an exact backup");
+    assert_eq!(
+        [backup.database_sha256.clone(), backup.wal_sha256.clone()],
+        [input_hashes[0].clone(), input_hashes[1].clone()]
+    );
+    for (source, expected_hash) in [
+        (&database, &backup.database_sha256),
+        (&sidecar_path(&database, "-wal"), &backup.wal_sha256),
+        (&sidecar_path(&database, "-shm"), &backup.shm_sha256),
+    ] {
+        let name = source.file_name().expect("fixture file name");
+        assert_eq!(sha256_file(&backup.directory.join(name)), *expected_hash);
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(backup.directory.join("manifest.json"))
+            .expect("read durable recovery manifest"),
+    )
+    .expect("parse recovery manifest");
+    assert_eq!(manifest["format"], "caseboard-v083-wal-recovery-v1");
+    assert_eq!(manifest["files"][0]["sha256"], backup.database_sha256);
+    assert_eq!(manifest["files"][1]["sha256"], backup.wal_sha256);
+    assert_eq!(manifest["files"][2]["sha256"], backup.shm_sha256);
+    assert!(!sidecar_path(&database, "-wal").exists());
+    assert!(!sidecar_path(&database, "-journal").exists());
+    preflight_existing_database(&database)
+        .await
+        .expect("recovered main database must pass immutable lineage preflight");
+    assert!(recover_complete_wal_pair(&database)
+        .await
+        .expect("second recovery is safe")
+        .is_none());
+
+    let migrated = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("recovered 0.8.2 database must migrate normally");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT name FROM cases WHERE id='wal-bridge-marker'")
+            .fetch_one(&migrated)
+            .await
+            .expect("WAL-only business marker survives recovery and migration"),
+        "WAL bridge marker"
+    );
+    migrated.close().await;
+}
+
+#[tokio::test]
+async fn wrong_existing_backup_fails_without_mutating_active_trio() {
+    let (_directory, database) = frozen_pre_0063_wal_fixture("wrong-backup").await;
+    let before = physical_fingerprint(&database);
+    let backup_directory = expected_wal_backup_directory(&database);
+    std::fs::create_dir(&backup_directory).expect("create existing backup directory");
+    std::fs::write(
+        backup_directory.join(database.file_name().expect("database file name")),
+        b"wrong-existing-backup",
+    )
+    .expect("install wrong existing backup member");
+
+    let error = recover_complete_wal_pair(&database)
+        .await
+        .expect_err("wrong existing backup must fail closed");
+    assert_eq!(
+        expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason,
+        "wal_sidecar_backup_verification_failed"
+    );
+    let after = physical_fingerprint(&database);
+    assert_eq!(after.database, before.database);
+    assert_eq!(after.wal, before.wal);
+    assert!(after.shm.is_some());
+}
+
+#[tokio::test]
+async fn corrupt_complete_sidecars_are_rejected_without_touching_active() {
+    let (_directory, database) = frozen_pre_0063_wal_fixture("corrupt-pair").await;
+    std::fs::write(sidecar_path(&database, "-wal"), b"corrupt-wal").unwrap();
+    std::fs::write(sidecar_path(&database, "-shm"), b"corrupt-shm").unwrap();
+    let before = physical_fingerprint(&database);
+
+    recover_complete_wal_pair(&database)
+        .await
+        .expect_err("corrupt complete sidecars must fail closed");
+    assert_eq!(physical_fingerprint(&database), before);
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn wal_reset_with_old_salt_tail_recovers_only_active_shm_frames() {
+    let (directory, checkpointed_database) = frozen_pre_0063_wal_fixture("reset-base").await;
+    let live_database = directory.path().join("reset-live.db");
+    let frozen_database = directory.path().join("reset-frozen.db");
+    std::fs::copy(&checkpointed_database, &live_database).expect("copy checkpointed v62 main");
+    let options = SqliteConnectOptions::new()
+        .filename(&live_database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open WAL reset fixture");
+    sqlx::query("PRAGMA wal_autocheckpoint=0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for sequence in 0..40 {
+        sqlx::query(
+            "INSERT INTO cases (id,name,case_type,source_folder,legal_domain,domain_source) \
+             VALUES (?1,?2,'诉讼',?3,'civil','manual')",
+        )
+        .bind(format!("pre-reset-{sequence}"))
+        .bind(format!("pre reset {sequence}"))
+        .bind(format!("synthetic://pre-reset/{sequence}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let restart: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(RESTART)")
+        .fetch_one(&pool)
+        .await
+        .expect("checkpoint without truncating old WAL allocation");
+    assert_eq!(restart.0, 0);
+    sqlx::query(
+        "INSERT INTO cases (id,name,case_type,source_folder,legal_domain,domain_source) \
+         VALUES ('post-reset-marker','post reset marker','诉讼', \
+                 'synthetic://post-reset','civil','manual')",
+    )
+    .execute(&pool)
+    .await
+    .expect("commit first transaction after WAL reset");
+    std::fs::copy(&live_database, &frozen_database).unwrap();
+    std::fs::copy(
+        sidecar_path(&live_database, "-wal"),
+        sidecar_path(&frozen_database, "-wal"),
+    )
+    .unwrap();
+    std::fs::copy(
+        sidecar_path(&live_database, "-shm"),
+        sidecar_path(&frozen_database, "-shm"),
+    )
+    .unwrap();
+    pool.close().await;
+
+    recover_complete_wal_pair(&frozen_database)
+        .await
+        .expect("valid reset WAL with stale tail must recover")
+        .expect("reset WAL creates recovery backup");
+    let read_pool = fixture_pool(&frozen_database, true).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT name FROM cases WHERE id='post-reset-marker'",)
+            .fetch_one(&read_pool)
+            .await
+            .unwrap(),
+        "post reset marker"
+    );
+    read_pool.close().await;
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn checkpointed_v62_main_with_bad_wal_tail_is_rejected() {
+    let (_directory, database) = frozen_pre_0063_wal_fixture("bad-tail").await;
+    let wal = sidecar_path(&database, "-wal");
+    let mut bytes = std::fs::read(&wal).expect("read valid WAL");
+    bytes.push(0x7f);
+    std::fs::write(&wal, bytes).expect("append invalid WAL tail");
+    let before = physical_fingerprint(&database);
+
+    let error = recover_complete_wal_pair(&database)
+        .await
+        .expect_err("unaligned WAL tail must fail before SQLite recovery");
+    assert_eq!(
+        expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason,
+        "wal_sidecar_physical_validation_failed"
+    );
+    assert_eq!(physical_fingerprint(&database), before);
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn checkpointed_v62_main_with_bad_wal_checksum_is_rejected() {
+    let (_directory, database) = frozen_pre_0063_wal_fixture("bad-checksum").await;
+    let wal = sidecar_path(&database, "-wal");
+    let mut bytes = std::fs::read(&wal).expect("read valid WAL");
+    let last = bytes.last_mut().expect("WAL contains a frame");
+    *last ^= 0x80;
+    std::fs::write(&wal, bytes).expect("corrupt WAL frame checksum input");
+    let before = physical_fingerprint(&database);
+
+    let error = recover_complete_wal_pair(&database)
+        .await
+        .expect_err("checksum-invalid WAL must fail before SQLite recovery");
+    assert_eq!(
+        expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason,
+        "wal_sidecar_physical_validation_failed"
+    );
+    assert_eq!(physical_fingerprint(&database), before);
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn legacy_writer_lock_makes_bridge_fail_closed() {
+    let (_directory, database) = frozen_pre_0063_wal_fixture("busy-writer").await;
+    let before = physical_fingerprint(&database);
+    let options = SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_millis(50));
+    let writer = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("open simulated legacy writer");
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&writer)
+        .await
+        .expect("hold legacy writer reservation");
+
+    let error = recover_complete_wal_pair(&database)
+        .await
+        .expect_err("exclusive bridge must not race an old writer");
+    let reason = expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason;
+    assert!(
+        matches!(
+            reason,
+            "wal_sidecar_physical_validation_failed" | "wal_sidecar_exclusive_lock_failed"
+        ),
+        "unexpected fail-closed classification: {reason}"
+    );
+    let after = physical_fingerprint(&database);
+    assert_eq!(after.database, before.database);
+    assert_eq!(after.wal, before.wal);
+    // SHM is transient coordination state and the deliberately active legacy
+    // writer may rebuild or remove it while this assertion runs.  The durable
+    // main database and WAL must remain byte-identical.
+    sqlx::query("ROLLBACK").execute(&writer).await.unwrap();
+    writer.close().await;
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn exclusive_sqlite_window_rejects_a_second_writer() {
+    let (_directory, database) = migrated_fixture("exclusive-window").await;
+    let owner_options = SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let owner = SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                sqlx::query("PRAGMA locking_mode=EXCLUSIVE")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("BEGIN EXCLUSIVE")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(owner_options)
+        .await
+        .expect("acquire exclusive SQLite owner window");
+    let contender_options = SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_millis(50));
+    let contender = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(contender_options)
+        .await;
+    if let Ok(contender) = contender {
+        let write = sqlx::query(
+            "INSERT INTO cases (id,name,case_type,source_folder) \
+             VALUES ('exclusive-contender','must fail','诉讼','synthetic://exclusive')",
+        )
+        .execute(&contender)
+        .await;
+        assert!(
+            write.is_err(),
+            "second writer must be rejected while owner holds EXCLUSIVE"
+        );
+        contender.close().await;
+    }
+    sqlx::query("ROLLBACK").execute(&owner).await.unwrap();
+    owner.close().await;
+}
+
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn combined_lineage_audit_failure_keeps_active_and_exact_backup() {
+    let (directory, checkpointed_database) = frozen_pre_0063_wal_fixture("audit-base").await;
+    let live_database = directory.path().join("audit-live.db");
+    let frozen_database = directory.path().join("audit-frozen.db");
+    std::fs::copy(&checkpointed_database, &live_database).expect("copy checkpointed v62 main");
+    let options = SqliteConnectOptions::new()
+        .filename(&live_database)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA wal_autocheckpoint=0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum=?1 WHERE version=49")
+        .bind(synthetic_divergent_checksum())
+        .execute(&pool)
+        .await
+        .expect("place unknown lineage checksum only in WAL");
+    std::fs::copy(&live_database, &frozen_database).unwrap();
+    std::fs::copy(
+        sidecar_path(&live_database, "-wal"),
+        sidecar_path(&frozen_database, "-wal"),
+    )
+    .unwrap();
+    std::fs::copy(
+        sidecar_path(&live_database, "-shm"),
+        sidecar_path(&frozen_database, "-shm"),
+    )
+    .unwrap();
+    pool.close().await;
+    let before = physical_fingerprint(&frozen_database);
+
+    let error = recover_complete_wal_pair(&frozen_database)
+        .await
+        .expect_err("combined lineage error must fail before checkpoint");
+    assert_eq!(
+        expect_compatibility(&error, DB_MIGRATION_CHECKSUM_UNKNOWN).reason,
+        "checksum_not_allowlisted"
+    );
+    let after = physical_fingerprint(&frozen_database);
+    assert_eq!(after.database, before.database);
+    assert_eq!(after.wal, before.wal);
+    assert!(after.shm.is_some());
+    let backup_database =
+        expected_wal_backup_directory(&frozen_database).join(frozen_database.file_name().unwrap());
+    let backup = physical_fingerprint(&backup_database);
+    assert_eq!(backup.database, after.database);
+    assert_eq!(backup.wal, after.wal);
+    assert!(backup.shm.is_some());
+}
+
+#[tokio::test]
+async fn complete_v63_wal_pair_is_rejected_without_mutating_active_trio() {
+    let (_directory, database) = frozen_current_wal_fixture("v63-reject").await;
+    let before = physical_fingerprint(&database);
+    let error = recover_complete_wal_pair(&database)
+        .await
+        .expect_err("v63 abnormal-exit trio must not use the 0.8.2 bridge");
+    assert_eq!(
+        expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason,
+        "wal_sidecar_version_not_legacy_082"
+    );
+    let after = physical_fingerprint(&database);
+    assert_eq!(after.database, before.database);
+    assert_eq!(after.wal, before.wal);
+    assert!(after.shm.is_some());
+    let backup_database = expected_wal_backup_directory(&database)
+        .join(database.file_name().expect("database file name"));
+    let backup = physical_fingerprint(&backup_database);
+    assert_eq!(backup.database, before.database);
+    assert_eq!(backup.wal, before.wal);
+    assert!(backup.shm.is_some());
+}
+
+#[tokio::test]
+async fn lone_rollback_journal_is_rejected_without_mutation() {
+    let (_directory, database) = migrated_fixture("lone-journal").await;
+    let before_database = std::fs::read(&database).expect("read database baseline");
+    let journal = sidecar_path(&database, "-journal");
+    let journal_bytes = b"synthetic-rollback-journal";
+    std::fs::write(&journal, journal_bytes).expect("create lone rollback journal");
+
+    let error = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect_err("lone rollback journal must fail closed");
+    assert_eq!(
+        expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason,
+        "wal_sidecar_present_requires_recovery"
+    );
+    assert_eq!(std::fs::read(&database).unwrap(), before_database);
+    assert_eq!(std::fs::read(&journal).unwrap(), journal_bytes);
 }
 
 #[tokio::test]
@@ -1105,8 +1661,15 @@ async fn wal_without_shm_is_blocked_before_sqlite_connection() {
 }
 
 #[tokio::test]
-async fn shm_without_wal_is_blocked_before_sqlite_connection() {
-    assert_sidecar_shape_is_blocked("only-shm", false, true).await;
+async fn shm_without_wal_is_treated_as_a_reconstructible_index() {
+    let (_directory, database) = migrated_fixture("only-shm").await;
+    let before = std::fs::read(&database).unwrap();
+    std::fs::write(sidecar_path(&database, "-shm"), vec![0_u8; 32_768]).unwrap();
+
+    preflight_existing_database(&database)
+        .await
+        .expect("orphan SHM contains no durable database pages");
+    assert_eq!(std::fs::read(&database).unwrap(), before);
 }
 
 #[tokio::test]

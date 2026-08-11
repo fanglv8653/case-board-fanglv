@@ -272,12 +272,16 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     }
 
     let is_memory = db_path == ":memory:";
-    if !is_memory {
-        // Refuse orphaned as well as paired WAL/SHM files before deciding
-        // whether the main database itself is new or existing.
+    let is_existing_file = !is_memory && Path::new(db_path).is_file();
+    if is_existing_file {
+        // A stopped 0.8.2 process may leave committed rows in a complete
+        // WAL/SHM pair. Preserve and verify the exact trio first, then let
+        // SQLite checkpoint it normally before immutable lineage preflight.
+        migration_safety::recover_complete_wal_pair(Path::new(db_path)).await?;
+    } else if !is_memory {
+        // A sidecar without a main database is never a recoverable trio.
         migration_safety::ensure_no_wal_sidecars(Path::new(db_path))?;
     }
-    let is_existing_file = !is_memory && Path::new(db_path).is_file();
 
     // Existing databases are inspected through a separate read-only connection
     // before any read-write/WAL connection is created. This ordering is the

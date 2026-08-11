@@ -5,6 +5,15 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
+use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "windows")]
+use std::io::{self, BufReader, Read, Write};
+#[cfg(target_os = "windows")]
+use std::time::Duration;
+
+#[cfg(target_os = "windows")]
+use sha2::{Digest, Sha256};
 use sqlx::migrate::{Migration, MigrationType};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -14,6 +23,19 @@ use super::{
     DB_MIGRATION_CHECKSUM_UNKNOWN, DB_MIGRATION_LINEAGE_INCOMPATIBLE,
     DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
 };
+
+#[cfg(target_os = "windows")]
+unsafe extern "C" {
+    #[link_name = "sqlite3_db_config"]
+    fn caseboard_sqlite3_db_config(
+        database: *mut std::ffi::c_void,
+        operation: std::ffi::c_int,
+        ...
+    ) -> std::ffi::c_int;
+}
+
+#[cfg(target_os = "windows")]
+const SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE: std::ffi::c_int = 1006;
 
 #[derive(Debug)]
 struct MissingSentinel {
@@ -62,6 +84,21 @@ struct IndexColumnDefinition {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MigrationPreflight {
     pub(crate) allow_missing_legacy_migration_36: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WalRecoveryBackup {
+    pub(crate) directory: PathBuf,
+    pub(crate) database_sha256: String,
+    pub(crate) wal_sha256: String,
+    pub(crate) shm_sha256: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSnapshot {
+    len: u64,
+    sha256: String,
 }
 
 const LEGACY_MIGRATION_36_VERSION: i64 = 36;
@@ -255,8 +292,579 @@ fn sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+#[cfg(target_os = "windows")]
+fn sidecar_recovery_error(reason: &'static str) -> DbError {
+    compatibility_error(
+        DB_MIGRATION_LINEAGE_INCOMPATIBLE,
+        None,
+        reason,
+        None,
+        None,
+        Vec::new(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn file_snapshot(path: &Path) -> Result<FileSnapshot, DbError> {
+    let file = File::open(path).map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    let len = file
+        .metadata()
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?
+        .len();
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(FileSnapshot {
+        len,
+        sha256: format!("{:x}", digest.finalize()),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn backup_file(source: &Path, destination: &Path) -> Result<(), DbError> {
+    let mut input =
+        File::open(source).map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    io::copy(&mut input, &mut output)
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    output
+        .sync_all()
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))
+}
+
+#[cfg(target_os = "windows")]
+fn read_u32(bytes: &[u8], big_endian: bool) -> u32 {
+    let value: [u8; 4] = bytes.try_into().expect("four-byte WAL word");
+    if big_endian {
+        u32::from_be_bytes(value)
+    } else {
+        u32::from_le_bytes(value)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wal_checksum(bytes: &[u8], big_endian: bool, mut state: (u32, u32)) -> (u32, u32) {
+    for words in bytes.chunks_exact(8) {
+        let first = read_u32(&words[..4], big_endian);
+        let second = read_u32(&words[4..], big_endian);
+        state.0 = state.0.wrapping_add(first).wrapping_add(state.1);
+        state.1 = state.1.wrapping_add(second).wrapping_add(state.0);
+    }
+    state
+}
+
+#[cfg(target_os = "windows")]
+fn validate_wal_pair(database_path: &Path) -> Result<(), DbError> {
+    let wal = fs::read(sidecar_path(database_path, "-wal"))
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_physical_validation_failed"))?;
+    let shm = fs::read(sidecar_path(database_path, "-shm"))
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_physical_validation_failed"))?;
+    if wal.len() < 32 || shm.len() < 136 || shm.len() % 32_768 != 0 {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let magic = u32::from_be_bytes(wal[0..4].try_into().unwrap());
+    let checksum_big_endian = match magic {
+        0x377f_0682 => false,
+        0x377f_0683 => true,
+        _ => {
+            return Err(sidecar_recovery_error(
+                "wal_sidecar_physical_validation_failed",
+            ))
+        }
+    };
+    if u32::from_be_bytes(wal[4..8].try_into().unwrap()) != 3_007_000 {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let encoded_page_size = u32::from_be_bytes(wal[8..12].try_into().unwrap());
+    let page_size = if encoded_page_size == 1 {
+        65_536_usize
+    } else {
+        encoded_page_size as usize
+    };
+    if !(512..=65_536).contains(&page_size) || !page_size.is_power_of_two() {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let mut database_header = [0_u8; 100];
+    File::open(database_path)
+        .and_then(|mut database| database.read_exact(&mut database_header))
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_physical_validation_failed"))?;
+    if &database_header[..16] != b"SQLite format 3\0" {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let database_page_size = u16::from_be_bytes(database_header[16..18].try_into().unwrap());
+    let database_page_size = if database_page_size == 1 {
+        65_536_usize
+    } else {
+        database_page_size as usize
+    };
+    if database_page_size != page_size {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let frame_size = 24_usize + page_size;
+    if (wal.len() - 32) % frame_size != 0 || wal.len() == 32 {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    // On Windows the wal-index header is native little-endian. SQLite keeps
+    // two copies; requiring agreement avoids trusting a torn SHM header. Use
+    // mxFrame rather than WAL EOF because a legal WAL reset may retain stale
+    // old-salt frames beyond the active prefix.
+    if shm[..48] != shm[48..96]
+        || u32::from_le_bytes(shm[0..4].try_into().unwrap()) != 3_007_000
+        || shm[12] != 1
+    {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let max_frame = u32::from_le_bytes(shm[16..20].try_into().unwrap()) as usize;
+    if max_frame == 0 {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let active_end = 32_usize
+        .checked_add(
+            max_frame
+                .checked_mul(frame_size)
+                .ok_or_else(|| sidecar_recovery_error("wal_sidecar_physical_validation_failed"))?,
+        )
+        .ok_or_else(|| sidecar_recovery_error("wal_sidecar_physical_validation_failed"))?;
+    if active_end > wal.len() {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let expected_header_checksum = (
+        u32::from_be_bytes(wal[24..28].try_into().unwrap()),
+        u32::from_be_bytes(wal[28..32].try_into().unwrap()),
+    );
+    let mut checksum = wal_checksum(&wal[..24], checksum_big_endian, (0, 0));
+    if checksum != expected_header_checksum {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    let mut has_commit = false;
+    for frame in wal[32..active_end].chunks_exact(frame_size) {
+        if frame[..4] == [0, 0, 0, 0] || frame[8..16] != wal[16..24] {
+            return Err(sidecar_recovery_error(
+                "wal_sidecar_physical_validation_failed",
+            ));
+        }
+        checksum = wal_checksum(&frame[..8], checksum_big_endian, checksum);
+        checksum = wal_checksum(&frame[24..], checksum_big_endian, checksum);
+        let stored = (
+            u32::from_be_bytes(frame[16..20].try_into().unwrap()),
+            u32::from_be_bytes(frame[20..24].try_into().unwrap()),
+        );
+        if checksum != stored {
+            return Err(sidecar_recovery_error(
+                "wal_sidecar_physical_validation_failed",
+            ));
+        }
+        has_commit |= frame[4..8] != [0, 0, 0, 0];
+    }
+    if !has_commit {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_physical_validation_failed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn atomic_replace_file(temporary: &Path, target: &Path) -> Result<(), DbError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let temporary_wide = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = if target.exists() {
+        unsafe {
+            ReplaceFileW(
+                PCWSTR(target_wide.as_ptr()),
+                PCWSTR(temporary_wide.as_ptr()),
+                PCWSTR::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                None,
+                None,
+            )
+        }
+    } else {
+        unsafe {
+            MoveFileExW(
+                PCWSTR(temporary_wide.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    result.map_err(|_| sidecar_recovery_error("wal_sidecar_backup_restore_failed"))
+}
+
+#[cfg(target_os = "windows")]
+fn write_atomic_bytes(target: &Path, bytes: &[u8]) -> Result<(), DbError> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?
+        .as_nanos();
+    let mut temporary_name = target.as_os_str().to_os_string();
+    temporary_name.push(format!(".tmp-{}-{unique}", std::process::id()));
+    let temporary = PathBuf::from(temporary_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    atomic_replace_file(&temporary, target)
+}
+
+/// Recover a legacy, complete WAL/SHM trio before immutable lineage preflight.
+///
+/// After a physical WAL check, one SQLite connection acquires exclusive writer
+/// ownership with checkpoint-on-close disabled. The raw trio at that locked
+/// point is copied to a content-addressed sibling directory and verified by
+/// length and SHA-256. Sidecars are never removed by application filesystem
+/// code: only an explicitly successful SQLite checkpoint and journal-mode
+/// transition may retire them.
+pub(crate) async fn recover_complete_wal_pair(
+    database_path: &Path,
+) -> Result<Option<WalRecoveryBackup>, DbError> {
+    #[cfg(target_os = "windows")]
+    {
+        return recover_complete_wal_pair_windows(database_path).await;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ensure_no_wal_sidecars(database_path)?;
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn recover_complete_wal_pair_windows(
+    database_path: &Path,
+) -> Result<Option<WalRecoveryBackup>, DbError> {
+    let wal_path = sidecar_path(database_path, "-wal");
+    let shm_path = sidecar_path(database_path, "-shm");
+    let journal_path = sidecar_path(database_path, "-journal");
+    let wal_exists = wal_path.try_exists().unwrap_or(true);
+    let shm_exists = shm_path.try_exists().unwrap_or(true);
+
+    // SHM is a reconstructible WAL index and contains no committed database
+    // pages.  With no WAL and no rollback journal it is safe to ignore an
+    // orphaned SHM left by SQLite after a proven checkpoint.
+    if !wal_exists && !journal_path.try_exists().unwrap_or(true) {
+        return Ok(None);
+    }
+    if !wal_exists || !shm_exists || journal_path.try_exists().unwrap_or(true) {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_present_requires_recovery",
+        ));
+    }
+
+    // Reject malformed/truncated/checksum-invalid WAL before SQLite can choose
+    // to ignore it as if no recoverable sidecar existed.
+    validate_wal_pair(database_path)?;
+    let exclusive_options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(false)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
+    let exclusive_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                let mut no_checkpoint_on_close = 0_i32;
+                {
+                    let mut handle = connection.lock_handle().await?;
+                    let result = unsafe {
+                        caseboard_sqlite3_db_config(
+                            handle.as_raw_handle().as_ptr().cast(),
+                            SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                            1_i32,
+                            &mut no_checkpoint_on_close as *mut i32,
+                        )
+                    };
+                    if result != 0 || no_checkpoint_on_close != 1 {
+                        return Err(sqlx::Error::Protocol(
+                            "SQLite no-checkpoint-on-close unavailable".to_string(),
+                        ));
+                    }
+                }
+                let mode: String = sqlx::query_scalar("PRAGMA locking_mode=EXCLUSIVE")
+                    .fetch_one(&mut *connection)
+                    .await?;
+                if !mode.eq_ignore_ascii_case("exclusive") {
+                    return Err(sqlx::Error::Protocol(
+                        "exclusive SQLite locking mode unavailable".to_string(),
+                    ));
+                }
+                sqlx::query("BEGIN EXCLUSIVE")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(exclusive_options)
+        .await
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_exclusive_lock_failed"))?;
+    validate_wal_pair(database_path)?;
+
+    let source_paths = [database_path.to_path_buf(), wal_path, shm_path];
+    let before = source_paths
+        .iter()
+        .map(|path| file_snapshot(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let identity = {
+        let mut digest = Sha256::new();
+        // SHM read marks may change merely by acquiring SQLite's exclusive
+        // connection. The durable database+WAL pair identifies one recovery
+        // set; the exact SHM bytes are still preserved and verified inside it.
+        for snapshot in before.iter().take(2) {
+            digest.update(snapshot.len.to_le_bytes());
+            digest.update(snapshot.sha256.as_bytes());
+        }
+        format!("{:x}", digest.finalize())
+    };
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    let backup_directory = parent.join(format!(".caseboard-v083-wal-recovery-{}", &identity[..20]));
+    match fs::create_dir(&backup_directory) {
+        Ok(()) => {
+            for source in &source_paths {
+                let file_name = source
+                    .file_name()
+                    .ok_or_else(|| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+                backup_file(source, &backup_directory.join(file_name))?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(sidecar_recovery_error("wal_sidecar_backup_failed")),
+    }
+    for source in &source_paths {
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+        let destination = backup_directory.join(file_name);
+        if !destination.try_exists().unwrap_or(true) {
+            backup_file(source, &destination)?;
+        }
+    }
+
+    let after = source_paths
+        .iter()
+        .map(|path| file_snapshot(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if after != before {
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_source_changed_during_backup",
+        ));
+    }
+    for (index, source) in source_paths.iter().enumerate() {
+        let backup = backup_directory.join(
+            source
+                .file_name()
+                .ok_or_else(|| sidecar_recovery_error("wal_sidecar_backup_failed"))?,
+        );
+        if file_snapshot(&backup)? != before[index] {
+            return Err(sidecar_recovery_error(
+                "wal_sidecar_backup_verification_failed",
+            ));
+        }
+    }
+
+    let manifest_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "format": "caseboard-v083-wal-recovery-v1",
+        "files": [
+            {"role": "database", "length": before[0].len, "sha256": &before[0].sha256},
+            {"role": "wal", "length": before[1].len, "sha256": &before[1].sha256},
+            {"role": "shm", "length": before[2].len, "sha256": &before[2].sha256}
+        ]
+    }))
+    .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?;
+    let manifest_path = backup_directory.join("manifest.json");
+    if manifest_path.try_exists().unwrap_or(false) {
+        if fs::read(&manifest_path)
+            .map_err(|_| sidecar_recovery_error("wal_sidecar_backup_failed"))?
+            != manifest_bytes
+        {
+            return Err(sidecar_recovery_error(
+                "wal_sidecar_backup_verification_failed",
+            ));
+        }
+    } else {
+        write_atomic_bytes(&manifest_path, &manifest_bytes)?;
+    }
+
+    // Every audit query reuses the one connection whose raw EXCLUSIVE
+    // transaction was opened by `after_connect`; no second writer can enter
+    // between the backed-up bytes, lineage classification and checkpoint.
+    let audit_result = preflight_pool(&exclusive_pool).await;
+    let max_version = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(version) FROM _sqlx_migrations WHERE success = 1",
+    )
+    .fetch_one(&exclusive_pool)
+    .await
+    .map_err(|_| sidecar_recovery_error("wal_sidecar_combined_audit_failed"));
+    let integrity: Result<String, DbError> = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&exclusive_pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_combined_audit_failed"));
+    let audit_failure = audit_result
+        .and_then(|preflight| {
+            if max_version?.unwrap_or(0) > 62 {
+                return Err(sidecar_recovery_error("wal_sidecar_version_not_legacy_082"));
+            }
+            if !integrity?.eq_ignore_ascii_case("ok") {
+                return Err(sidecar_recovery_error("wal_sidecar_integrity_check_failed"));
+            }
+            Ok(preflight)
+        })
+        .err();
+    if let Some(error) = audit_failure {
+        sqlx::query("ROLLBACK").execute(&exclusive_pool).await.ok();
+        exclusive_pool.close().await;
+        return Err(error);
+    }
+    sqlx::query("COMMIT")
+        .execute(&exclusive_pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_checkpoint_failed"))?;
+
+    // `locking_mode=EXCLUSIVE` keeps this sole connection's ownership after
+    // COMMIT, which SQLite requires because wal_checkpoint cannot run inside a
+    // transaction.
+    let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_one(&exclusive_pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_checkpoint_failed"))?;
+    // TRUNCATE success is represented by (busy=0, log=0, checkpointed=0).
+    // Accepting busy=0 with residual frames would let startup proceed without
+    // proving that every committed frame reached the main database.
+    if checkpoint != (0, 0, 0) {
+        exclusive_pool.close().await;
+        return Err(sidecar_recovery_error("wal_sidecar_checkpoint_busy"));
+    }
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode = DELETE")
+        .fetch_one(&exclusive_pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_checkpoint_failed"))?;
+    if !journal_mode.eq_ignore_ascii_case("delete") {
+        exclusive_pool.close().await;
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_journal_mode_delete_failed",
+        ));
+    }
+    // NO_CKPT_ON_CLOSE and exclusive locking deliberately keep handles and
+    // empty sidecars alive on failure paths. After explicit checkpoint+DELETE
+    // have both been proven successful, return this same connection to NORMAL
+    // so SQLite—not application filesystem code—can retire the empty files.
+    let locking_mode: String = sqlx::query_scalar("PRAGMA locking_mode=NORMAL")
+        .fetch_one(&exclusive_pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_checkpoint_failed"))?;
+    if !locking_mode.eq_ignore_ascii_case("normal") {
+        exclusive_pool.close().await;
+        return Err(sidecar_recovery_error(
+            "wal_sidecar_locking_mode_normal_failed",
+        ));
+    }
+    // Failure paths keep this enabled so merely closing the connection cannot
+    // checkpoint an unaudited WAL.  Once the explicit checkpoint and both mode
+    // transitions have succeeded, restore SQLite's normal close behaviour so
+    // SQLite itself can retire the now-empty WAL/SHM files.
+    let mut checkpoint_on_close_restored = 1_i32;
+    {
+        let mut connection = exclusive_pool
+            .acquire()
+            .await
+            .map_err(|_| sidecar_recovery_error("wal_sidecar_checkpoint_failed"))?;
+        let mut handle = connection
+            .lock_handle()
+            .await
+            .map_err(|_| sidecar_recovery_error("wal_sidecar_checkpoint_failed"))?;
+        let result = unsafe {
+            caseboard_sqlite3_db_config(
+                handle.as_raw_handle().as_ptr().cast(),
+                SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                0_i32,
+                &mut checkpoint_on_close_restored as *mut i32,
+            )
+        };
+        if result != 0 || checkpoint_on_close_restored != 0 {
+            return Err(sidecar_recovery_error(
+                "wal_sidecar_checkpoint_on_close_restore_failed",
+            ));
+        }
+    }
+    exclusive_pool.close().await;
+    for (suffix, reason) in [
+        ("-wal", "wal_sidecar_wal_remained_after_checkpoint"),
+        ("-journal", "wal_sidecar_journal_remained_after_checkpoint"),
+    ] {
+        if sidecar_path(database_path, suffix)
+            .try_exists()
+            .unwrap_or(true)
+        {
+            return Err(sidecar_recovery_error(reason));
+        }
+    }
+    ensure_no_wal_sidecars(database_path)?;
+
+    Ok(Some(WalRecoveryBackup {
+        directory: backup_directory,
+        database_sha256: before[0].sha256.clone(),
+        wal_sha256: before[1].sha256.clone(),
+        shm_sha256: before[2].sha256.clone(),
+    }))
+}
+
 pub(crate) fn ensure_no_wal_sidecars(database_path: &Path) -> Result<(), DbError> {
-    let sidecar_present_or_unreadable = ["-wal", "-shm"].iter().any(|suffix| {
+    // An orphaned SHM is only a reconstructible index.  WAL and rollback
+    // journal files can contain durable pages and always require recovery.
+    let sidecar_present_or_unreadable = ["-wal", "-journal"].iter().any(|suffix| {
         sidecar_path(database_path, suffix)
             .try_exists()
             .unwrap_or(true)
