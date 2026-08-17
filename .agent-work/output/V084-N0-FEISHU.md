@@ -1,5 +1,7 @@
 # V084-N0-FEISHU｜飞书“收件箱”双向同步冻结契约
 
+> 2026-08-17 主控 R2 修订：本报告中的理想化 12 字段远端 schema 已被正式 Base 的 22 字段全量审计推翻。实现不得要求用户表新增技术列；真实字段、六态状态、五类类型、双时间语义和本地账本边界以 `.agent-work/output/V084-N0-CONTRACT.md` 的 `accepted-r2` 版本及 `.agent-work/output/V084-FEISHU-INBOX-USAGE-AUDIT.md` 为唯一事实源。
+
 状态：`submitted_for_review` 前置报告（只读审计；未修改产品代码、迁移、版本、依赖或外部状态）
 
 ## 1. 结论

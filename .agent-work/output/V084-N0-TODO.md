@@ -1,5 +1,7 @@
 # V084-N0-TODO｜待办本地模型与案件进展复制冻结契约
 
+> 2026-08-17 主控 R2 修订：本报告形成时尚未读取用户指定的正式飞书表。业务字段、状态、时间和复制时间回退以 `.agent-work/output/V084-N0-CONTRACT.md` 的 `accepted-r2` 版本及 `.agent-work/output/V084-FEISHU-INBOX-USAGE-AUDIT.md` 为准；本报告中的 `item_at` 单时间模型已被真实的 `due_at + remind_at` 双时间模型取代。
+
 - task_id：`V084-N0-TODO`
 - 状态：`submitted_for_review`（主控审阅前不代表 accepted）
 - 审计方式：仅只读源码、迁移和既有测试；未读取正式数据库、凭据、NAS 或正式飞书 Base，未修改产品代码、迁移、版本或依赖。
