@@ -38,6 +38,7 @@ pub mod ticktick;
 mod feishu_binding_lifecycle_tests;
 pub mod transaction_research;
 pub mod update;
+pub mod update_lifecycle;
 pub mod verify;
 pub mod yuandian;
 
@@ -6509,7 +6510,11 @@ pub fn run() {
             // 团队版:已配置团队 → 后台启动监听+广播+周期同步(失败只记日志不阻启动)
             let team_pool = pool.clone();
             let lpr_pool = pool.clone();
+            let update_coordinator =
+                update_lifecycle::UpdateShutdownCoordinator::start(pool.clone())
+                    .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(pool);
+            app.manage(update_coordinator);
             // chat 模块全局 cancel 注册表(V0.1.13+)
             app.manage(chat::ChatCancelRegistry::default());
             app.manage(TeamNetState::default());
@@ -6559,6 +6564,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            update_lifecycle::start_app_update,
+            update_lifecycle::claim_app_update_success,
             lpr::get_lpr_snapshot,
             lpr::refresh_lpr_data,
             db::material_queue::list_material_source_decisions,

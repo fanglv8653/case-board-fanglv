@@ -28,17 +28,27 @@ test("new builds restore discovery through the main branch version marker", () =
   );
 });
 
-test("automatic installation remains on the signed Tauri updater path", () => {
+test("automatic update is coordinated by Rust and never installs from frontend", () => {
   const updater = read("src/lib/updater.ts");
+  const lifecycle = read("src-tauri/src/update_lifecycle.rs");
   const config = JSON.parse(read("src-tauri/tauri.conf.json"));
   const updaterConfig = config.plugins.updater;
 
-  assert.ok(updater.includes('from "@tauri-apps/plugin-updater"'));
-  assert.ok(updater.includes("return await check()"));
-  assert.ok(updater.includes("await update.downloadAndInstall("));
+  assert.ok(updater.includes('invoke("start_app_update"'));
+  assert.ok(updater.includes('invoke<PendingUpdate | null>("claim_app_update_success")'));
+  assert.equal(updater.includes("plugin-updater"), false);
+  assert.equal(updater.includes("localStorage"), false);
+  assert.equal(updater.includes("relaunch"), false);
   assert.equal(updater.includes("fetch("), false);
   assert.equal(updater.includes("writeFile"), false);
   assert.equal(updater.includes("Command.create"), false);
+  assert.ok(lifecycle.includes(".download("));
+  assert.equal(lifecycle.includes(".install("), false);
+  assert.equal(lifecycle.includes("download_and_install"), false);
+  assert.ok(lifecycle.includes("AttemptPhase::ShutdownComplete"));
+  assert.ok(lifecycle.includes("AttemptPhase::InstallerSucceeded"));
+  assert.ok(lifecycle.includes("tauri_plugin_updater::Error::Minisign"));
+  assert.ok(lifecycle.includes("UPD_SIGNATURE_INVALID"));
 
   assert.equal(updaterConfig.pubkey, EXPECTED_UPDATER_PUBKEY);
   assert.equal(
@@ -56,7 +66,7 @@ test("manual download is fallback only and never becomes an unsigned in-app inst
   const updater = read("src/lib/updater.ts");
 
   assert.ok(dialog.includes("await openUrl(url)"));
-  assert.ok(dialog.includes("const update = await checkAppUpdate()"));
-  assert.ok(dialog.includes("await downloadInstallRelaunch(update"));
+  assert.ok(dialog.includes("await startAppUpdate(info.latest"));
+  assert.ok(dialog.includes("shutdownIsInProgress"));
   assert.equal(updater.includes("download_url"), false);
 });

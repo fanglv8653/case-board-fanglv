@@ -16,7 +16,7 @@ import { Download, X, RefreshCw, AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { openUrl } from "@/lib/api";
-import { checkAppUpdate, downloadInstallRelaunch } from "@/lib/updater";
+import { AppUpdateError, startAppUpdate } from "@/lib/updater";
 import type { UpdateInfo } from "@/lib/types";
 
 interface Props {
@@ -31,6 +31,7 @@ export function UpdateAvailableDialog({ info, onClose }: Props) {
   const [downloaded, setDownloaded] = useState(0);
   const [total, setTotal] = useState(0);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [retryAllowed, setRetryAllowed] = useState(true);
 
   const pct = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
   const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
@@ -50,23 +51,23 @@ export function UpdateAvailableDialog({ info, onClose }: Props) {
     setErrMsg(null);
     setDownloaded(0);
     setTotal(0);
+    setRetryAllowed(true);
     try {
-      const update = await checkAppUpdate();
-      if (!update) {
-        // endpoint 还没上线 / 不可达 / 当前版本其实不低于远端 —— 回退手动下载
-        setErrMsg(
-          "暂时无法在应用内更新(可能是更新源未就绪或网络问题),已为你保留「去下载」手动方式。",
-        );
-        setPhase("error");
-        return;
-      }
-      // 下载(进度)→ 验签 → 安装 → 重启(成功则进程在 relaunch 后退出,不会走到下面)
-      await downloadInstallRelaunch(update, (p) => {
+      if (!info.latest) throw new AppUpdateError("UPD_METADATA_INVALID");
+      await startAppUpdate(info.latest, info.notes ?? null, (p) => {
         setDownloaded(p.downloaded);
         setTotal(p.total);
       });
     } catch (e) {
-      setErrMsg(`应用内更新失败:${e}\n\n可改用「去下载」手动安装新版。`);
+      const code = e instanceof AppUpdateError ? e.code : "UPD_UNKNOWN";
+      const shutdownIsInProgress =
+        code === "UPD_SHUTDOWN_TIMEOUT" || code === "UPD_SHUTDOWN_CHANNEL_CLOSED";
+      setRetryAllowed(!shutdownIsInProgress);
+      setErrMsg(
+        shutdownIsInProgress
+          ? `应用正在安全收尾（${code}）。请不要重复更新；收尾完成后应用会自动退出并继续安装。若十分钟后仍未退出，请重新启动应用。`
+          : `应用内更新失败（${code}）。本次未进入安装阶段，可改用「去下载」手动安装新版。`,
+      );
       setPhase("error");
     }
   };
@@ -165,10 +166,12 @@ export function UpdateAvailableDialog({ info, onClose }: Props) {
                   取消
                 </Button>
               )}
-              <Button size="sm" onClick={handleInAppUpdate}>
-                <RefreshCw className="mr-1.5 size-3.5" />
-                {phase === "error" ? "重试" : "立即更新"}
-              </Button>
+              {(phase !== "error" || retryAllowed) && (
+                <Button size="sm" onClick={handleInAppUpdate}>
+                  <RefreshCw className="mr-1.5 size-3.5" />
+                  {phase === "error" ? "重试" : "立即更新"}
+                </Button>
+              )}
             </>
           )}
         </footer>
