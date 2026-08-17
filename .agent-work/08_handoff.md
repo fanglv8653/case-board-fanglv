@@ -195,3 +195,24 @@
 | 2026-08-10T00:00:28+08:00 | worker-candidate-scope-review | 04-project-master | V083-CANDIDATE-SCOPE-REVIEW | ack | worker accepted task V083-CANDIDATE-SCOPE-REVIEW | .agent-work\threads\worker-candidate-scope-review |
 | 2026-08-10T00:04:17+08:00 | worker-candidate-scope-review | 04-project-master | V083-CANDIDATE-SCOPE-REVIEW | review_request | task V083-CANDIDATE-SCOPE-REVIEW is ready for review; please read local files | .agent-work\threads\worker-candidate-scope-review |
 | 2026-08-10T00:04:45+08:00 | 04-project-master | worker-candidate-scope-review | V083-CANDIDATE-SCOPE-REVIEW | accepted | master set accepted; read .agent-work/review/V083-CANDIDATE-SCOPE-REVIEW.md | .agent-work/review/V083-CANDIDATE-SCOPE-REVIEW.md |
+| 2026-08-17T14:14:08+08:00 | 04-project-master | worker-v084-updater | V084-N0-UPDATER | dispatch | master dispatched task V084-N0-UPDATER | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:14:10+08:00 | 04-project-master | worker-v084-todo | V084-N0-TODO | dispatch | master dispatched task V084-N0-TODO | .agent-work\threads\worker-v084-todo |
+| 2026-08-17T14:14:11+08:00 | 04-project-master | worker-v084-feishu | V084-N0-FEISHU | dispatch | master dispatched task V084-N0-FEISHU | .agent-work\threads\worker-v084-feishu |
+| 2026-08-17T14:14:53+08:00 | worker-v084-updater | 04-project-master | V084-N0-UPDATER | ack | worker accepted task V084-N0-UPDATER | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:15:04+08:00 | worker-v084-todo | 04-project-master | V084-N0-TODO | ack | worker accepted task V084-N0-TODO | .agent-work\threads\worker-v084-todo |
+| 2026-08-17T14:15:10+08:00 | worker-v084-feishu | 04-project-master | V084-N0-FEISHU | ack | worker accepted task V084-N0-FEISHU | .agent-work\threads\worker-v084-feishu |
+| 2026-08-17T14:28:21+08:00 | worker-v084-updater | 04-project-master | V084-N0-UPDATER | review_request | task V084-N0-UPDATER is ready for review; please read local files | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:28:30+08:00 | worker-v084-todo | 04-project-master | V084-N0-TODO | review_request | task V084-N0-TODO is ready for review; please read local files | .agent-work\threads\worker-v084-todo |
+| 2026-08-17T14:32:08+08:00 | worker-v084-feishu | 04-project-master | V084-N0-FEISHU | review_request | task V084-N0-FEISHU is ready for review; please read local files | .agent-work\threads\worker-v084-feishu |
+| 2026-08-17T14:35:10+08:00 | 04-project-master | worker-v084-todo | V084-N0-TODO | accepted | master set accepted; read .agent-work/review/V084-N0-TODO.md | .agent-work/review/V084-N0-TODO.md |
+| 2026-08-17T14:35:12+08:00 | 04-project-master | worker-v084-updater | V084-N0-UPDATER | rejected | master set rejected; read .agent-work/review/V084-N0-UPDATER.md | .agent-work/review/V084-N0-UPDATER.md |
+| 2026-08-17T14:35:14+08:00 | 04-project-master | worker-v084-feishu | V084-N0-FEISHU | rejected | master set rejected; read .agent-work/review/V084-N0-FEISHU.md | .agent-work/review/V084-N0-FEISHU.md |
+| 2026-08-17T14:35:35+08:00 | worker-v084-updater | 04-project-master | V084-N0-UPDATER | ack | worker accepted task V084-N0-UPDATER | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:35:50+08:00 | worker-v084-feishu | 04-project-master | V084-N0-FEISHU | ack | worker accepted task V084-N0-FEISHU | .agent-work\threads\worker-v084-feishu |
+| 2026-08-17T14:38:56+08:00 | worker-v084-updater | 04-project-master | V084-N0-UPDATER | review_request | task V084-N0-UPDATER is ready for review; please read local files | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:40:20+08:00 | worker-v084-feishu | 04-project-master | V084-N0-FEISHU | review_request | task V084-N0-FEISHU is ready for review; please read local files | .agent-work\threads\worker-v084-feishu |
+| 2026-08-17T14:41:31+08:00 | 04-project-master | worker-v084-feishu | V084-N0-FEISHU | accepted | master set accepted; read .agent-work/review/V084-N0-FEISHU.md | .agent-work/review/V084-N0-FEISHU.md |
+| 2026-08-17T14:41:33+08:00 | 04-project-master | worker-v084-updater | V084-N0-UPDATER | rejected | master set rejected; read .agent-work/review/V084-N0-UPDATER.md | .agent-work/review/V084-N0-UPDATER.md |
+| 2026-08-17T14:41:57+08:00 | worker-v084-updater | 04-project-master | V084-N0-UPDATER | ack | worker accepted task V084-N0-UPDATER | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:45:21+08:00 | worker-v084-updater | 04-project-master | V084-N0-UPDATER | review_request | task V084-N0-UPDATER is ready for review; please read local files | .agent-work\threads\worker-v084-updater |
+| 2026-08-17T14:45:56+08:00 | 04-project-master | worker-v084-updater | V084-N0-UPDATER | accepted | master set accepted; read .agent-work/review/V084-N0-UPDATER.md | .agent-work/review/V084-N0-UPDATER.md |

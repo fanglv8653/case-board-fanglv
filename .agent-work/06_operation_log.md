@@ -227,3 +227,27 @@
 | 2026-08-10T00:00:28+08:00 | worker-candidate-scope-review | start | V083-CANDIDATE-SCOPE-REVIEW | 开始候选冻结前只读范围审计；核对diff/untracked/版本/敏感内容，不访问正式数据 |
 | 2026-08-10T00:04:17+08:00 | worker-candidate-scope-review | submit | V083-CANDIDATE-SCOPE-REVIEW | 候选范围审计完成：P0=0 P1=0 P2=2；实质产品仅COMPAT36三Rust，正式工具六文件，其余workflow证据；迁移/备份/秘密/业务正文零进入，版本边界正确，tracked diff-check通过 |
 | 2026-08-10T00:04:45+08:00 | 04-project-master | review | V083-CANDIDATE-SCOPE-REVIEW | accepted: P0=0/P1=0; explicit allowlist staging will exclude 27 status-only line-ending noise files. P2 EOF hints non-blocking. |
+| 2026-08-17T14:14:03+08:00 | 04-project-master | create_task | V084-N0-UPDATER | created task v0.8.4更新生命周期与原子发布契约 |
+| 2026-08-17T14:14:05+08:00 | 04-project-master | create_task | V084-N0-TODO | created task v0.8.4待办本地模型与案件进展复制契约 |
+| 2026-08-17T14:14:06+08:00 | 04-project-master | create_task | V084-N0-FEISHU | created task v0.8.4飞书收件箱双向同步契约 |
+| 2026-08-17T14:14:08+08:00 | 04-project-master | dispatch | V084-N0-UPDATER | N0只读契约审计，禁止产品代码和外部状态写入 |
+| 2026-08-17T14:14:10+08:00 | 04-project-master | dispatch | V084-N0-TODO | N0只读契约审计，禁止产品代码和外部状态写入 |
+| 2026-08-17T14:14:11+08:00 | 04-project-master | dispatch | V084-N0-FEISHU | N0只读契约审计，禁止产品代码和外部状态写入 |
+| 2026-08-17T14:14:53+08:00 | worker-v084-updater | start | V084-N0-UPDATER | - |
+| 2026-08-17T14:15:04+08:00 | worker-v084-todo | start | V084-N0-TODO | - |
+| 2026-08-17T14:15:10+08:00 | worker-v084-feishu | start | V084-N0-FEISHU | - |
+| 2026-08-17T14:28:21+08:00 | worker-v084-updater | submit | V084-N0-UPDATER | 完成更新生命周期与原子发布只读审计：确认 Windows downloadAndInstall 后代码不可达，冻结 Rust 后端协调器、跨版本一次性凭据、清洁退出、双清单同提交、ASCII 资产、恢复语义、稳定错误码、测试及非重叠后续范围。 |
+| 2026-08-17T14:28:30+08:00 | worker-v084-todo | submit | V084-N0-TODO | 已完成只读契约审计：冻结演进case_todos、nullable关联与软删除、item_at/source业务字段、案件进展单事务防重、稳定错误码、UI入口、测试及T1/F1非重叠范围；未改产品代码或外部状态。 |
+| 2026-08-17T14:32:08+08:00 | worker-v084-feishu | submit | V084-N0-FEISHU | 已冻结飞书收件箱字段、稳定ID/版本/哈希三方基线、冲突删除去重防环、授权离线失败边界、测试矩阵及0065+非重叠范围 |
+| 2026-08-17T14:35:10+08:00 | 04-project-master | review | V084-N0-TODO | accepted: 接受演进case_todos的0064兼容方案、nullable case_id/软删除、单事务复制及现有唯一索引防重契约 |
+| 2026-08-17T14:35:12+08:00 | 04-project-master | review | V084-N0-UPDATER | rejected: 需修正同步on_before_exit hook无法直接await shutdown/pool.close的实现可行性，冻结无嵌套runtime的同步屏障与失败边界 |
+| 2026-08-17T14:35:14+08:00 | 04-project-master | review | V084-N0-FEISHU | rejected: 需把事项时间与本地item_at nullable契约对齐为可选，并补空值hash/远端同步/复制回退规则 |
+| 2026-08-17T14:35:35+08:00 | worker-v084-updater | start | V084-N0-UPDATER | - |
+| 2026-08-17T14:35:50+08:00 | worker-v084-feishu | start | V084-N0-FEISHU | - |
+| 2026-08-17T14:38:56+08:00 | worker-v084-updater | submit | V084-N0-UPDATER | 定点修订完成：明确同步 on_before_exit Fn() 无法否决安装且禁止 Tokio worker 嵌套 block_on；冻结独立 updater helper + 常驻专用 shutdown coordinator OS 线程 + 内存/耐久双屏障方案，插件仅 check/download 验签、不调用 install。补齐屏障超时、发送/ack 通道断开、shutdown 部分失败、安装启动/取消/非零退出/目标版本异常、token 防误报的行为与确定性测试。 |
+| 2026-08-17T14:40:20+08:00 | worker-v084-feishu | submit | V084-N0-FEISHU | R2已将事项时间改为可选，冻结null哈希、旧due_date投影、有无日期双向同步、清空一致性和复制时间三级回退，并补齐schema与测试门禁 |
+| 2026-08-17T14:41:31+08:00 | 04-project-master | review | V084-N0-FEISHU | accepted: R2已对齐nullable item_at：事项时间列存在但单元格可空，null哈希、due_date兼容投影、双向清空及复制回退闭环 |
+| 2026-08-17T14:41:33+08:00 | 04-project-master | review | V084-N0-UPDATER | rejected: R2同步屏障可行，但随机token不得进入命令行；改为受限ACL的一次性回执或句柄机制，命令行仅允许非秘密attempt_id |
+| 2026-08-17T14:41:57+08:00 | worker-v084-updater | start | V084-N0-UPDATER | - |
+| 2026-08-17T14:45:21+08:00 | worker-v084-updater | submit | V084-N0-UPDATER | 安全定点修订完成：删除命令行随机 token 及其哈希，命令行仅传非秘密 attempt_id；helper 在当前用户 SID 专用、protected DACL、拒绝宽 ACE 的目录原子写 installer_succeeded 一次性回执，目标应用按 attempt_id+当前版本+phase+退出码+时限原子 claim。新增 ACL/owner/重解析点/落盘错误码、故障注入与 argv/logger 无秘密测试，并明确同用户恶意进程不在本版威胁边界及未来秘密通道要求。 |
+| 2026-08-17T14:45:56+08:00 | 04-project-master | review | V084-N0-UPDATER | accepted: R3采用独立helper+专用shutdown coordinator+耐久屏障；成功回执为当前用户受限ACL原子文件，argv仅含非秘密attempt_id，失败关闭与测试完整 |
