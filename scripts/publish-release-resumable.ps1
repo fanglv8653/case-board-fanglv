@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory)][ValidatePattern('^[^/]+/[^/]+$')][string]$Repository,
     [Parameter(Mandatory)][ValidatePattern('^v\d+\.\d+\.\d+-fanglv$')][string]$Tag,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{7,40}$')][string]$ExpectedCommit,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{40}$')][string]$ExpectedCommit,
     [Parameter(Mandatory)][string]$ArtifactDirectory,
     [string]$GitRemote = 'origin',
     [string]$ReleaseTitle,
@@ -27,15 +27,16 @@ if ($artifactRoot -notlike "$root\*") {
     throw '产物目录必须位于当前仓库内。'
 }
 
-$assetFiles = @(Get-ChildItem -LiteralPath $artifactRoot -File | Where-Object {
-    $_.Name -match '(?i)(-setup\.exe(?:\.sig)?|SHA256SUMS\.txt|RELEASE_NOTES\.md)$'
-} | Sort-Object Name)
-if ($assetFiles.Count -lt 2) { throw '产物目录至少应包含 setup.exe 及其 .sig。' }
-$installers = @($assetFiles | Where-Object Name -Match '(?i)-setup\.exe$')
-if ($installers.Count -ne 1) { throw "必须恰有一个 setup.exe，实际 $($installers.Count)。" }
-if (-not (Test-Path -LiteralPath "$($installers[0].FullName).sig" -PathType Leaf)) {
-    throw "缺少安装包同名签名：$($installers[0].Name).sig"
+$expectedVersion = $Tag -replace '^v', '' -replace '-fanglv$', ''
+$expectedInstallerName = "FanglvCaseBoard_${expectedVersion}_x64-setup.exe"
+$expectedAssetNames = @($expectedInstallerName, "$expectedInstallerName.sig")
+$assetFiles = @(Get-ChildItem -LiteralPath $artifactRoot -File | Sort-Object Name)
+$assetContract = Get-CaseBoardReleaseAssetContract -Names @($assetFiles.Name) -ExpectedVersion $expectedVersion
+if ($assetContract.action -ne 'accept') {
+    throw "REL_ASSET_NAME_INVALID：产物目录必须且只能包含 $($expectedAssetNames -join ', ')"
 }
+$installers = @($assetFiles | Where-Object Name -CEQ $expectedInstallerName)
+if ($installers.Count -ne 1) { throw 'REL_ASSET_NAME_INVALID：未找到唯一精确安装包。' }
 if ($NotesFile) { $NotesFile = (Resolve-Path -LiteralPath $NotesFile).Path }
 if (-not $ReleaseTitle) { $ReleaseTitle = "方律案件看板 $Tag" }
 if ($PublishUpdaterManifest -and (-not $DraftManifestPath -or -not $ExpectedMainCommit)) {
@@ -143,9 +144,9 @@ if (-not $release) {
     if ($readOnly) {
         Write-Host '[plan] Release 不存在：实际执行时将创建。'
         foreach ($asset in $localAssets) { Write-Host "[plan] upload $($asset.name) size=$($asset.size) sha256=$($asset.sha256)" }
-        $release = [pscustomobject]@{ draft = $false; prerelease = $false; assets = @() }
+        $release = [pscustomobject]@{ draft = $true; prerelease = $false; assets = @(); target_commitish = $ExpectedCommit }
     }
-    $createArgs = @('release', 'create', $Tag, '--repo', $Repository, '--target', $ExpectedCommit, '--title', $ReleaseTitle)
+    $createArgs = @('release', 'create', $Tag, '--repo', $Repository, '--target', $ExpectedCommit, '--title', $ReleaseTitle, '--draft')
     if ($NotesFile) { $createArgs += @('--notes-file', $NotesFile) } else { $createArgs += @('--notes', "方律案件看板 $Tag") }
     if (-not $readOnly -and $PSCmdlet.ShouldProcess("$Repository/$Tag", '创建 GitHub Release')) {
         Invoke-CaseBoardBoundedRetry -Label '创建 GitHub Release' -MaxAttempts $MaxAttempts -BaseDelaySeconds $BaseDelaySeconds -Operation {
@@ -159,7 +160,11 @@ if (-not $release) {
 }
 
 if (-not $release) { throw '无法确认 GitHub Release 已存在。' }
-if ($release.draft -or $release.prerelease) { throw '目标 Release 为 draft/prerelease，拒绝混入正式资产。' }
+if ($release.prerelease) { throw '目标 Release 是 prerelease，拒绝发布。' }
+if ($release.PSObject.Properties.Name -contains 'target_commitish' -and
+    ([string]$release.target_commitish).ToLowerInvariant() -ne $ExpectedCommit.ToLowerInvariant()) {
+    throw 'REL_RELEASE_TARGET_MISMATCH：Release target 与冻结提交不一致。'
+}
 
 foreach ($local in $localAssets) {
     $liveRelease = Get-LiveRelease
@@ -199,8 +204,39 @@ foreach ($local in $localAssets) {
     }
 }
 
+if (-not $readOnly) {
+    $release = Get-LiveRelease
+    if (-not $release) { throw '上传后无法回读 Release。' }
+    foreach ($local in $localAssets) {
+        $verified = @(Get-CaseBoardAssetPlan -LocalAssets @($local) -RemoteAssets @($release.assets))[0]
+        if ($verified.action -ne 'verify') { throw "REL_ASSET_CONTENT_MISMATCH：$($local.name) 未收敛" }
+        Assert-RemoteAssetHash -PlanItem $verified
+    }
+    $remoteNames = @($release.assets | ForEach-Object { [string]$_.name })
+    if ($remoteNames.Count -ne 2 -or @($remoteNames | Where-Object { $_ -notin $expectedAssetNames }).Count -ne 0) {
+        throw 'REL_ASSET_NAME_INVALID：远端 Release 资产集合不等于精确资产对。'
+    }
+    if ($release.draft -and $PSCmdlet.ShouldProcess("$Repository/$Tag", '发布已齐套 draft Release')) {
+        Invoke-RetryNative -FilePath 'gh' -Arguments @('release', 'edit', $Tag, '--repo', $Repository, '--draft=false') -Label '发布 draft Release' | Out-Null
+        $release = Get-LiveRelease
+    }
+    if (-not $release -or $release.draft -or $release.prerelease) {
+        throw 'REL_REMOTE_VERIFY_FAILED：Release 发布后状态不正确。'
+    }
+    if (($release.PSObject.Properties.Name -contains 'target_commitish') -and
+        ([string]$release.target_commitish).ToLowerInvariant() -ne $ExpectedCommit.ToLowerInvariant()) {
+        throw 'REL_RELEASE_TARGET_MISMATCH：正式 Release 回读 target 漂移。'
+    }
+}
+elseif ($release.draft) {
+    Write-Host '[plan] 资产齐套并回读后发布 draft Release。'
+}
+
 if ($PublishUpdaterManifest) {
     if (-not $release) { throw '必须先确认 Release 存在，才能发布 updater manifest。' }
+    if (-not $readOnly -and ($release.draft -or $release.prerelease)) {
+        throw 'REL_REMOTE_VERIFY_FAILED：正式 Release 未就绪，禁止发布清单。'
+    }
     $installerRemote = @($release.assets | Where-Object name -EQ $installers[0].Name)
     if ($installerRemote.Count -ne 1 -and $readOnly) {
         $encodedName = [Uri]::EscapeDataString($installers[0].Name)
@@ -212,20 +248,37 @@ if ($PublishUpdaterManifest) {
     if ($installerRemote.Count -ne 1) { throw 'Release 中未找到唯一安装包资产。' }
     $draftText = Get-Content -LiteralPath $DraftManifestPath -Raw -Encoding UTF8
     $draft = $draftText | ConvertFrom-Json
-    $expectedVersion = $Tag -replace '^v', '' -replace '-fanglv$', ''
     $signatureText = (Get-Content -LiteralPath "$($installers[0].FullName).sig" -Raw -Encoding UTF8).Trim()
     $manifestPlan = Get-CaseBoardManifestPlan -Draft $draft -ExpectedVersion $expectedVersion -Installer $installerRemote[0] -Signature $signatureText
-    if ($manifestPlan.action -eq 'fail') { throw "updater manifest 校验失败：$($manifestPlan.reason)" }
+    if ($manifestPlan.action -eq 'fail') { throw "REL_MANIFEST_PAIR_INVALID：$($manifestPlan.reason)" }
+
+    $publishedAt = if ($release.PSObject.Properties.Name -contains 'published_at') { [string]$release.published_at } else { '' }
+    if (-not $readOnly -and -not $publishedAt) { throw 'REL_REMOTE_VERIFY_FAILED：Release 缺少 published_at。' }
+    $releaseUrl = if ($release.PSObject.Properties.Name -contains 'html_url') { [string]$release.html_url } else { "https://github.com/$Repository/releases/tag/$Tag" }
+    $expectedReleaseUrl = "https://github.com/$Repository/releases/tag/$Tag"
+    if ($releaseUrl -ne $expectedReleaseUrl) { throw 'REL_MANIFEST_PAIR_INVALID：Release URL 不符合 tag。' }
+    $versionDraft = [ordered]@{
+        version = $expectedVersion
+        released_at = if ($publishedAt) { ([datetime]$publishedAt).ToUniversalTime().ToString('yyyy-MM-dd') } else { '<release-date>' }
+        notes = [string]$draft.notes
+        download_url = $releaseUrl
+    }
+    if (-not $readOnly) {
+        $pairPlan = Get-CaseBoardManifestPairPlan -Latest $draft -Version ([pscustomobject]$versionDraft) -ExpectedVersion $expectedVersion -Installer $installerRemote[0] -Signature $signatureText -ReleaseUrl $releaseUrl
+        if ($pairPlan.action -ne 'publish') { throw "REL_MANIFEST_PAIR_INVALID：$($pairPlan.reason)" }
+    }
 
     $latestPath = Join-Path $root 'release/latest.json'
+    $versionPath = Join-Path $root 'release/version.json'
+    $manifestFiles = @('release/latest.json', 'release/version.json')
     $localHead = (& git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
     if (-not (Test-GitAncestor -Ancestor $ExpectedMainCommit -Descendant $localHead)) {
         throw '本地 HEAD 不是 ExpectedMainCommit 的快进后代。'
     }
     if ($localHead -ne $ExpectedMainCommit.ToLowerInvariant()) {
         $rangeFiles = @(& git -C $root diff --name-only "$ExpectedMainCommit..$localHead")
-        if (@($rangeFiles | Where-Object { $_ -ne 'release/latest.json' }).Count -gt 0) {
-            throw 'ExpectedMainCommit 之后包含 updater manifest 以外的提交，拒绝一并推送。'
+        if (@($rangeFiles).Count -ne 2 -or @($rangeFiles | Where-Object { $_ -notin $manifestFiles }).Count -gt 0) {
+            throw 'REL_MANIFEST_PAIR_INVALID：ExpectedMainCommit 之后必须恰好只有两份发布清单。'
         }
     }
     $remoteMain = Get-RemoteBranchCommit -Branch 'main'
@@ -233,50 +286,68 @@ if ($PublishUpdaterManifest) {
     if ($mainPlan.action -eq 'fail') { throw "main 安全门禁失败：$($mainPlan.reason)" }
 
     $draftJson = $draftText.TrimEnd([char[]]"`r`n") + "`n"
+    $versionJson = ($versionDraft | ConvertTo-Json -Depth 5) + "`n"
     $latestJson = Get-Content -LiteralPath $latestPath -Raw -Encoding UTF8
+    $currentVersionJson = Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8
     if ($mainPlan.action -eq 'converged') {
-        if ($latestJson -ne $draftJson) { throw '远端已更新，但本地 latest.json 与 draft 不一致。' }
-        Write-Host '[skip] updater manifest 已提交并推送。'
+        if ($latestJson -ne $draftJson -or $currentVersionJson -ne $versionJson) {
+            throw 'REL_MANIFEST_PAIR_INVALID：远端已更新，但本地清单对与事实不一致。'
+        }
+        Write-Host '[skip] 发布清单对已提交并推送。'
     }
     elseif ($readOnly) {
-        Write-Host "[plan] validate, replace, commit and fast-forward push release/latest.json from $ExpectedMainCommit"
+        Write-Host "[plan] validate, atomically replace, commit and fast-forward push the manifest pair from $ExpectedMainCommit"
     }
     else {
-        $latestStatus = (& git -C $root status --porcelain -- release/latest.json) -join "`n"
-        if ($latestStatus -and $latestJson -ne $draftJson) {
-            throw 'release/latest.json 已有不一致的未提交修改，拒绝覆盖。'
+        $manifestStatus = (& git -C $root status --porcelain -- $manifestFiles) -join "`n"
+        if ($manifestStatus -and ($latestJson -ne $draftJson -or $currentVersionJson -ne $versionJson)) {
+            throw '发布清单已有不一致的未提交修改，拒绝覆盖。'
         }
-        if ($latestJson -ne $draftJson) {
-            $tempLatest = Join-Path (Split-Path -Parent $latestPath) ("latest-{0}.tmp" -f [guid]::NewGuid())
-            try {
-                [IO.File]::WriteAllText($tempLatest, $draftJson, (New-Object Text.UTF8Encoding($false)))
-                Move-Item -LiteralPath $tempLatest -Destination $latestPath -Force
-            }
-            finally { Remove-Item -LiteralPath $tempLatest -Force -ErrorAction SilentlyContinue }
+        $alreadyStaged = @(& git -C $root diff --cached --name-only)
+        if ($alreadyStaged.Count -gt 0) { throw 'REL_MANIFEST_PAIR_INVALID：暂存区必须为空。' }
+        $tempLatest = Join-Path (Split-Path -Parent $latestPath) ("latest-{0}.tmp" -f [guid]::NewGuid())
+        $tempVersion = Join-Path (Split-Path -Parent $versionPath) ("version-{0}.tmp" -f [guid]::NewGuid())
+        try {
+            [IO.File]::WriteAllText($tempLatest, $draftJson, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($tempVersion, $versionJson, (New-Object Text.UTF8Encoding($false)))
+            Move-Item -LiteralPath $tempLatest -Destination $latestPath -Force
+            Move-Item -LiteralPath $tempVersion -Destination $versionPath -Force
         }
-        & git -C $root add -- release/latest.json
-        & git -C $root diff --cached --quiet -- release/latest.json
-        $hasCachedManifestDiff = $LASTEXITCODE -ne 0
-        if ($hasCachedManifestDiff) {
-            & git -C $root commit -m "chore: publish $expectedVersion updater manifest" -- release/latest.json
+        finally {
+            Remove-Item -LiteralPath $tempLatest -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tempVersion -Force -ErrorAction SilentlyContinue
+        }
+        & git -C $root add -- $manifestFiles
+        $cachedFiles = @(& git -C $root diff --cached --name-only)
+        if ($cachedFiles.Count -eq 2 -and @($cachedFiles | Where-Object { $_ -notin $manifestFiles }).Count -eq 0) {
+            & git -C $root commit -m "chore: publish $expectedVersion release manifests" -- $manifestFiles
             if ($LASTEXITCODE -ne 0) { throw '提交 updater manifest 失败。' }
         }
+        elseif ($cachedFiles.Count -ne 0) { throw 'REL_MANIFEST_PAIR_INVALID：暂存文件集合不等于清单对。' }
         $localHead = (& git -C $root rev-parse HEAD).Trim().ToLowerInvariant()
         $remoteMain = Get-RemoteBranchCommit -Branch 'main'
         $mainPlan = Get-CaseBoardMainPlan -RemoteCommit $remoteMain -ExpectedCommit $ExpectedMainCommit.ToLowerInvariant() -LocalCommit $localHead -LocalDescendsFromExpected (Test-GitAncestor -Ancestor $ExpectedMainCommit -Descendant $localHead)
         if ($mainPlan.action -eq 'fail') { throw "推送前 main 漂移：$($mainPlan.reason)" }
         if ($mainPlan.action -eq 'push') {
-            Invoke-CaseBoardBoundedRetry -Label '快进推送 updater manifest' -MaxAttempts $MaxAttempts -BaseDelaySeconds $BaseDelaySeconds -Operation {
+            Invoke-CaseBoardBoundedRetry -Label '快进推送发布清单对' -MaxAttempts $MaxAttempts -BaseDelaySeconds $BaseDelaySeconds -Operation {
                 $liveMain = Get-RemoteBranchCommit -Branch 'main'
                 $livePlan = Get-CaseBoardMainPlan -RemoteCommit $liveMain -ExpectedCommit $ExpectedMainCommit.ToLowerInvariant() -LocalCommit $localHead -LocalDescendsFromExpected $true
                 if ($livePlan.action -eq 'converged') { return }
                 if ($livePlan.action -eq 'fail') { throw "推送重试前 main 漂移：$($livePlan.reason)" }
-                Invoke-NativeCapture -FilePath 'git' -Arguments @('-C', $root, 'push', '--porcelain', $GitRemote, 'HEAD:refs/heads/main') -Label '快进推送 updater manifest' | Out-Null
+                Invoke-NativeCapture -FilePath 'git' -Arguments @('-C', $root, 'push', '--porcelain', $GitRemote, 'HEAD:refs/heads/main') -Label '快进推送发布清单对' | Out-Null
             }
         }
         $finalRemote = Get-RemoteBranchCommit -Branch 'main'
         if ($finalRemote -ne $localHead) { throw '推送后远端 main 未收敛到本地 manifest 提交。' }
-        Write-Host "[ok] updater manifest 已安全快进推送：$localHead"
+        $rawBase = "https://raw.githubusercontent.com/$Repository/main/release"
+        Invoke-CaseBoardBoundedRetry -Label '回读公开清单对' -MaxAttempts $MaxAttempts -BaseDelaySeconds $BaseDelaySeconds -Operation {
+            $remoteLatest = Invoke-NativeCapture -FilePath 'curl.exe' -Arguments @('--fail', '--silent', '--show-error', "$rawBase/latest.json") -Label '回读 latest.json'
+            $remoteVersion = Invoke-NativeCapture -FilePath 'curl.exe' -Arguments @('--fail', '--silent', '--show-error', "$rawBase/version.json") -Label '回读 version.json'
+            if (($remoteLatest.TrimEnd() + "`n") -ne $draftJson -or ($remoteVersion.TrimEnd() + "`n") -ne $versionJson) {
+                throw 'REL_REMOTE_VERIFY_FAILED：raw 清单对尚未收敛。'
+            }
+        } | Out-Null
+        Write-Host "[ok] 发布清单对已安全快进推送并回读：$localHead"
     }
 }
 else {

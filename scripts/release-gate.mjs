@@ -45,6 +45,12 @@ const cargoVersion = requiredMatch(
 const tauriConfig = json("src-tauri/tauri.conf.json");
 same(cargoVersion, packageVersion, "Cargo/package 版本漂移");
 same(tauriConfig.version, packageVersion, "Tauri/package 版本漂移");
+if (JSON.stringify(tauriConfig.bundle.externalBin) !== JSON.stringify(["binaries/caseboard-updater-helper"])) {
+  throw new Error("Tauri bundle 必须携带独立 caseboard updater helper");
+}
+if (!cargoToml.includes('name = "caseboard-updater-helper"') || !existsSync(join(root, "src-tauri/src/bin/caseboard-updater-helper.rs"))) {
+  throw new Error("独立 caseboard updater helper 源码或 Cargo binary 注册缺失");
+}
 
 if (existsSync(join(root, "src-tauri/Cargo.lock"))) {
   throw new Error("检测到陈旧的 src-tauri/Cargo.lock；workspace 只能保留根 Cargo.lock");
@@ -115,15 +121,19 @@ if (mode === "release") {
   same(tag, `v${packageVersion}-fanglv`, "发布 tag 与源码版本不一致");
   const artifactDir = resolve(root, artifactDirArg);
   if (!existsSync(artifactDir)) throw new Error(`产物目录不存在：${artifactDir}`);
-  const names = readdirSync(artifactDir);
-  const installers = names.filter((name) => name.toLowerCase().endsWith("-setup.exe"));
-  if (installers.length !== 1) throw new Error(`必须恰有一个 NSIS setup.exe，实际 ${installers.length}`);
-  const installer = installers[0];
-  if (!installer.includes(`_${packageVersion}_`)) throw new Error(`安装包文件名不含版本 ${packageVersion}`);
+  const names = readdirSync(artifactDir).sort();
+  const installer = `FanglvCaseBoard_${packageVersion}_x64-setup.exe`;
   const signatureName = `${installer}.sig`;
-  if (!names.includes(signatureName)) throw new Error(`缺少同基名 updater 签名：${signatureName}`);
-  const extraSignatures = names.filter((name) => name.toLowerCase().endsWith(".sig"));
-  if (extraSignatures.length !== 1) throw new Error(`必须恰有一个 .sig，实际 ${extraSignatures.length}`);
+  const expectedNames = [installer, signatureName].sort();
+  if (names.length !== 2 || names.some((name, index) => name !== expectedNames[index])) {
+    throw new Error(`REL_ASSET_NAME_INVALID：产物必须精确为 ${expectedNames.join(", ")}`);
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(packageVersion)) {
+    throw new Error(`release 模式只允许稳定版本号：${packageVersion}`);
+  }
+  if (names.some((name) => [...name].some((character) => character.charCodeAt(0) < 0x20 || character.charCodeAt(0) > 0x7e))) {
+    throw new Error("REL_ASSET_NAME_INVALID：资产名必须全部为 ASCII");
+  }
   const signature = readFileSync(join(artifactDir, signatureName), "utf8").trim();
   const decodedSignature = signature.includes("untrusted comment:")
     ? signature

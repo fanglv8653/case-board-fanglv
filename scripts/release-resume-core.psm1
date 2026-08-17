@@ -7,6 +7,24 @@ function Get-CaseBoardFileSha256 {
     (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-CaseBoardReleaseAssetContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$Names,
+        [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$ExpectedVersion
+    )
+
+    $installer = "FanglvCaseBoard_${ExpectedVersion}_x64-setup.exe"
+    $expected = @($installer, "$installer.sig")
+    if ($Names.Count -ne 2 -or @($Names | Where-Object { $_ -cnotin $expected }).Count -ne 0) {
+        return [pscustomobject]@{ action = 'fail'; reason = 'REL_ASSET_NAME_INVALID'; expected = $expected }
+    }
+    if (@($Names | Where-Object { $_ -notmatch '^[\x20-\x7E]+$' }).Count -ne 0) {
+        return [pscustomobject]@{ action = 'fail'; reason = 'REL_ASSET_NAME_INVALID'; expected = $expected }
+    }
+    [pscustomobject]@{ action = 'accept'; reason = 'exact_ascii_pair'; expected = $expected }
+}
+
 function Test-CaseBoardRetryableFailure {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Message)
@@ -142,6 +160,39 @@ function Get-CaseBoardManifestPlan {
     [pscustomobject]@{ action = 'publish'; reason = 'validated'; json = $Draft }
 }
 
+function Get-CaseBoardManifestPairPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Latest,
+        [Parameter(Mandatory)]$Version,
+        [Parameter(Mandatory)][string]$ExpectedVersion,
+        [Parameter(Mandatory)]$Installer,
+        [Parameter(Mandatory)][string]$Signature,
+        [Parameter(Mandatory)][string]$ReleaseUrl
+    )
+
+    $latestPlan = Get-CaseBoardManifestPlan -Draft $Latest -ExpectedVersion $ExpectedVersion -Installer $Installer -Signature $Signature
+    if ($latestPlan.action -eq 'fail') { return $latestPlan }
+    foreach ($field in @('version', 'released_at', 'notes', 'download_url')) {
+        if ($Version.PSObject.Properties.Name -notcontains $field) {
+            return [pscustomobject]@{ action = 'fail'; reason = "version_${field}_missing" }
+        }
+    }
+    if ([string]$Version.version -ne $ExpectedVersion) {
+        return [pscustomobject]@{ action = 'fail'; reason = 'version_pair_mismatch' }
+    }
+    if ([string]$Version.download_url -ne $ReleaseUrl) {
+        return [pscustomobject]@{ action = 'fail'; reason = 'release_url_mismatch' }
+    }
+    if ([string]$Version.notes -ne [string]$Latest.notes) {
+        return [pscustomobject]@{ action = 'fail'; reason = 'notes_pair_mismatch' }
+    }
+    if ([string]$Version.released_at -notmatch '^\d{4}-\d{2}-\d{2}$') {
+        return [pscustomobject]@{ action = 'fail'; reason = 'released_at_invalid' }
+    }
+    [pscustomobject]@{ action = 'publish'; reason = 'validated_pair' }
+}
+
 function Get-CaseBoardMainPlan {
     [CmdletBinding()]
     param(
@@ -165,10 +216,12 @@ function Get-CaseBoardMainPlan {
 
 Export-ModuleMember -Function @(
     'Get-CaseBoardFileSha256',
+    'Get-CaseBoardReleaseAssetContract',
     'Test-CaseBoardRetryableFailure',
     'ConvertTo-CaseBoardWindowsArgument',
     'Invoke-CaseBoardBoundedRetry',
     'Get-CaseBoardAssetPlan',
     'Get-CaseBoardManifestPlan',
+    'Get-CaseBoardManifestPairPlan',
     'Get-CaseBoardMainPlan'
 )

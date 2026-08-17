@@ -22,6 +22,13 @@ Assert-Equal (ConvertTo-CaseBoardWindowsArgument 'plain') 'plain' '普通参数�
 Assert-Equal (ConvertTo-CaseBoardWindowsArgument 'D:\案件 看板\asset.exe') '"D:\案件 看板\asset.exe"' '带空格路径安全引用'
 Assert-Equal (ConvertTo-CaseBoardWindowsArgument '') '""' '空参数安全引用'
 
+$exactAssets = @('FanglvCaseBoard_0.8.4_x64-setup.exe', 'FanglvCaseBoard_0.8.4_x64-setup.exe.sig')
+Assert-Equal (Get-CaseBoardReleaseAssetContract -Names $exactAssets -ExpectedVersion '0.8.4').action 'accept' '精确 ASCII 资产对通过'
+Assert-Equal (Get-CaseBoardReleaseAssetContract -Names @('方律案件看板_0.8.4_x64-setup.exe', '方律案件看板_0.8.4_x64-setup.exe.sig') -ExpectedVersion '0.8.4').reason 'REL_ASSET_NAME_INVALID' '中文资产名失败关闭'
+Assert-Equal (Get-CaseBoardReleaseAssetContract -Names @('fanglvcaseboard_0.8.4_x64-setup.exe', 'fanglvcaseboard_0.8.4_x64-setup.exe.sig') -ExpectedVersion '0.8.4').reason 'REL_ASSET_NAME_INVALID' '大小写变体失败关闭'
+Assert-Equal (Get-CaseBoardReleaseAssetContract -Names @('FanglvCaseBoard_0.8.3_x64-setup.exe', 'FanglvCaseBoard_0.8.3_x64-setup.exe.sig') -ExpectedVersion '0.8.4').reason 'REL_ASSET_NAME_INVALID' '错误版本资产失败关闭'
+Assert-Equal (Get-CaseBoardReleaseAssetContract -Names @($exactAssets + 'extra.sig') -ExpectedVersion '0.8.4').reason 'REL_ASSET_NAME_INVALID' '多余资产失败关闭'
+
 $attempts = 0
 $sleeps = @()
 $result = Invoke-CaseBoardBoundedRetry -Label '模拟 EOF' -MaxAttempts 4 -BaseDelaySeconds 1 -SleepAction {
@@ -79,6 +86,7 @@ $installer = [pscustomobject]@{ browser_download_url='https://example.invalid/ap
 $signature = 'trusted-signature'
 $validDraft = [pscustomobject]@{
     version='0.6.3'
+    notes='release notes'
     platforms=[pscustomobject]@{
         'windows-x86_64'=[pscustomobject]@{ url='https://example.invalid/app.exe'; signature=$signature }
     }
@@ -90,6 +98,14 @@ Assert-Equal (Get-CaseBoardManifestPlan -Draft $wrongVersion -ExpectedVersion '0
 $wrongUrl = $validDraft.PSObject.Copy(); $wrongUrl.platforms = [pscustomobject]@{ 'windows-x86_64'=[pscustomobject]@{ url='https://example.invalid/wrong.exe'; signature=$signature } }
 Assert-Equal (Get-CaseBoardManifestPlan -Draft $wrongUrl -ExpectedVersion '0.6.3' -Installer $installer -Signature $signature).reason 'url_mismatch' 'manifest URL 漂移'
 Assert-Equal (Get-CaseBoardManifestPlan -Draft $validDraft -ExpectedVersion '0.6.3' -Installer $installer -Signature 'different').reason 'signature_mismatch' 'manifest 签名漂移'
+
+$validVersion = [pscustomobject]@{ version='0.6.3'; released_at='2026-08-17'; notes=$validDraft.notes; download_url='https://example.invalid/tag/v0.6.3-fanglv' }
+$pair = Get-CaseBoardManifestPairPlan -Latest $validDraft -Version $validVersion -ExpectedVersion '0.6.3' -Installer $installer -Signature $signature -ReleaseUrl $validVersion.download_url
+Assert-Equal $pair.action 'publish' '两份清单同版同源可发布'
+$wrongPairVersion = $validVersion.PSObject.Copy(); $wrongPairVersion.version = '0.6.2'
+Assert-Equal (Get-CaseBoardManifestPairPlan -Latest $validDraft -Version $wrongPairVersion -ExpectedVersion '0.6.3' -Installer $installer -Signature $signature -ReleaseUrl $validVersion.download_url).reason 'version_pair_mismatch' 'version.json 版本漂移失败关闭'
+$wrongReleaseUrl = $validVersion.PSObject.Copy(); $wrongReleaseUrl.download_url = 'https://example.invalid/wrong'
+Assert-Equal (Get-CaseBoardManifestPairPlan -Latest $validDraft -Version $wrongReleaseUrl -ExpectedVersion '0.6.3' -Installer $installer -Signature $signature -ReleaseUrl $validVersion.download_url).reason 'release_url_mismatch' 'version.json Release URL 漂移失败关闭'
 
 $main = Get-CaseBoardMainPlan -RemoteCommit ('a' * 40) -ExpectedCommit ('a' * 40) -LocalCommit ('b' * 40) -LocalDescendsFromExpected $true
 Assert-Equal $main.action 'push' 'main 正确快进计划'

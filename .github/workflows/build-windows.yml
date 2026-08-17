@@ -17,6 +17,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checked-out release tag
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.release_tag }}"
+          if ($tag -notmatch '^v\d+\.\d+\.\d+-fanglv$') { throw "invalid release tag syntax" }
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "input does not name a fetched tag" }
+          $head = (git rev-parse HEAD).Trim()
+          $tagCommit = (git rev-list -n 1 $tag).Trim()
+          if ($head -ne $tagCommit) { throw "checkout HEAD does not match $tag" }
 
       - uses: pnpm/action-setup@v4
         with:
@@ -68,6 +83,17 @@ jobs:
           }
           Write-Host "Updater signing secrets are present (values not printed)."
 
+      - name: Build and stage dedicated updater helper
+        shell: pwsh
+        run: |
+          cargo build --release --locked --bin caseboard-updater-helper
+          $source = "target/release/caseboard-updater-helper.exe"
+          $targetDir = "src-tauri/binaries"
+          $target = Join-Path $targetDir "caseboard-updater-helper-x86_64-pc-windows-msvc.exe"
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "updater helper was not built" }
+          New-Item -ItemType Directory -Force $targetDir | Out-Null
+          Copy-Item -LiteralPath $source -Destination $target -Force
+
       # 应用内更新签名:私钥来自仓库 Actions secret(加密存储,fork 的 PR 拿不到)。
       # 注入后 createUpdaterArtifacts 会为 NSIS 安装包生成同名 .sig 签名文件。
       # 匿名使用统计:注入 anon/publishable key(低权限,只能写 usage_events;
@@ -115,7 +141,7 @@ jobs:
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
 
-      - name: Locate exact updater artifacts
+      - name: Normalize exact ASCII updater artifacts
         id: artifacts
         shell: pwsh
         run: |
@@ -131,9 +157,22 @@ jobs:
           if ($signatures[0].FullName -ne "$($installers[0].FullName).sig") {
             throw "updater .sig must have the exact installer basename"
           }
-          "installer=$($installers[0].FullName)" >> $env:GITHUB_OUTPUT
-          "signature=$($signatures[0].FullName)" >> $env:GITHUB_OUTPUT
-          "artifact_dir=$($installers[0].DirectoryName)" >> $env:GITHUB_OUTPUT
+          $stage = Join-Path $env:RUNNER_TEMP "caseboard-release-staging"
+          if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          New-Item -ItemType Directory $stage | Out-Null
+          $name = "FanglvCaseBoard_${version}_x64-setup.exe"
+          $installer = Join-Path $stage $name
+          $signature = "$installer.sig"
+          Copy-Item -LiteralPath $installers[0].FullName -Destination $installer
+          Copy-Item -LiteralPath $signatures[0].FullName -Destination $signature
+          $staged = @(Get-ChildItem -LiteralPath $stage -File)
+          if ($staged.Count -ne 2) { throw "release staging must contain exactly two files" }
+          if (@($staged.Name | Where-Object { $_ -notin @($name, "$name.sig") }).Count -ne 0) {
+            throw "release staging contains a non-contract asset name"
+          }
+          "installer=$installer" >> $env:GITHUB_OUTPUT
+          "signature=$signature" >> $env:GITHUB_OUTPUT
+          "artifact_dir=$stage" >> $env:GITHUB_OUTPUT
 
       - name: Verify final installer updater minisign
         run: >-
@@ -166,7 +205,7 @@ jobs:
         with:
           name: caseboard-windows-exe
           path: |
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/nsis/*.sig
+            ${{ steps.artifacts.outputs.installer }}
+            ${{ steps.artifacts.outputs.signature }}
             ${{ runner.temp }}/latest.json
           if-no-files-found: error
