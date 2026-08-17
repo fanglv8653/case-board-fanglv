@@ -271,3 +271,8 @@
 | 2026-08-17T17:33:49+08:00 | worker-v084-f1-local | start | V084-F1 | - |
 | 2026-08-17T18:26:41+08:00 | worker-v084-f1-local | submit | V084-F1 | 飞书收件箱同步已实现：只读预览、三方哈希、重复隔离、显式逐项处置、不确定写冻结；133项逻辑测试及严格Rust门禁通过 |
 | 2026-08-17T18:26:45+08:00 | 04-project-master | review | V084-F1 | accepted: 验收通过：实现符合R2字段契约和只读优先边界，远端写入均为显式操作并在不确定时失败关闭 |
+| 2026-08-17T18:28:22+08:00 | 04-project-master | create_task | V084-RC | created task v0.8.4 integration and local release candidate |
+| 2026-08-17T18:28:23+08:00 | 04-project-master | dispatch | V084-RC | U1 R1 T1 F1 accepted; begin source version convergence, integrated gates and local Windows RC. No GitHub publication or live Feishu writes. |
+| 2026-08-17T18:28:25+08:00 | worker-v084-rc-local | start | V084-RC | Direct serial RC integration in master process; no child agent spawned |
+| 2026-08-17T19:53:48+08:00 | worker-v084-rc-local | submit | V084-RC | 0.8.4版本源与本地RC已收口：133项逻辑测试、全目标Clippy、release helper/主程序构建和36项发布恢复测试通过；Rust运行时0xc0000139及正式签名/在线升级保留为外部验收 |
+| 2026-08-17T19:53:51+08:00 | 04-project-master | review | V084-RC | accepted: 本地RC验收通过，具备进入受控签名发布条件；未将Rust装载错误、未签名EXE或未执行的真实在线升级冒充正式发布完成 |
