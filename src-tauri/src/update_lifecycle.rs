@@ -131,7 +131,7 @@ impl UpdateShutdownCoordinator {
                     Ok(runtime) => runtime,
                     Err(_) => return,
                 };
-                while let Ok(request) = receiver.recv() {
+                if let Ok(request) = receiver.recv() {
                     crate::lifecycle::shutdown();
                     runtime.block_on(pool.close());
                     let result = transition_attempt(
@@ -145,7 +145,6 @@ impl UpdateShutdownCoordinator {
                         UpdateLifecycleError::with_detail(UPD_SHUTDOWN_FAILED, error.code)
                     });
                     let _ = request.response.send(result);
-                    break;
                 }
             })
             .map_err(|error| {
