@@ -18,6 +18,7 @@ import {
   Home,
   Scale,
   Settings as SettingsIcon,
+  ListTodo,
   Users,
   Wrench,
 } from "lucide-react";
@@ -34,6 +35,7 @@ export type ModuleId =
   | "criminal"
   | "execution"
   | "income"
+  | "todos"
   | "transaction"
   | "tools"
   | "memory"
@@ -59,6 +61,7 @@ const MODULES: {
   { id: "litigation", label: "民事", icon: Briefcase, group: "case" },
   { id: "execution", label: "执行", icon: Gavel, group: "case" },
   { id: "income", label: "收入", icon: CircleDollarSign, group: "work" },
+  { id: "todos", label: "待办事项", compactLabel: "待办", icon: ListTodo, group: "work" },
   { id: "transaction", label: "非诉", icon: FileQuestion, group: "work" },
   { id: "tools", label: "工具", icon: Wrench, group: "work" },
   {

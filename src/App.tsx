@@ -10,6 +10,7 @@ import { OnboardingWizard } from "@/components/OnboardingWizard";
 import { DeepSeekBalanceChip } from "@/components/DeepSeekBalanceChip";
 import { FeedbackButton } from "@/components/FeedbackButton";
 import { ModuleTabs } from "@/components/ModuleTabs";
+import { TodoBoard } from "@/components/TodoBoard";
 import { MemoryView } from "@/components/memory/MemoryView";
 // 私人专属功能接缝(双轨发布模型):开源仓返回 [] → 无「独立」顶层 tab。
 import { getPrivateTopTabs } from "@/private";
@@ -1130,6 +1131,7 @@ function App() {
           />
         )}
         {activeModule === "income" && <IncomeModule />}
+        {activeModule === "todos" && <TodoBoard cases={cases} />}
         {activeModule === "transaction" && <TransactionModule />}
         {activeModule === "tools" && (
           <ToolsModule

@@ -1273,26 +1273,32 @@ async fn mark_criminal_reminder(
 async fn add_todo(
     pool: tauri::State<'_, SqlitePool>,
     new: db::todos::NewTodo,
-) -> Result<db::todos::Todo, String> {
-    db::todos::add(pool.inner(), new).await.map_err(db_err)
+) -> Result<db::todos::Todo, db::todos::TodoError> {
+    db::todos::add(pool.inner(), new).await
 }
 
 #[tauri::command]
 async fn list_todos(
     pool: tauri::State<'_, SqlitePool>,
     case_id: String,
-) -> Result<Vec<db::todos::Todo>, String> {
-    db::todos::list_by_case(pool.inner(), &case_id)
-        .await
-        .map_err(db_err)
+) -> Result<Vec<db::todos::Todo>, db::todos::TodoError> {
+    db::todos::list_by_case(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn list_global_todos(
+    pool: tauri::State<'_, SqlitePool>,
+    filter: db::todos::TodoFilter,
+) -> Result<Vec<db::todos::Todo>, db::todos::TodoError> {
+    db::todos::list_global(pool.inner(), filter).await
 }
 
 /// 跨案件未完成待办(首页"待办汇总"用)。
 #[tauri::command]
 async fn list_open_todos(
     pool: tauri::State<'_, SqlitePool>,
-) -> Result<Vec<db::todos::OpenTodoRow>, String> {
-    db::todos::list_open(pool.inner()).await.map_err(db_err)
+) -> Result<Vec<db::todos::OpenTodoRow>, db::todos::TodoError> {
+    db::todos::list_open(pool.inner()).await
 }
 
 #[tauri::command]
@@ -1300,15 +1306,42 @@ async fn update_todo(
     pool: tauri::State<'_, SqlitePool>,
     id: String,
     upd: db::todos::UpdateTodo,
-) -> Result<u64, String> {
-    db::todos::update(pool.inner(), &id, &upd)
-        .await
-        .map_err(db_err)
+) -> Result<db::todos::Todo, db::todos::TodoError> {
+    db::todos::update(pool.inner(), &id, &upd).await
 }
 
 #[tauri::command]
-async fn delete_todo(pool: tauri::State<'_, SqlitePool>, id: String) -> Result<u64, String> {
-    db::todos::delete(pool.inner(), &id).await.map_err(db_err)
+async fn delete_todo(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<u64, db::todos::TodoError> {
+    db::todos::delete(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn set_todo_case(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+    case_id: Option<String>,
+) -> Result<db::todos::Todo, db::todos::TodoError> {
+    db::todos::set_case(pool.inner(), &id, case_id).await
+}
+
+#[tauri::command]
+async fn restore_todo(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+) -> Result<db::todos::Todo, db::todos::TodoError> {
+    db::todos::restore(pool.inner(), &id).await
+}
+
+#[tauri::command]
+async fn copy_todo_to_case_progress(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+    target_case_id: Option<String>,
+) -> Result<db::todos::CopyTodoResult, db::todos::TodoError> {
+    db::todos::copy_to_case_progress(pool.inner(), &id, target_case_id).await
 }
 
 /* ---- 源文件看板 Phase 3:文档标记(重要/忽略 + 原告/被告/第三人) ---- */
@@ -6716,9 +6749,13 @@ pub fn run() {
             db::criminal_workspace::list_criminal_task_artifacts,
             add_todo,
             list_todos,
+            list_global_todos,
             list_open_todos,
             update_todo,
             delete_todo,
+            set_todo_case,
+            restore_todo,
+            copy_todo_to_case_progress,
             list_document_tags,
             set_document_importance,
             set_document_party_side,

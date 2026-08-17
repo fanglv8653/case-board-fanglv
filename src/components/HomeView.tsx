@@ -1854,11 +1854,11 @@ function TodoSummary({ onPickCase }: { onPickCase: (caseId: string) => void }) {
 
   const todayKey = toDateKey(new Date());
   // 按案件分组(后端已按 case_name、组内创建倒序)
-  const groups: { caseId: string; caseName: string; items: OpenTodoRow[] }[] = [];
+  const groups: { caseId: string | null; caseName: string; items: OpenTodoRow[] }[] = [];
   for (const r of rows) {
     const last = groups[groups.length - 1];
     if (last && last.caseId === r.case_id) last.items.push(r);
-    else groups.push({ caseId: r.case_id, caseName: r.case_name, items: [r] });
+    else groups.push({ caseId: r.case_id, caseName: r.case_name ?? "未关联案件", items: [r] });
   }
 
   // 没待办就不显示(不占首页卡片格子)。
@@ -1878,8 +1878,9 @@ function TodoSummary({ onPickCase }: { onPickCase: (caseId: string) => void }) {
             <div key={g.caseId}>
               <button
                 type="button"
-                onClick={() => onPickCase(g.caseId)}
-                className="mb-1 text-xs font-medium text-sky-700 hover:underline"
+                onClick={() => g.caseId && onPickCase(g.caseId)}
+                disabled={!g.caseId}
+                className="mb-1 text-xs font-medium text-sky-700 enabled:hover:underline disabled:text-muted-foreground"
               >
                 {g.caseName}
               </button>
@@ -2822,8 +2823,8 @@ function buildTodoEvents(todos: OpenTodoRow[]): UpcomingEvent[] {
       daysFromNow: diffDays(d, now),
       type: t.title,
       note: null,
-      caseName: t.case_name,
-      caseId: t.case_id,
+      caseName: t.case_name ?? "未关联案件",
+      caseId: t.case_id ?? "",
       court: null,
     });
   }

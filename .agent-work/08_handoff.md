@@ -224,3 +224,7 @@
 | 2026-08-17T16:36:05+08:00 | worker-v084-r1-local | 04-project-master | V084-R1 | ack | worker accepted task V084-R1 | .agent-work\threads\worker-v084-r1-local |
 | 2026-08-17T16:47:22+08:00 | worker-v084-r1-local | 04-project-master | V084-R1 | review_request | task V084-R1 is ready for review; please read local files | .agent-work\threads\worker-v084-r1-local |
 | 2026-08-17T16:47:25+08:00 | 04-project-master | worker-v084-r1-local | V084-R1 | accepted | master set accepted; read .agent-work/review/V084-R1.md | .agent-work/review/V084-R1.md |
+| 2026-08-17T16:48:14+08:00 | 04-project-master | worker-v084-t1-local | V084-T1 | dispatch | master dispatched task V084-T1 | .agent-work\threads\worker-v084-t1-local |
+| 2026-08-17T16:48:16+08:00 | worker-v084-t1-local | 04-project-master | V084-T1 | ack | worker accepted task V084-T1 | .agent-work\threads\worker-v084-t1-local |
+| 2026-08-17T17:31:45+08:00 | worker-v084-t1-local | 04-project-master | V084-T1 | review_request | task V084-T1 is ready for review; please read local files | .agent-work\threads\worker-v084-t1-local |
+| 2026-08-17T17:32:07+08:00 | 04-project-master | worker-v084-t1-local | V084-T1 | accepted | master set accepted; read .agent-work/review/V084-T1.md | .agent-work/review/V084-T1.md |

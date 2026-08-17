@@ -1407,12 +1407,25 @@ export function deleteCaseAgencyContact(id: string): Promise<number> {
 
 export interface Todo {
   id: string;
-  case_id: string;
+  case_id: string | null;
   title: string;
-  done: number; // 0=未完成 1=已完成
+  content: string;
+  kind: "idea" | "todo" | "reminder" | "reference" | "memo";
+  priority: "high" | "medium" | "low" | "unjudged";
+  tags_json: string;
+  next_action: string | null;
+  status: "inbox" | "in_progress" | "waiting" | "completed" | "delete_pending" | "deleted";
+  done: number;
   done_at: string | null;
-  /** 2026-06-14:可选"重要日期"(ISO "YYYY-MM-DD");有则汇入首页日程日历 */
+  due_at: string | null;
+  remind_at: string | null;
   due_date: string | null;
+  source: "caseboard" | "feishu" | "hermes";
+  source_message_id: string | null;
+  source_at: string | null;
+  delete_requested_at: string | null;
+  delete_reason: string | null;
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1420,16 +1433,23 @@ export interface Todo {
 /** 跨案件未完成待办(首页汇总)— 扁平结构带 case_name */
 export interface OpenTodoRow {
   id: string;
-  case_id: string;
-  case_name: string;
+  case_id: string | null;
+  case_name: string | null;
   title: string;
   due_date: string | null;
   created_at: string;
 }
 
 export function addTodo(t: {
-  case_id: string;
+  case_id?: string | null;
   title: string;
+  content?: string;
+  kind?: Todo["kind"];
+  priority?: Todo["priority"];
+  tags?: string[];
+  next_action?: string | null;
+  due_at?: string | null;
+  remind_at?: string | null;
   due_date?: string | null;
 }): Promise<Todo> {
   return invoke<Todo>("add_todo", { new: t });
@@ -1445,13 +1465,40 @@ export function listOpenTodos(): Promise<OpenTodoRow[]> {
 
 export function updateTodo(
   id: string,
-  upd: { title?: string; done?: number; due_date?: string | null },
-): Promise<number> {
-  return invoke<number>("update_todo", { id, upd });
+  upd: Partial<Pick<Todo, "title" | "content" | "kind" | "priority" | "next_action" | "status" | "done" | "due_at" | "remind_at" | "due_date">> & { tags?: string[] },
+): Promise<Todo> {
+  return invoke<Todo>("update_todo", { id, upd });
 }
 
 export function deleteTodo(id: string): Promise<number> {
   return invoke<number>("delete_todo", { id });
+}
+
+export function listGlobalTodos(filter: {
+  state?: "open" | "completed" | "deleted" | "all";
+  case_id?: string | null;
+  query?: string | null;
+} = {}): Promise<Todo[]> {
+  return invoke<Todo[]>("list_global_todos", { filter });
+}
+
+export function setTodoCase(id: string, caseId: string | null): Promise<Todo> {
+  return invoke<Todo>("set_todo_case", { id, caseId });
+}
+
+export function restoreTodo(id: string): Promise<Todo> {
+  return invoke<Todo>("restore_todo", { id });
+}
+
+export interface CopyTodoResult {
+  work_item_id: string;
+  case_id: string;
+  created: boolean;
+  outcome_code: string;
+}
+
+export function copyTodoToCaseProgress(id: string, targetCaseId?: string | null): Promise<CopyTodoResult> {
+  return invoke<CopyTodoResult>("copy_todo_to_case_progress", { id, targetCaseId: targetCaseId ?? null });
 }
 
 /* ------------------------------------------------------------------ */
