@@ -1263,6 +1263,10 @@ export interface Settings {
   feishu_app_token: string | null;
   /** (可选)飞书"案件池"多维表格 Table ID。 */
   feishu_cases_table_id: string | null;
+  /** v0.8.4 待办“收件箱”的独立 Base 绑定。 */
+  feishu_todo_inbox_app_token: string | null;
+  feishu_todo_inbox_table_id: string | null;
+  feishu_todo_inbox_view_id: string | null;
   /** 飞书自建应用 App ID。App Secret 与 OAuth token 不进入 Settings。 */
   feishu_oauth_app_id: string | null;
 

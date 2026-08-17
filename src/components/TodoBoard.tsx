@@ -14,6 +14,7 @@ import {
 import type { Case } from "@/lib/types";
 import { confirmDialog } from "@/lib/dialog";
 import { toast } from "@/components/ui/toast";
+import { TodoFeishuSyncPanel } from "@/components/TodoFeishuSyncPanel";
 
 type FilterState = "open" | "completed" | "deleted" | "all";
 
@@ -112,6 +113,8 @@ export function TodoBoard({ cases }: { cases: Case[] }) {
           <h1 className="text-xl font-semibold">待办事项</h1>
           <p className="mt-1 text-sm text-muted-foreground">统一管理想法、任务、提醒、参考资料和备忘；可选择关联案件。</p>
         </div>
+
+        <TodoFeishuSyncPanel cases={cases} onApplied={() => void reload()} />
 
         <section className="space-y-3 rounded-xl border border-border bg-card p-4">
           <div className="grid gap-3 md:grid-cols-2">

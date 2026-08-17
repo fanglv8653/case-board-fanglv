@@ -1501,6 +1501,56 @@ export function copyTodoToCaseProgress(id: string, targetCaseId?: string | null)
   return invoke<CopyTodoResult>("copy_todo_to_case_progress", { id, targetCaseId: targetCaseId ?? null });
 }
 
+export interface TodoFeishuPreviewRow {
+  id: string;
+  run_id: string;
+  link_id: string | null;
+  item_id: string | null;
+  record_id: string | null;
+  remote_business_key: string | null;
+  change_kind: "create_local" | "create_remote" | "pull_to_local" | "push_to_remote" | "soft_delete_local" | "remote_missing" | "metadata_invalid" | "duplicate_id" | "conflict";
+  local_payload_json: string | null;
+  remote_payload_json: string | null;
+  local_hash: string | null;
+  remote_hash: string | null;
+  remote_modified_at: string | null;
+  case_hint: string | null;
+  status: string;
+  error_code: string | null;
+  created_at: string;
+}
+
+export interface TodoFeishuPreview {
+  rows: TodoFeishuPreviewRow[];
+  recent_runs: Array<{
+    id: string;
+    status: string;
+    remote_count: number;
+    preview_count: number;
+    conflict_count: number;
+    error_code: string | null;
+    started_at: string;
+    completed_at: string | null;
+  }>;
+}
+
+export function getTodoFeishuPreview(): Promise<TodoFeishuPreview> {
+  return invoke<TodoFeishuPreview>("get_todo_feishu_preview");
+}
+
+export function pullTodoFeishuPreview(): Promise<{ run_id: string; remote_count: number; preview_count: number; conflict_count: number }> {
+  return invoke("pull_todo_feishu_preview");
+}
+
+export function resolveTodoFeishuPreview(input: {
+  preview_id: string;
+  resolution: "local" | "feishu" | "keep_both" | "dismiss";
+  case_id?: string | null;
+  action_id: string;
+}): Promise<string | null> {
+  return invoke("resolve_todo_feishu_preview", { input });
+}
+
 /* ------------------------------------------------------------------ */
 /* 独立日历日程(2026-06-14 · calendar_events · 不绑案件,日历右键添加)  */
 /* ------------------------------------------------------------------ */

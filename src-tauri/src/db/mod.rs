@@ -101,6 +101,7 @@ pub mod material_queue;
 pub mod metrics;
 pub mod payments;
 pub mod seed;
+pub mod todo_feishu_sync;
 pub mod todos;
 pub mod usage_dashboard;
 

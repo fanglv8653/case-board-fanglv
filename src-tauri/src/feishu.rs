@@ -10,7 +10,7 @@
 //! 跨平台:lark-cli 在 macOS 走 Homebrew 路径,其他平台(Windows/Linux)靠 PATH
 //! 找 `lark-cli`(Windows 会自动匹配 `lark-cli.exe`);也可在设置里填 CLI 全路径。
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -892,6 +892,234 @@ pub async fn fetch_active_case_records(
     Err("FEISHU_RESPONSE_INVALID: 飞书记录分页超过安全上限".to_string())
 }
 
+const TODO_INBOX_FIELDS: &[&str] = &[
+    "事项",
+    "事项编号",
+    "原始内容",
+    "类型",
+    "状态",
+    "优先级",
+    "信息强度",
+    "来源消息ID",
+    "来源时间",
+    "更新时间",
+    "提醒次数",
+    "截止时间",
+    "关联案件",
+    "删除请求时间",
+    "删除原因",
+    "提醒时间",
+    "下一步动作",
+    "完成时间",
+    "标签",
+    "关联项目",
+    "最后提醒时间",
+    "外部归档路径",
+];
+
+fn metadata_option_names(field: &BitableFieldMetadata) -> HashSet<String> {
+    field
+        .property
+        .get("options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|option| option.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn validate_todo_inbox_fields(fields: &[BitableFieldMetadata]) -> Result<(), String> {
+    let by_name = fields
+        .iter()
+        .map(|field| (field.field_name.as_str(), field))
+        .collect::<HashMap<_, _>>();
+    let actual = by_name.keys().copied().collect::<HashSet<_>>();
+    let expected = TODO_INBOX_FIELDS.iter().copied().collect::<HashSet<_>>();
+    if actual != expected {
+        return Err("FEISHU_TODO_SCHEMA_MISMATCH: 收件箱字段集合与已验收结构不一致".into());
+    }
+    let type_rules: &[(&str, &[i64])] = &[
+        ("事项", &[1]),
+        ("事项编号", &[1]),
+        ("原始内容", &[1]),
+        ("类型", &[3]),
+        ("状态", &[3]),
+        ("优先级", &[3]),
+        ("信息强度", &[3]),
+        ("来源消息ID", &[1]),
+        ("来源时间", &[5]),
+        ("更新时间", &[5, 1002]),
+        ("提醒次数", &[2, 20]),
+        ("截止时间", &[5]),
+        ("关联案件", &[1]),
+        ("删除请求时间", &[5]),
+        ("删除原因", &[1]),
+        ("提醒时间", &[5]),
+        ("下一步动作", &[1]),
+        ("完成时间", &[5]),
+        ("标签", &[4]),
+        ("最后提醒时间", &[5]),
+        ("外部归档路径", &[1, 15]),
+    ];
+    for (name, allowed) in type_rules {
+        let field = by_name[name];
+        if !field
+            .field_type
+            .is_some_and(|value| allowed.contains(&value))
+        {
+            return Err(format!(
+                "FEISHU_TODO_SCHEMA_MISMATCH: 字段“{name}”类型不匹配"
+            ));
+        }
+    }
+    for (name, required) in [
+        ("类型", &["想法", "待办", "提醒", "资料", "备忘"][..]),
+        (
+            "状态",
+            &["收件箱", "进行中", "等待", "完成", "删除待确认", "已删除"][..],
+        ),
+        ("优先级", &["高", "中", "低"][..]),
+    ] {
+        let options = metadata_option_names(by_name[name]);
+        if !required.iter().all(|value| options.contains(*value)) {
+            return Err(format!(
+                "FEISHU_TODO_SCHEMA_MISMATCH: 字段“{name}”缺少已验收单选值"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_named_todo_target(
+    client: &reqwest::Client,
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+    view_id: &str,
+) -> Result<(), String> {
+    let tables_endpoint =
+        format!("https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables");
+    let tables = read_bitable_response(
+        client
+            .get(tables_endpoint)
+            .bearer_auth(access_token)
+            .query(&[("page_size", "100")])
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 读取收件箱表信息超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?,
+    )
+    .await?;
+    let table_ok = response_data(&tables)
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|item| {
+            item.get("table_id").and_then(Value::as_str) == Some(table_id)
+                && item.get("name").and_then(Value::as_str) == Some("📥收件箱")
+        });
+    if !table_ok {
+        return Err("FEISHU_TODO_SCHEMA_MISMATCH: Table ID 必须指向“📥收件箱”".into());
+    }
+    let views_endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/views"
+    );
+    let views = read_bitable_response(
+        client
+            .get(views_endpoint)
+            .bearer_auth(access_token)
+            .query(&[("page_size", "100")])
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 读取收件箱视图超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?,
+    )
+    .await?;
+    let view_ok = response_data(&views)
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|item| {
+            item.get("view_id").and_then(Value::as_str) == Some(view_id)
+                && item.get("view_name").and_then(Value::as_str) == Some("收件箱")
+        });
+    if !view_ok {
+        return Err("FEISHU_TODO_SCHEMA_MISMATCH: View ID 必须指向“收件箱”视图".into());
+    }
+    let fields = fetch_table_field_metadata(client, access_token, app_token, table_id).await?;
+    validate_todo_inbox_fields(&fields)
+}
+
+/// 拉取正式“📥收件箱”视图的全部记录。只读、全分页、先做表名/视图名/22 字段门禁。
+pub async fn fetch_todo_inbox_records(
+    access_token: &str,
+    app_token: &str,
+    table_id: &str,
+    view_id: &str,
+) -> Result<Vec<FeishuRemoteCaseRecord>, String> {
+    record_f1_http_read();
+    validate_bitable_id(app_token, "App Token")?;
+    validate_bitable_id(table_id, "Table ID")?;
+    validate_bitable_id(view_id, "View ID")?;
+    if access_token.trim().is_empty() {
+        return Err("FEISHU_AUTH_REQUIRED: 飞书授权已失效".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "FEISHU_NETWORK_ERROR: 无法初始化网络客户端".to_string())?;
+    validate_named_todo_target(&client, access_token, app_token, table_id, view_id).await?;
+    let endpoint = format!(
+        "https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    );
+    let mut page_token: Option<String> = None;
+    let mut records = Vec::new();
+    for _ in 0..BITABLE_MAX_PAGES {
+        let mut query = vec![
+            ("page_size", "500".to_string()),
+            ("automatic_fields", "true".to_string()),
+            ("view_id", view_id.to_string()),
+        ];
+        if let Some(token) = &page_token {
+            query.push(("page_token", token.clone()));
+        }
+        let response = client
+            .get(&endpoint)
+            .bearer_auth(access_token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "FEISHU_NETWORK_TIMEOUT: 读取收件箱记录超时".to_string()
+                } else {
+                    "FEISHU_NETWORK_ERROR: 无法连接飞书开放平台".to_string()
+                }
+            })?;
+        let value = read_bitable_response(response).await?;
+        let (mut page, next) = parse_case_records(&value)?;
+        records.append(&mut page);
+        page_token = next;
+        if page_token.is_none() {
+            return Ok(records);
+        }
+    }
+    Err("FEISHU_RESPONSE_INVALID: 收件箱记录分页超过安全上限".into())
+}
+
 /// 用户逐项确认后更新一条多维表格记录。调用方负责串行化写操作。
 pub async fn update_bitable_record_fields(
     access_token: &str,
@@ -943,6 +1171,7 @@ pub async fn create_bitable_record(
     table_id: &str,
     fields: Value,
 ) -> Result<String, String> {
+    record_f1_http_write();
     validate_bitable_id(app_token, "App Token")?;
     validate_bitable_id(table_id, "Table ID")?;
     if access_token.trim().is_empty() {

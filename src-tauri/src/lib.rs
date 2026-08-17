@@ -1344,6 +1344,316 @@ async fn copy_todo_to_case_progress(
     db::todos::copy_to_case_progress(pool.inner(), &id, target_case_id).await
 }
 
+fn todo_feishu_config() -> Result<(String, String, String, String), String> {
+    let current = settings::read_settings()?;
+    let value = |value: Option<String>, label: &str| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("FEISHU_TODO_CONFIG_INVALID: 请配置{label}"))
+    };
+    let app_id = current
+        .feishu_oauth_app_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "FEISHU_AUTH_REQUIRED: 请先连接飞书授权".to_string())?;
+    Ok((
+        app_id,
+        value(current.feishu_todo_inbox_app_token, "收件箱 App Token")?,
+        value(current.feishu_todo_inbox_table_id, "收件箱 Table ID")?,
+        value(current.feishu_todo_inbox_view_id, "收件箱 View ID")?,
+    ))
+}
+
+#[tauri::command]
+async fn get_todo_feishu_preview(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<db::todo_feishu_sync::TodoFeishuPreview, String> {
+    db::todo_feishu_sync::get_preview(pool.inner()).await
+}
+
+#[tauri::command]
+async fn pull_todo_feishu_preview(
+    pool: tauri::State<'_, SqlitePool>,
+) -> Result<db::todo_feishu_sync::TodoFeishuPullResult, String> {
+    static TODO_PULL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = TODO_PULL_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .try_lock()
+        .map_err(|_| "FEISHU_TODO_PULL_IN_PROGRESS: 已有一次收件箱预演正在进行".to_string())?;
+    let (app_id, app_token, table_id, view_id) = todo_feishu_config()?;
+    let run_id =
+        db::todo_feishu_sync::start_pull_run(pool.inner(), &app_token, &table_id, &view_id).await?;
+    let result = async {
+        let token = feishu_oauth::valid_access_token(&app_id)
+            .await
+            .map_err(feishu_oauth_error)?;
+        let records =
+            feishu::fetch_todo_inbox_records(token.expose(), &app_token, &table_id, &view_id)
+                .await?;
+        db::todo_feishu_sync::complete_pull(pool.inner(), &run_id, &app_token, &table_id, records)
+            .await
+    }
+    .await;
+    if let Err(error) = &result {
+        db::todo_feishu_sync::fail_pull_run(pool.inner(), &run_id, error).await;
+    }
+    result
+}
+
+#[derive(Deserialize)]
+struct ResolveTodoFeishuPreviewInput {
+    preview_id: String,
+    resolution: String,
+    case_id: Option<String>,
+    action_id: String,
+}
+
+#[tauri::command]
+async fn resolve_todo_feishu_preview(
+    pool: tauri::State<'_, SqlitePool>,
+    input: ResolveTodoFeishuPreviewInput,
+) -> Result<Option<String>, String> {
+    let preview = db::todo_feishu_sync::pending_preview(pool.inner(), &input.preview_id).await?;
+    if input.resolution == "dismiss" {
+        db::todo_feishu_sync::dismiss(pool.inner(), &preview.id, &input.action_id).await?;
+        return Ok(None);
+    }
+    if input.resolution == "feishu" && preview.change_kind == "remote_missing" {
+        let item_id = db::todo_feishu_sync::confirm_remote_missing_deleted(
+            pool.inner(),
+            &preview,
+            &input.action_id,
+        )
+        .await?;
+        return Ok(Some(item_id));
+    }
+    let (app_id, app_token, table_id, view_id) = todo_feishu_config()?;
+    if input.resolution == "local" {
+        static TODO_WRITE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+            std::sync::OnceLock::new();
+        let _guard = TODO_WRITE_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .try_lock()
+            .map_err(|_| "FEISHU_TODO_WRITE_IN_PROGRESS: 已有一项收件箱写回正在进行".to_string())?;
+        let status = feishu_oauth::connection_status(&app_id).map_err(feishu_oauth_error)?;
+        if !status.write_enabled {
+            return Err("FEISHU_OAUTH_MISSING_READWRITE_SCOPE: 当前授权不能写入多维表格".into());
+        }
+        let token = feishu_oauth::valid_access_token(&app_id)
+            .await
+            .map_err(feishu_oauth_error)?;
+        let (item_id, business_key, payload) =
+            db::todo_feishu_sync::prepare_remote_action(pool.inner(), &preview, &input.action_id)
+                .await?;
+        let fields =
+            match db::todo_feishu_sync::payload_to_feishu_fields(&payload, &business_key, &item_id)
+            {
+                Ok(fields) => fields,
+                Err(error) => {
+                    db::todo_feishu_sync::mark_remote_action(
+                        pool.inner(),
+                        &input.action_id,
+                        "failed",
+                        Some(
+                            error
+                                .split(':')
+                                .next()
+                                .unwrap_or("FEISHU_TODO_METADATA_INVALID"),
+                        ),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+        let write_result: Result<feishu::FeishuRemoteCaseRecord, String> = async {
+            let existing_record_id = (preview.change_kind != "remote_missing")
+                .then_some(preview.record_id.as_deref())
+                .flatten();
+            let record_id = if let Some(record_id) = existing_record_id {
+                let before =
+                    feishu::fetch_bitable_record(token.expose(), &app_token, &table_id, record_id)
+                        .await?;
+                let (before_key, before_hash, _) =
+                    db::todo_feishu_sync::parse_remote_for_verification(&before)?;
+                if preview.remote_business_key.as_deref() != Some(before_key.as_str())
+                    || preview.remote_hash.as_deref() != Some(before_hash.as_str())
+                {
+                    return Err("FEISHU_TODO_STALE: 飞书事项在预演后已经变化".into());
+                }
+                feishu::update_bitable_record_fields(
+                    token.expose(),
+                    &app_token,
+                    &table_id,
+                    record_id,
+                    fields,
+                )
+                .await?;
+                record_id.to_string()
+            } else {
+                let records = feishu::fetch_todo_inbox_records(
+                    token.expose(),
+                    &app_token,
+                    &table_id,
+                    &view_id,
+                )
+                .await?;
+                let mut matches = Vec::new();
+                for record in records {
+                    if let Ok((key, _, remote_payload)) =
+                        db::todo_feishu_sync::parse_remote_for_verification(&record)
+                    {
+                        if key == business_key
+                            || remote_payload.source_message_id == payload.source_message_id
+                        {
+                            matches.push(record.record_id);
+                        }
+                    }
+                }
+                match matches.as_slice() {
+                    [] => {
+                        feishu::create_bitable_record(token.expose(), &app_token, &table_id, fields)
+                            .await?
+                    }
+                    [record_id] => {
+                        feishu::update_bitable_record_fields(
+                            token.expose(),
+                            &app_token,
+                            &table_id,
+                            record_id,
+                            fields,
+                        )
+                        .await?;
+                        record_id.clone()
+                    }
+                    _ => {
+                        return Err(
+                            "FEISHU_TODO_DUPLICATE_ID: 远端已有重复事项编号或来源消息ID".into()
+                        );
+                    }
+                }
+            };
+            feishu::fetch_bitable_record(token.expose(), &app_token, &table_id, &record_id).await
+        }
+        .await;
+        let after = match write_result {
+            Ok(record) => record,
+            Err(error) => {
+                let code = error
+                    .split(':')
+                    .next()
+                    .unwrap_or("FEISHU_TODO_WRITE_UNCERTAIN");
+                let uncertain = matches!(
+                    code,
+                    "FEISHU_NETWORK_TIMEOUT" | "FEISHU_NETWORK_ERROR" | "FEISHU_RESPONSE_INVALID"
+                );
+                db::todo_feishu_sync::mark_remote_action(
+                    pool.inner(),
+                    &input.action_id,
+                    if uncertain {
+                        "write_uncertain"
+                    } else {
+                        "failed"
+                    },
+                    Some(if uncertain {
+                        "FEISHU_TODO_WRITE_UNCERTAIN"
+                    } else {
+                        code
+                    }),
+                )
+                .await;
+                if uncertain {
+                    return Err(
+                        "FEISHU_TODO_WRITE_UNCERTAIN: 写入结果无法确认，未推进本地基线".into(),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let (after_key, after_hash, after_payload) =
+            match db::todo_feishu_sync::parse_remote_for_verification(&after) {
+                Ok(value) => value,
+                Err(_) => {
+                    db::todo_feishu_sync::mark_remote_action(
+                        pool.inner(),
+                        &input.action_id,
+                        "write_uncertain",
+                        Some("FEISHU_TODO_WRITE_UNCERTAIN"),
+                    )
+                    .await;
+                    return Err(
+                        "FEISHU_TODO_WRITE_UNCERTAIN: 写后回读无法规范化，未推进本地基线".into(),
+                    );
+                }
+            };
+        if after_key != business_key || after_payload != payload {
+            db::todo_feishu_sync::mark_remote_action(
+                pool.inner(),
+                &input.action_id,
+                "write_uncertain",
+                Some("FEISHU_TODO_WRITE_UNCERTAIN"),
+            )
+            .await;
+            return Err("FEISHU_TODO_WRITE_UNCERTAIN: 写后回读与期望不一致，未推进本地基线".into());
+        }
+        db::todo_feishu_sync::finish_remote_action(
+            pool.inner(),
+            &preview,
+            &input.action_id,
+            &item_id,
+            &app_token,
+            &table_id,
+            &view_id,
+            &after.record_id,
+            &business_key,
+            &after_payload,
+            &after_hash,
+            after.last_modified_time.as_deref(),
+        )
+        .await?;
+        return Ok(Some(item_id));
+    }
+    let keep_both = input.resolution == "keep_both";
+    if input.resolution != "feishu" && !keep_both {
+        return Err("FEISHU_TODO_CONFLICT: 未知处理方向".into());
+    }
+    let record_id = preview
+        .record_id
+        .as_deref()
+        .ok_or_else(|| "FEISHU_TODO_METADATA_INVALID: 候选缺少 record_id".to_string())?;
+    let token = feishu_oauth::valid_access_token(&app_id)
+        .await
+        .map_err(feishu_oauth_error)?;
+    let record =
+        feishu::fetch_bitable_record(token.expose(), &app_token, &table_id, record_id).await?;
+    let (business_key, verified_hash, payload) =
+        db::todo_feishu_sync::parse_remote_for_verification(&record)?;
+    if preview.remote_business_key.as_deref() != Some(business_key.as_str()) {
+        return Err("FEISHU_TODO_STALE: 飞书事项编号在预演后已经变化".into());
+    }
+    let mut apply_preview = preview.clone();
+    if keep_both {
+        if apply_preview.change_kind != "conflict" {
+            return Err("FEISHU_TODO_CONFLICT: 仅冲突候选可以保留两份".into());
+        }
+        apply_preview.item_id = None;
+        apply_preview.local_hash = None;
+    }
+    let item_id = db::todo_feishu_sync::apply_remote(
+        pool.inner(),
+        &apply_preview,
+        payload,
+        &verified_hash,
+        input.case_id.filter(|value| !value.trim().is_empty()),
+        &app_token,
+        &table_id,
+        &view_id,
+        &input.action_id,
+    )
+    .await?;
+    Ok(Some(item_id))
+}
+
 /* ---- 源文件看板 Phase 3:文档标记(重要/忽略 + 原告/被告/第三人) ---- */
 
 /// 列出某案件全部文档的标记(前端按 document_id 聚合成「重要/忽略 + 原被告」)。
@@ -6756,6 +7066,9 @@ pub fn run() {
             set_todo_case,
             restore_todo,
             copy_todo_to_case_progress,
+            get_todo_feishu_preview,
+            pull_todo_feishu_preview,
+            resolve_todo_feishu_preview,
             list_document_tags,
             set_document_importance,
             set_document_party_side,

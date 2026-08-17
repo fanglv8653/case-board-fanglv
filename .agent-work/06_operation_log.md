@@ -266,3 +266,8 @@
 | 2026-08-17T16:48:16+08:00 | worker-v084-t1-local | start | V084-T1 | - |
 | 2026-08-17T17:31:45+08:00 | worker-v084-t1-local | submit | V084-T1 | Implemented R2 global todo migration, top-level board, nullable case binding, soft-delete recovery, stable validation errors and idempotent transactional copy to case progress. Frontend build and 129 logic tests pass; Rust check/clippy/tests compile pass; runtime test harness remains blocked by documented Windows 0xc0000139. |
 | 2026-08-17T17:32:07+08:00 | 04-project-master | review | V084-T1 | accepted: Accepted against the R2 todo contract: 0064 evolves case_todos in place with nullable SET NULL binding and compatibility projection; UI exposes the global board and recovery; progress copy is transactional and idempotent on the existing external unique key. Build, 129 logic assertions, source gate, Rust check/clippy/test compilation, and an executable SQLite migration fixture passed. Runtime Rust harness remains transparently recorded as the known host 0xc0000139 limitation for RC retest. |
+| 2026-08-17T17:33:46+08:00 | 04-project-master | create_task | V084-F1 | created task v0.8.4 Feishu inbox todo synchronization |
+| 2026-08-17T17:33:48+08:00 | 04-project-master | dispatch | V084-F1 | T1 accepted; implement isolated todo inbox sync from 0065 using the audited live field contract and explicit user confirmations only |
+| 2026-08-17T17:33:49+08:00 | worker-v084-f1-local | start | V084-F1 | - |
+| 2026-08-17T18:26:41+08:00 | worker-v084-f1-local | submit | V084-F1 | 飞书收件箱同步已实现：只读预览、三方哈希、重复隔离、显式逐项处置、不确定写冻结；133项逻辑测试及严格Rust门禁通过 |
+| 2026-08-17T18:26:45+08:00 | 04-project-master | review | V084-F1 | accepted: 验收通过：实现符合R2字段契约和只读优先边界，远端写入均为显式操作并在不确定时失败关闭 |
