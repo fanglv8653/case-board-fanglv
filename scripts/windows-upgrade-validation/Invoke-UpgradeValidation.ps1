@@ -140,19 +140,30 @@ function Get-HmacSha256([string]$Path, [byte[]]$Key) {
   }
 }
 
+function Get-Sha256Hex([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function New-Artifact([string]$Name, [string]$Path, [string]$RunRoot) {
   $full = Resolve-Absolute $Path $true $true
   $full = Assert-PathUnderRunRoot $full $RunRoot
   return [ordered]@{
     name = $Name
     path = $full
-    sha256 = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToUpperInvariant()
+    sha256 = Get-Sha256Hex $full
   }
 }
 
 function Write-Manifest([string]$Path, [hashtable]$Value, [string]$RunRoot) {
   Write-NewJson $Path $Value
-  $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+  $hash = Get-Sha256Hex $Path
   $hashPath = "$Path.sha256"
   $hmacPath = "$Path.hmac"
   if ((Test-Path -LiteralPath $hashPath) -or (Test-Path -LiteralPath $hmacPath)) {
@@ -223,7 +234,7 @@ function Assert-ManifestFile(
   foreach ($artifact in @($value.artifacts)) {
     $artifactPath = Resolve-Absolute ([string]$artifact.path) $true $true
     $artifactPath = Assert-PathUnderRunRoot $artifactPath $runRoot
-    $actualArtifactHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    $actualArtifactHash = Get-Sha256Hex $artifactPath
     if ([string]$artifact.sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
         $actualArtifactHash -cne ([string]$artifact.sha256).ToUpperInvariant()) {
       throw "ARTIFACT_HASH_MISMATCH: $($artifact.name)"
@@ -237,7 +248,7 @@ function Assert-ManifestFile(
     $parentStatus = if ($ExpectedStatus -eq 'audit-passed') { 'backup-passed' } else { if ($ExpectedStatus -eq 'isolated-db-postcheck-recorded') { 'audit-passed' } else { 'isolated-db-postcheck-recorded' } }
     $parentPath = Resolve-Absolute ([string]$value.parent_manifest) $true $true
     $parentPath = Assert-PathUnderRunRoot $parentPath $runRoot
-    $actualParentHash = (Get-FileHash -LiteralPath $parentPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    $actualParentHash = Get-Sha256Hex $parentPath
     if ([string]$value.parent_manifest_sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
         $actualParentHash -cne ([string]$value.parent_manifest_sha256).ToUpperInvariant()) {
       throw 'PARENT_MANIFEST_HASH_MISMATCH'
@@ -247,7 +258,7 @@ function Assert-ManifestFile(
   return [pscustomobject]@{
     Path = $manifestPath
     Value = $value
-    Hash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    Hash = Get-Sha256Hex $manifestPath
     RunRoot = $runRoot
   }
 }
@@ -257,7 +268,7 @@ function Read-Resume([string]$ExpectedStage, [string]$ExpectedStatus) {
   if (-not $ExpectedResumeManifestSha256 -or $ExpectedResumeManifestSha256 -notmatch '^[0-9A-Fa-f]{64}$') {
     throw 'ExpectedResumeManifestSha256 is required'
   }
-  $actual = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToUpperInvariant()
+  $actual = Get-Sha256Hex $manifestPath
   if ($actual -cne $ExpectedResumeManifestSha256.ToUpperInvariant()) {
     throw 'RESUME_MANIFEST_HASH_MISMATCH'
   }
@@ -368,8 +379,8 @@ switch ($Stage) {
     $hash = Write-Manifest $manifestPath @{
       schema_version = 2; status = $status; stage = 'Compare'; created_at_utc = (Get-Date).ToUniversalTime().ToString('o')
       run_root = $runRoot; artifacts = @((New-Artifact 'comparison' $resultJson $runRoot))
-      before_snapshot_sha256 = (Get-FileHash -LiteralPath $before -Algorithm SHA256).Hash.ToUpperInvariant()
-      after_snapshot_sha256 = (Get-FileHash -LiteralPath $after -Algorithm SHA256).Hash.ToUpperInvariant()
+      before_snapshot_sha256 = Get-Sha256Hex $before
+      after_snapshot_sha256 = Get-Sha256Hex $after
       idempotent = [bool]$Idempotent; formal_mutation = $false
     } $runRoot
     if ($status -ne 'compare-passed') { throw 'COMPARISON_FAILED' }

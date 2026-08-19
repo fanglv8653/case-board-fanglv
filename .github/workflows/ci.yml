@@ -59,6 +59,12 @@ jobs:
           src-tauri/src/lpr.rs
           src-tauri/examples/verify_updater_signature.rs
 
+      - name: Stage CI-only updater helper resource
+        run: |
+          target_triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          touch "src-tauri/binaries/caseboard-updater-helper-${target_triple}"
+
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 
