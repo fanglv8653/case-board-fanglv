@@ -404,6 +404,7 @@ async fn frozen_pre_0063_wal_fixture(label: &str) -> (TempDir, PathBuf) {
     (directory, frozen_database)
 }
 
+#[cfg(target_os = "windows")]
 fn sha256_file(path: &Path) -> String {
     format!(
         "{:x}",
@@ -411,6 +412,7 @@ fn sha256_file(path: &Path) -> String {
     )
 }
 
+#[cfg(target_os = "windows")]
 fn expected_wal_backup_directory(database: &Path) -> PathBuf {
     let paths = [database.to_path_buf(), sidecar_path(database, "-wal")];
     let mut identity = Sha256::new();
@@ -425,6 +427,7 @@ fn expected_wal_backup_directory(database: &Path) -> PathBuf {
     ))
 }
 
+#[cfg(target_os = "windows")]
 async fn frozen_current_wal_fixture(label: &str) -> (TempDir, PathBuf) {
     let (directory, pre_0063_database) = frozen_pre_0063_wal_fixture(label).await;
     let live_database = directory.path().join("v63-live.db");
