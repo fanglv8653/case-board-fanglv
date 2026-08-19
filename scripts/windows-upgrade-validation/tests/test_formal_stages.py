@@ -150,7 +150,10 @@ class FormalStageTests(unittest.TestCase):
                 second_value = json.loads(second_manifest.read_text(encoding="utf-8-sig"))
                 self.assertEqual(second_value["status"], "idempotent-db-postcheck-recorded")
                 self.assertFalse(second_value["observed_application_execution"])
-                self.assertEqual(second_value["parent_manifest"], str(first_manifest))
+                self.assertTrue(
+                    os.path.samefile(second_value["parent_manifest"], first_manifest),
+                    "parent manifest must resolve to the exact prior evidence file",
+                )
                 self.assertEqual(
                     artifact_path(second_value, "proof_database"), proof_db
                 )

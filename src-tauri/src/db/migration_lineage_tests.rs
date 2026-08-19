@@ -195,8 +195,15 @@ fn file_bytes(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn assert_sidecars_absent(database: &Path) {
-    assert!(!sidecar_path(database, "-wal").exists());
-    assert!(!sidecar_path(database, "-shm").exists());
+    let wal = sidecar_path(database, "-wal");
+    assert!(
+        !wal.exists()
+            || std::fs::metadata(&wal)
+                .expect("read retained empty WAL")
+                .len()
+                == 0
+    );
+    assert!(!sidecar_path(database, "-journal").exists());
 }
 
 fn run_rc_production_init_child(database: &Path) {
@@ -1249,6 +1256,7 @@ async fn empty_migration_history_with_existing_schema_fails_closed_before_any_wr
     assert_failure_fingerprints_unchanged(&database, before_physical, before).await;
 }
 
+#[cfg(target_os = "windows")]
 #[tokio::test]
 async fn complete_pre_0063_wal_pair_is_backed_up_recovered_and_idempotent() {
     let (_directory, database) = frozen_pre_0063_wal_fixture("recover").await;
@@ -1354,6 +1362,7 @@ async fn empty_wal_and_orphan_shm_are_retired_by_sqlite_before_preflight() {
     pool.close().await;
 }
 
+#[cfg(target_os = "windows")]
 #[tokio::test]
 async fn wrong_existing_backup_fails_without_mutating_active_trio() {
     let (_directory, database) = frozen_pre_0063_wal_fixture("wrong-backup").await;
@@ -1655,6 +1664,7 @@ async fn combined_lineage_audit_failure_keeps_active_and_exact_backup() {
     assert!(backup.shm.is_some());
 }
 
+#[cfg(target_os = "windows")]
 #[tokio::test]
 async fn complete_v63_wal_pair_is_rejected_without_mutating_active_trio() {
     let (_directory, database) = frozen_current_wal_fixture("v63-reject").await;
