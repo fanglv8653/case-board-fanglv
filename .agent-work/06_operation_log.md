@@ -276,3 +276,6 @@
 | 2026-08-17T18:28:25+08:00 | worker-v084-rc-local | start | V084-RC | Direct serial RC integration in master process; no child agent spawned |
 | 2026-08-17T19:53:48+08:00 | worker-v084-rc-local | submit | V084-RC | 0.8.4版本源与本地RC已收口：133项逻辑测试、全目标Clippy、release helper/主程序构建和36项发布恢复测试通过；Rust运行时0xc0000139及正式签名/在线升级保留为外部验收 |
 | 2026-08-17T19:53:51+08:00 | 04-project-master | review | V084-RC | accepted: 本地RC验收通过，具备进入受控签名发布条件；未将Rust装载错误、未签名EXE或未执行的真实在线升级冒充正式发布完成 |
+| 2026-08-19T10:20:03+08:00 | 04-project-master | create_task | V084-PUBLISH | created task v0.8.4 signed Windows release and public manifest convergence |
+| 2026-08-19T10:20:05+08:00 | 04-project-master | dispatch | V084-PUBLISH | User explicitly opened the formal release window on 2026-08-19; execute signed CI build, fail-closed asset verification, draft-to-public Release, and manifest-pair convergence. |
+| 2026-08-19T10:20:07+08:00 | worker-v084-publish-local | start | V084-PUBLISH | Direct serial publication in master process; no child agent spawned |

@@ -236,3 +236,5 @@
 | 2026-08-17T18:28:25+08:00 | worker-v084-rc-local | 04-project-master | V084-RC | ack | worker accepted task V084-RC | .agent-work\threads\worker-v084-rc-local |
 | 2026-08-17T19:53:48+08:00 | worker-v084-rc-local | 04-project-master | V084-RC | review_request | task V084-RC is ready for review; please read local files | .agent-work\threads\worker-v084-rc-local |
 | 2026-08-17T19:53:51+08:00 | 04-project-master | worker-v084-rc-local | V084-RC | accepted | master set accepted; read .agent-work/review/V084-RC.md | .agent-work/review/V084-RC.md |
+| 2026-08-19T10:20:05+08:00 | 04-project-master | worker-v084-publish-local | V084-PUBLISH | dispatch | master dispatched task V084-PUBLISH | .agent-work\threads\worker-v084-publish-local |
+| 2026-08-19T10:20:07+08:00 | worker-v084-publish-local | 04-project-master | V084-PUBLISH | ack | worker accepted task V084-PUBLISH | .agent-work\threads\worker-v084-publish-local |
