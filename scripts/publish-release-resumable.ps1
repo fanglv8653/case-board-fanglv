@@ -94,8 +94,14 @@ function Invoke-RetryNative {
 
 function Get-LiveRelease {
     $json = Invoke-RetryNative -FilePath 'gh' -Arguments @('api', "repos/$Repository/releases/tags/$Tag") -Label '查询 GitHub Release' -AllowNotFound
-    if (-not $json) { return $null }
-    $json | ConvertFrom-Json
+    if ($json) { return ($json | ConvertFrom-Json) }
+
+    # GitHub's release-by-tag endpoint returns 404 for draft releases. Fall
+    # back to the authenticated release list so an interrupted publication can
+    # resume the exact draft instead of trying to create a duplicate.
+    $listJson = Invoke-RetryNative -FilePath 'gh' -Arguments @('api', "repos/$Repository/releases?per_page=100") -Label '查询 GitHub Release 列表'
+    $releases = @($listJson | ConvertFrom-Json)
+    Select-CaseBoardReleaseByTag -Releases $releases -Tag $Tag
 }
 
 function Get-RemoteBranchCommit {

@@ -4,7 +4,27 @@ function Get-CaseBoardFileSha256 {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$LiteralPath)
 
-    (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    try {
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $digest = $hasher.ComputeHash($stream) }
+        finally { $hasher.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
+function Select-CaseBoardReleaseByTag {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$Releases,
+        [Parameter(Mandatory)][string]$Tag
+    )
+
+    $matches = @($Releases | Where-Object { [string]$_.tag_name -ceq $Tag })
+    if ($matches.Count -gt 1) { throw "远端存在多个同 tag Release，拒绝继续：$Tag" }
+    if ($matches.Count -eq 1) { return $matches[0] }
+    $null
 }
 
 function Get-CaseBoardReleaseAssetContract {
@@ -216,6 +236,7 @@ function Get-CaseBoardMainPlan {
 
 Export-ModuleMember -Function @(
     'Get-CaseBoardFileSha256',
+    'Select-CaseBoardReleaseByTag',
     'Get-CaseBoardReleaseAssetContract',
     'Test-CaseBoardRetryableFailure',
     'ConvertTo-CaseBoardWindowsArgument',

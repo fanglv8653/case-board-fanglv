@@ -35,6 +35,8 @@ test("release facts use an exact ASCII pair staged from a verified tag", () => {
 test("publication converges a draft before one paired manifest commit", () => {
   const publisher = read("scripts/publish-release-resumable.ps1");
   assert.ok(publisher.includes("'--draft'"));
+  assert.ok(publisher.includes('"repos/$Repository/releases?per_page=100"'));
+  assert.ok(publisher.includes("Select-CaseBoardReleaseByTag"));
   assert.ok(publisher.includes("'--draft=false'"));
   assert.ok(publisher.includes("release/latest.json", "release/version.json"));
   assert.ok(publisher.includes("release/version.json"));

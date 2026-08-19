@@ -22,6 +22,21 @@ Assert-Equal (ConvertTo-CaseBoardWindowsArgument 'plain') 'plain' '普通参数�
 Assert-Equal (ConvertTo-CaseBoardWindowsArgument 'D:\案件 看板\asset.exe') '"D:\案件 看板\asset.exe"' '带空格路径安全引用'
 Assert-Equal (ConvertTo-CaseBoardWindowsArgument '') '""' '空参数安全引用'
 
+$hashFixture = [IO.Path]::GetTempFileName()
+try {
+    [IO.File]::WriteAllText($hashFixture, 'abc', (New-Object Text.UTF8Encoding($false)))
+    Assert-Equal (Get-CaseBoardFileSha256 -LiteralPath $hashFixture) 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' '.NET SHA-256 不依赖 Get-FileHash'
+}
+finally { Remove-Item -LiteralPath $hashFixture -Force -ErrorAction SilentlyContinue }
+
+$draftRelease = [pscustomobject]@{ id=7; tag_name='v0.8.4-fanglv'; draft=$true }
+$otherRelease = [pscustomobject]@{ id=8; tag_name='v0.8.3-fanglv'; draft=$false }
+Assert-Equal (Select-CaseBoardReleaseByTag -Releases @($otherRelease, $draftRelease) -Tag 'v0.8.4-fanglv').id 7 '草稿 Release 可从列表恢复'
+Assert-Equal (Select-CaseBoardReleaseByTag -Releases @($otherRelease) -Tag 'v0.8.4-fanglv') $null '列表无目标 tag 返回空'
+Assert-Throws {
+    Select-CaseBoardReleaseByTag -Releases @($draftRelease, $draftRelease) -Tag 'v0.8.4-fanglv' | Out-Null
+} '多个同 tag Release' '重复 tag Release 失败关闭'
+
 $exactAssets = @('FanglvCaseBoard_0.8.4_x64-setup.exe', 'FanglvCaseBoard_0.8.4_x64-setup.exe.sig')
 Assert-Equal (Get-CaseBoardReleaseAssetContract -Names $exactAssets -ExpectedVersion '0.8.4').action 'accept' '精确 ASCII 资产对通过'
 Assert-Equal (Get-CaseBoardReleaseAssetContract -Names @('方律案件看板_0.8.4_x64-setup.exe', '方律案件看板_0.8.4_x64-setup.exe.sig') -ExpectedVersion '0.8.4').reason 'REL_ASSET_NAME_INVALID' '中文资产名失败关闭'
