@@ -629,42 +629,7 @@ fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn secure_path(path: &Path) -> Result<(), UpdateLifecycleError> {
-    let sid = windows_acl::current_user_sid_string()?;
-    let owner_status = Command::new("icacls.exe")
-        .arg(path)
-        .arg("/setowner")
-        .arg(format!("*{sid}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| {
-            UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
-        })?;
-    if !owner_status.success() {
-        return Err(UpdateLifecycleError::new(UPD_RECEIPT_ACL_INVALID));
-    }
-    let grant = if path.is_dir() {
-        format!("*{sid}:(OI)(CI)F")
-    } else {
-        format!("*{sid}:F")
-    };
-    let status = Command::new("icacls.exe")
-        .arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(grant)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| {
-            UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
-        })?;
-    if !status.success() {
-        return Err(UpdateLifecycleError::new(UPD_RECEIPT_ACL_INVALID));
-    }
-    Ok(())
+    windows_acl::secure(path, path.is_dir())
 }
 
 #[cfg(not(windows))]
@@ -713,13 +678,14 @@ mod windows_acl {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, WIN32_ERROR};
     use windows::Win32::Security::Authorization::{
-        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+        GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
     use windows::Win32::Security::{
-        AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
-        TokenUser, ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY,
-        TOKEN_USER,
+        AclSizeInformation, AddAccessAllowedAceEx, EqualSid, GetAce, GetAclInformation,
+        GetLengthSid, GetSecurityDescriptorControl, InitializeAcl, TokenUser, ACCESS_ALLOWED_ACE,
+        ACL, ACL_REVISION, ACL_SIZE_INFORMATION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+        OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
     };
     use windows::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -776,20 +742,58 @@ mod windows_acl {
         token_user.User.Sid
     }
 
-    pub(super) fn current_user_sid_string() -> Result<String, UpdateLifecycleError> {
+    pub(super) fn secure(path: &Path, is_dir: bool) -> Result<(), UpdateLifecycleError> {
         let buffer = current_user_sid_buffer()?;
         let sid = sid_from_buffer(&buffer);
-        let mut value = PWSTR::null();
-        unsafe { ConvertSidToStringSidW(sid, &mut value) }.map_err(|error| {
+        let sid_length = unsafe { GetLengthSid(sid) } as usize;
+        let acl_length =
+            size_of::<ACL>() + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>() + sid_length;
+        let mut acl_storage = vec![0u32; acl_length.div_ceil(size_of::<u32>())];
+        let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+        unsafe { InitializeAcl(acl, acl_length as u32, ACL_REVISION) }.map_err(|error| {
             UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
         })?;
-        let text = unsafe { value.to_string() }.map_err(|error| {
-            UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
-        })?;
+        let ace_flags = if is_dir {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            Default::default()
+        };
         unsafe {
-            let _ = LocalFree(Some(HLOCAL(value.0.cast())));
+            AddAccessAllowedAceEx(
+                acl,
+                ACL_REVISION,
+                ace_flags,
+                windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS.0,
+                sid,
+            )
         }
-        Ok(text)
+        .map_err(|error| {
+            UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
+        })?;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let info = windows::Win32::Security::OBJECT_SECURITY_INFORMATION(
+            OWNER_SECURITY_INFORMATION.0
+                | DACL_SECURITY_INFORMATION.0
+                | PROTECTED_DACL_SECURITY_INFORMATION.0,
+        );
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                PWSTR(wide.as_ptr().cast_mut()),
+                SE_FILE_OBJECT,
+                info,
+                Some(sid),
+                None,
+                Some(acl),
+                None,
+            )
+        };
+        if status.0 != 0 {
+            return Err(UpdateLifecycleError::with_detail(
+                UPD_RECEIPT_ACL_INVALID,
+                format!("SetNamedSecurityInfoW failed: {}", status.0),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn validate(path: &Path) -> Result<(), UpdateLifecycleError> {
