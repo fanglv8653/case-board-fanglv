@@ -9,7 +9,7 @@
 //!   3. 创建 SqlitePool(`?mode=rwc` 不存在自动建)
 //!   4. 跑 migrations(`sqlx::migrate!`)
 //!
-//! 测试模式可以传 `sqlite::memory:` 跑内存库,不污染本机文件系统。
+//! 测试模式可以传 `:memory:` 跑内存库,不污染本机文件系统。
 
 use std::borrow::Cow;
 use std::ffi::OsString;

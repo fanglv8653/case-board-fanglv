@@ -1069,8 +1069,9 @@ mod tests {
     #[test]
     fn state_machine_rejects_skipping_shutdown_barrier() {
         let temp = tempfile::tempdir().unwrap();
-        ensure_secure_dir(temp.path()).unwrap();
-        let (path, attempt) = test_attempt(temp.path());
+        let root = temp.path().join("attempts");
+        ensure_secure_dir(&root).unwrap();
+        let (path, attempt) = test_attempt(&root);
         write_attempt(&path, &attempt, UPD_ATTEMPT_PERSIST_FAILED).unwrap();
         let error = transition_attempt(
             &path,
@@ -1086,8 +1087,9 @@ mod tests {
     #[test]
     fn prepared_shutdown_success_path_is_durable() {
         let temp = tempfile::tempdir().unwrap();
-        ensure_secure_dir(temp.path()).unwrap();
-        let (path, attempt) = test_attempt(temp.path());
+        let root = temp.path().join("attempts");
+        ensure_secure_dir(&root).unwrap();
+        let (path, attempt) = test_attempt(&root);
         write_attempt(&path, &attempt, UPD_ATTEMPT_PERSIST_FAILED).unwrap();
         transition_attempt(&path, AttemptPhase::ShutdownComplete, None, None, None).unwrap();
         transition_attempt(

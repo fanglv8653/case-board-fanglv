@@ -659,7 +659,7 @@ mod tests {
     use super::*;
 
     async fn fixture() -> SqlitePool {
-        let pool = super::super::init_pool("sqlite::memory:")
+        let pool = super::super::init_pool(":memory:")
             .await
             .expect("migrate todo fixture");
         sqlx::query(
