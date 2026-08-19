@@ -52,6 +52,12 @@ Release API 回读为公开、非 prerelease，target 为冻结提交，且只�
 - 冻结提交 CI：Frontend、Rust check/clippy/test、Windows release tooling 全部成功。
 - 公开 raw：`version.json.version=0.8.4`，`latest.json.version=0.8.4`，下载 URL 与正式资产精确一致。
 
+## 发布后 main 门禁收口
+
+- updater 合同测试不再硬编码上一版 `0.8.3`，改为校验已发布标记不高于当前源码版本，且下载 URL 版本一致；本机 Node 逻辑测试 133/133 通过。
+- macOS 迁移谱系测试不再假设子进程退出后 WAL 必须立即删除，改为通过 SQLite 重新打开并校验完整迁移状态；该定点测试已在 Windows 通过。
+- 本机 Windows Rust 复跑的主库 373/373 与设备同步 60/60 均通过；测试后 PowerShell 清理临时 manifest 时遇到一次访问拒绝，发生在所有测试已成功之后，不属于产品或测试失败。
+
 ## 残余说明
 
 - Windows Authenticode 仍为 `NotSigned`；Tauri updater 的 minisign 链已验证，两者不是同一种签名。
