@@ -260,8 +260,14 @@ if ($PublishUpdaterManifest) {
 
     $publishedAt = if ($release.PSObject.Properties.Name -contains 'published_at') { [string]$release.published_at } else { '' }
     if (-not $readOnly -and -not $publishedAt) { throw 'REL_REMOTE_VERIFY_FAILED：Release 缺少 published_at。' }
-    $releaseUrl = if ($release.PSObject.Properties.Name -contains 'html_url') { [string]$release.html_url } else { "https://github.com/$Repository/releases/tag/$Tag" }
     $expectedReleaseUrl = "https://github.com/$Repository/releases/tag/$Tag"
+    $releaseUrl = if ($readOnly -and $release.draft) {
+        $expectedReleaseUrl
+    } elseif ($release.PSObject.Properties.Name -contains 'html_url') {
+        [string]$release.html_url
+    } else {
+        $expectedReleaseUrl
+    }
     if ($releaseUrl -ne $expectedReleaseUrl) { throw 'REL_MANIFEST_PAIR_INVALID：Release URL 不符合 tag。' }
     $versionDraft = [ordered]@{
         version = $expectedVersion
