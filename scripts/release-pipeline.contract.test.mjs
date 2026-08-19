@@ -15,6 +15,8 @@ test("Windows release bundles the dedicated updater helper", () => {
   assert.ok(workflow.includes("[IO.File]::WriteAllBytes($target, [byte[]]@())"));
   assert.ok(workflow.includes("staged updater helper is unexpectedly small"));
   assert.ok(workflow.includes("UPD_METADATA_INVALID"));
+  assert.ok(workflow.includes("Start-Process -FilePath $target"));
+  assert.ok(workflow.includes("$helperProcess.ExitCode"));
   assert.ok(
     workflow.indexOf("- name: Build and stage dedicated updater helper") <
       workflow.indexOf("- name: Rust check and tests"),

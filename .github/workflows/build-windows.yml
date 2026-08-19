@@ -78,8 +78,13 @@ jobs:
           if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "updater helper was not built" }
           Copy-Item -LiteralPath $source -Destination $target -Force
           if ((Get-Item -LiteralPath $target).Length -lt 65536) { throw "staged updater helper is unexpectedly small" }
-          $helperOutput = (& $target 2>&1 | Out-String).Trim()
-          $helperExit = $LASTEXITCODE
+          $helperStdout = Join-Path $env:RUNNER_TEMP "caseboard-updater-helper.stdout.txt"
+          $helperStderr = Join-Path $env:RUNNER_TEMP "caseboard-updater-helper.stderr.txt"
+          $helperProcess = Start-Process -FilePath $target -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput $helperStdout -RedirectStandardError $helperStderr
+          $helperExit = $helperProcess.ExitCode
+          $helperOutput = ((Get-Content -LiteralPath $helperStdout -Raw -ErrorAction SilentlyContinue) +
+            (Get-Content -LiteralPath $helperStderr -Raw -ErrorAction SilentlyContinue)).Trim()
           if ($helperExit -ne 1 -or $helperOutput -notmatch 'UPD_METADATA_INVALID') {
             throw "staged updater helper did not fail closed on empty argv"
           }
