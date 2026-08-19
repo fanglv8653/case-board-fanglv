@@ -10,7 +10,9 @@ use super::{
     DB_MIGRATION_APPLIED_VERSION_UNKNOWN, DB_MIGRATION_CHECKSUM_UNKNOWN,
     DB_MIGRATION_LINEAGE_INCOMPATIBLE, DB_MIGRATION_SCHEMA_SENTINEL_MISSING,
 };
-use sha2::{Digest, Sha256, Sha384};
+#[cfg(target_os = "windows")]
+use sha2::Sha256;
+use sha2::{Digest, Sha384};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
