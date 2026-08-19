@@ -11,9 +11,20 @@ const EXPECTED_UPDATER_PUBKEY =
 const EXPECTED_UPDATER_PUBKEY_SHA256 =
   "a9a2c4e0dda49d42f02effdd6b0d2f862689bd58164c6ed00bc68a2065664c38";
 
-test("new builds restore discovery through the main branch version marker", () => {
+test("new builds restore discovery through a coherent main branch version marker", () => {
   const backend = read("src-tauri/src/update.rs");
   const marker = JSON.parse(read("release/version.json"));
+  const sourceVersion = JSON.parse(read("package.json")).version;
+  const semverTuple = (value) => {
+    assert.match(value, /^\d+\.\d+\.\d+$/);
+    return value.split(".").map(Number);
+  };
+  const compareSemver = (left, right) => {
+    for (let index = 0; index < 3; index += 1) {
+      if (left[index] !== right[index]) return left[index] - right[index];
+    }
+    return 0;
+  };
 
   assert.ok(
     backend.includes(
@@ -21,10 +32,10 @@ test("new builds restore discovery through the main branch version marker", () =
     ),
   );
   assert.equal(backend.includes("PRIVATE_UPDATE_CHECK_DISABLED"), false);
-  assert.equal(marker.version, "0.8.3");
+  assert.ok(compareSemver(semverTuple(marker.version), semverTuple(sourceVersion)) <= 0);
   assert.equal(
     marker.download_url,
-    "https://github.com/fanglv8653/case-board-fanglv/releases/tag/v0.8.3-fanglv",
+    `https://github.com/fanglv8653/case-board-fanglv/releases/tag/v${marker.version}-fanglv`,
   );
 });
 
