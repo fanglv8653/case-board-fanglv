@@ -630,6 +630,20 @@ fn rename_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn secure_path(path: &Path) -> Result<(), UpdateLifecycleError> {
     let sid = windows_acl::current_user_sid_string()?;
+    let owner_status = Command::new("icacls.exe")
+        .arg(path)
+        .arg("/setowner")
+        .arg(format!("*{sid}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| {
+            UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
+        })?;
+    if !owner_status.success() {
+        return Err(UpdateLifecycleError::new(UPD_RECEIPT_ACL_INVALID));
+    }
     let grant = if path.is_dir() {
         format!("*{sid}:(OI)(CI)F")
     } else {
