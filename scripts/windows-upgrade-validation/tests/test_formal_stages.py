@@ -154,8 +154,11 @@ class FormalStageTests(unittest.TestCase):
                     os.path.samefile(second_value["parent_manifest"], first_manifest),
                     "parent manifest must resolve to the exact prior evidence file",
                 )
-                self.assertEqual(
-                    artifact_path(second_value, "proof_database"), proof_db
+                self.assertTrue(
+                    os.path.samefile(
+                        artifact_path(second_value, "proof_database"), proof_db
+                    ),
+                    "proof database must resolve to the exact recorded artifact",
                 )
 
                 formal = self.invoke(
