@@ -1312,6 +1312,48 @@ async fn complete_pre_0063_wal_pair_is_backed_up_recovered_and_idempotent() {
     migrated.close().await;
 }
 
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn empty_wal_and_orphan_shm_are_retired_by_sqlite_before_preflight() {
+    let (_directory, database) = migrated_fixture("empty-wal-clean-shutdown").await;
+    let before = database_fingerprint(&database).await;
+    std::fs::write(sidecar_path(&database, "-wal"), []).expect("create empty WAL");
+    std::fs::write(sidecar_path(&database, "-shm"), vec![0_u8; 32_768])
+        .expect("create reconstructible SHM");
+
+    assert!(recover_complete_wal_pair(&database)
+        .await
+        .expect("empty WAL has no durable frames and must be retired")
+        .is_none());
+    let wal = sidecar_path(&database, "-wal");
+    assert!(
+        !wal.exists()
+            || std::fs::metadata(&wal)
+                .expect("read retained empty WAL")
+                .len()
+                == 0
+    );
+    assert!(!sidecar_path(&database, "-journal").exists());
+    let read_options = SqliteConnectOptions::new()
+        .filename(&database)
+        .create_if_missing(false)
+        .read_only(true)
+        .immutable(true)
+        .foreign_keys(true);
+    let read_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(read_options)
+        .await
+        .expect("open authoritative main database after empty WAL retirement");
+    assert_eq!(database_fingerprint_from_pool(&read_pool).await, before);
+    read_pool.close().await;
+
+    let pool = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("startup proceeds after empty WAL retirement");
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn wrong_existing_backup_fails_without_mutating_active_trio() {
     let (_directory, database) = frozen_pre_0063_wal_fixture("wrong-backup").await;

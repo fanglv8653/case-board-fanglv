@@ -603,6 +603,19 @@ async fn recover_complete_wal_pair_windows(
         ));
     }
 
+    // SQLite can leave an empty WAL together with its reconstructible SHM
+    // after a clean shutdown.  There are no frames (and therefore no durable
+    // pages) to recover in that state.  Still let SQLite acquire exclusive
+    // ownership, audit the authoritative main database and retire its own
+    // sidecars; never remove them directly from application filesystem code.
+    let wal_length = fs::metadata(&wal_path)
+        .map_err(|_| sidecar_recovery_error("wal_sidecar_physical_validation_failed"))?
+        .len();
+    if wal_length == 0 {
+        retire_empty_wal_pair_windows(database_path).await?;
+        return Ok(None);
+    }
+
     // Reject malformed/truncated/checksum-invalid WAL before SQLite can choose
     // to ignore it as if no recoverable sidecar existed.
     validate_wal_pair(database_path)?;
@@ -861,14 +874,127 @@ async fn recover_complete_wal_pair_windows(
     }))
 }
 
+#[cfg(target_os = "windows")]
+async fn retire_empty_wal_pair_windows(database_path: &Path) -> Result<(), DbError> {
+    let wal_path = sidecar_path(database_path, "-wal");
+    let journal_path = sidecar_path(database_path, "-journal");
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(false)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _metadata| {
+            Box::pin(async move {
+                let mode: String = sqlx::query_scalar("PRAGMA locking_mode=EXCLUSIVE")
+                    .fetch_one(&mut *connection)
+                    .await?;
+                if !mode.eq_ignore_ascii_case("exclusive") {
+                    return Err(sqlx::Error::Protocol(
+                        "exclusive SQLite locking mode unavailable".to_string(),
+                    ));
+                }
+                sqlx::query("BEGIN EXCLUSIVE")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(options)
+        .await
+        .map_err(|_| sidecar_recovery_error("empty_wal_exclusive_lock_failed"))?;
+
+    // Opening the exclusive SQLite connection may already retire the empty
+    // WAL.  If it remains, it must still be empty while the lock is held.
+    if wal_path
+        .try_exists()
+        .map_err(|_| sidecar_recovery_error("empty_wal_source_changed"))?
+        && fs::metadata(&wal_path)
+            .map_err(|_| sidecar_recovery_error("empty_wal_source_changed"))?
+            .len()
+            != 0
+    {
+        sqlx::query("ROLLBACK").execute(&pool).await.ok();
+        pool.close().await;
+        return Err(sidecar_recovery_error("empty_wal_source_changed"));
+    }
+    if journal_path.try_exists().unwrap_or(true) {
+        sqlx::query("ROLLBACK").execute(&pool).await.ok();
+        pool.close().await;
+        return Err(sidecar_recovery_error("empty_wal_source_changed"));
+    }
+
+    let audit_result = preflight_pool(&pool).await;
+    let integrity: Result<String, DbError> = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("empty_wal_integrity_check_failed"));
+    if let Err(error) = audit_result.and_then(|preflight| {
+        if !integrity?.eq_ignore_ascii_case("ok") {
+            return Err(sidecar_recovery_error("empty_wal_integrity_check_failed"));
+        }
+        Ok(preflight)
+    }) {
+        sqlx::query("ROLLBACK").execute(&pool).await.ok();
+        pool.close().await;
+        return Err(error);
+    }
+    sqlx::query("COMMIT")
+        .execute(&pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("empty_wal_retirement_failed"))?;
+
+    let checkpoint: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("empty_wal_retirement_failed"))?;
+    // SQLite reports (0,-1,-1) when opening the empty sidecar has already
+    // established that no WAL transaction exists; (0,0,0) is the equivalent
+    // result when an empty WAL connection is still active.
+    if checkpoint != (0, 0, 0) && checkpoint != (0, -1, -1) {
+        pool.close().await;
+        return Err(sidecar_recovery_error("empty_wal_checkpoint_busy"));
+    }
+    let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode = DELETE")
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("empty_wal_retirement_failed"))?;
+    if !journal_mode.eq_ignore_ascii_case("delete") {
+        pool.close().await;
+        return Err(sidecar_recovery_error(
+            "empty_wal_journal_mode_delete_failed",
+        ));
+    }
+    let locking_mode: String = sqlx::query_scalar("PRAGMA locking_mode=NORMAL")
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| sidecar_recovery_error("empty_wal_retirement_failed"))?;
+    if !locking_mode.eq_ignore_ascii_case("normal") {
+        pool.close().await;
+        return Err(sidecar_recovery_error(
+            "empty_wal_locking_mode_normal_failed",
+        ));
+    }
+    pool.close().await;
+    ensure_no_wal_sidecars(database_path)
+}
+
 pub(crate) fn ensure_no_wal_sidecars(database_path: &Path) -> Result<(), DbError> {
-    // An orphaned SHM is only a reconstructible index.  WAL and rollback
-    // journal files can contain durable pages and always require recovery.
-    let sidecar_present_or_unreadable = ["-wal", "-journal"].iter().any(|suffix| {
-        sidecar_path(database_path, suffix)
-            .try_exists()
-            .unwrap_or(true)
-    });
+    // An orphaned SHM is only a reconstructible index. A zero-byte WAL also
+    // contains no header or frames, so it cannot carry durable pages. SQLite
+    // may legitimately retain that empty filename after a clean shutdown.
+    // Any non-empty or unreadable WAL, and every rollback journal, still fail
+    // closed and require the recovery path.
+    let wal_path = sidecar_path(database_path, "-wal");
+    let wal_requires_recovery = match std::fs::metadata(&wal_path) {
+        Ok(metadata) => metadata.len() != 0,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    };
+    let journal_requires_recovery = sidecar_path(database_path, "-journal")
+        .try_exists()
+        .unwrap_or(true);
+    let sidecar_present_or_unreadable = wal_requires_recovery || journal_requires_recovery;
     if sidecar_present_or_unreadable {
         return Err(compatibility_error(
             DB_MIGRATION_LINEAGE_INCOMPATIBLE,
