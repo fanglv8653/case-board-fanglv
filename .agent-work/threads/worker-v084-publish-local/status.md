@@ -5,10 +5,10 @@
 - task_id: V084-PUBLISH
 - thread_id: worker-v084-publish-local
 - role: worker
-- status: inProgress
-- updated_at: 2026-08-19T10:20:07+08:00
+- status: submitted_for_review
+- updated_at: 2026-08-19T18:50:19+08:00
 - deliverable_path: .agent-work/output/V084-PUBLISH.md
-- last_submission: Direct serial publication in master process; no child agent spawned
+- last_submission: v0.8.4 Release 已公开；精确双资产、minisign、本机迁移/重复启动、双清单提交与 raw 回读均通过；发布恢复脚本草稿回读缺陷已修复并有回归测试。
 
 ## 最近动作
 
