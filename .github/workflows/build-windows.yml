@@ -64,6 +64,26 @@ jobs:
       - name: Vite build
         run: pnpm build
 
+      - name: Build and stage dedicated updater helper
+        shell: pwsh
+        run: |
+          $targetDir = "src-tauri/binaries"
+          $target = Join-Path $targetDir "caseboard-updater-helper-x86_64-pc-windows-msvc.exe"
+          New-Item -ItemType Directory -Force $targetDir | Out-Null
+          # tauri-build validates externalBin even while compiling the helper itself.
+          # Bootstrap only the path; a failed helper build stops before packaging.
+          [IO.File]::WriteAllBytes($target, [byte[]]@())
+          cargo build --release --locked --bin caseboard-updater-helper
+          $source = "target/release/caseboard-updater-helper.exe"
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "updater helper was not built" }
+          Copy-Item -LiteralPath $source -Destination $target -Force
+          if ((Get-Item -LiteralPath $target).Length -lt 65536) { throw "staged updater helper is unexpectedly small" }
+          $helperOutput = (& $target 2>&1 | Out-String).Trim()
+          $helperExit = $LASTEXITCODE
+          if ($helperExit -ne 1 -or $helperOutput -notmatch 'UPD_METADATA_INVALID') {
+            throw "staged updater helper did not fail closed on empty argv"
+          }
+
       - name: Rust check and tests
         run: |
           cargo check --workspace --all-targets --locked
@@ -82,17 +102,6 @@ jobs:
             throw "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required"
           }
           Write-Host "Updater signing secrets are present (values not printed)."
-
-      - name: Build and stage dedicated updater helper
-        shell: pwsh
-        run: |
-          cargo build --release --locked --bin caseboard-updater-helper
-          $source = "target/release/caseboard-updater-helper.exe"
-          $targetDir = "src-tauri/binaries"
-          $target = Join-Path $targetDir "caseboard-updater-helper-x86_64-pc-windows-msvc.exe"
-          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "updater helper was not built" }
-          New-Item -ItemType Directory -Force $targetDir | Out-Null
-          Copy-Item -LiteralPath $source -Destination $target -Force
 
       # 应用内更新签名:私钥来自仓库 Actions secret(加密存储,fork 的 PR 拿不到)。
       # 注入后 createUpdaterArtifacts 会为 NSIS 安装包生成同名 .sig 签名文件。
