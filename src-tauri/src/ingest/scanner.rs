@@ -253,6 +253,28 @@ fn criminal_stage_from_filename(filename: &str) -> Option<&'static str> {
     None
 }
 
+/// 刑事材料必须先走独立类别规则，避免“起诉书”等被民事类别规则漏掉，
+/// 也避免仅靠 OCR 正文猜测材料类型。
+fn classify_criminal_category(filename: &str) -> Option<String> {
+    let categories = [
+        ("起诉意见书", "起诉意见书"),
+        ("不起诉决定书", "其他刑事材料"),
+        ("起诉书", "起诉书"),
+        ("刑事判决书", "判决书"),
+        ("刑事裁定书", "裁定书"),
+        ("拘留通知书", "拘留通知书"),
+        ("逮捕通知书", "逮捕通知书"),
+        ("取保候审决定书", "取保候审决定书"),
+        ("认罪认罚具结书", "认罪认罚具结书"),
+        ("量刑建议书", "量刑建议书"),
+        ("讯问笔录", "讯问笔录"),
+    ];
+    categories
+        .iter()
+        .find(|(keyword, _)| filename.contains(keyword))
+        .map(|(_, category)| (*category).to_string())
+}
+
 /// 根据**文件名**识别类别(诉讼文书类型)。
 fn classify_category(filename: &str) -> Option<String> {
     let f = filename;
@@ -535,7 +557,11 @@ pub fn scan_folder_for_domain(root: &Path, legal_domain: &str) -> Vec<ScannedDoc
             } else {
                 classify_stage(path)
             },
-            category: classify_category(&filename),
+            category: if is_criminal {
+                classify_criminal_category(&filename).or_else(|| classify_category(&filename))
+            } else {
+                classify_category(&filename)
+            },
             is_ai_artifact: is_ai_artifact(&filename),
             size_bytes,
             modified_at,
@@ -639,6 +665,28 @@ mod tests {
     }
 
     #[test]
+    fn criminal_category_covers_common_procedural_materials_before_generic_rules() {
+        let samples = [
+            ("示例起诉意见书.pdf", "起诉意见书"),
+            ("示例人民检察院起诉书.pdf", "起诉书"),
+            ("示例拘留通知书.pdf", "拘留通知书"),
+            ("示例逮捕通知书.pdf", "逮捕通知书"),
+            ("示例取保候审决定书.pdf", "取保候审决定书"),
+            ("示例认罪认罚具结书.pdf", "认罪认罚具结书"),
+            ("示例量刑建议书.pdf", "量刑建议书"),
+            ("示例讯问笔录.pdf", "讯问笔录"),
+        ];
+        for (filename, expected) in samples {
+            assert_eq!(
+                classify_criminal_category(filename).as_deref(),
+                Some(expected),
+                "{filename} 应识别为 {expected}"
+            );
+        }
+        assert_eq!(classify_criminal_category("普通证据材料.pdf"), None);
+    }
+
+    #[test]
     fn criminal_stage_ignores_case_root_name() {
         let root = Path::new("D:/cases/某审判案件");
         assert_eq!(
@@ -660,5 +708,30 @@ mod tests {
 
         assert_eq!(civil[0].stage.as_deref(), Some("一审"));
         assert_eq!(criminal[0].stage.as_deref(), Some("审判"));
+        assert_eq!(criminal[0].category.as_deref(), Some("判决书"));
+    }
+
+    /// 本机代表案件只读验收入口：显式提供环境变量后才运行，不读取正文、不写源目录。
+    #[test]
+    #[ignore = "需要显式设置 CASEBOARD_REPRESENTATIVE_CASE_PATH"]
+    fn representative_criminal_case_metadata_scan_is_read_only() {
+        let path = std::env::var("CASEBOARD_REPRESENTATIVE_CASE_PATH")
+            .expect("必须设置 CASEBOARD_REPRESENTATIVE_CASE_PATH");
+        let root = Path::new(&path);
+        assert!(root.is_dir(), "代表案件目录必须存在");
+        let docs = scan_folder_for_domain(root, "criminal");
+        assert!(docs.len() >= 20, "代表案件应触发刑事大批量保护");
+        assert!(
+            docs.iter().any(|doc| doc.category.is_some()),
+            "至少一份常见刑事材料应获得可诊断类别"
+        );
+        let categorized = docs.iter().filter(|doc| doc.category.is_some()).count();
+        let staged = docs.iter().filter(|doc| doc.stage.is_some()).count();
+        eprintln!(
+            "representative_case_metadata: total={}, categorized={}, staged={}",
+            docs.len(),
+            categorized,
+            staged
+        );
     }
 }

@@ -1107,12 +1107,12 @@ export function CriminalCasePanel({
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
             />
           </Field>
-          <Field label="同案犯" className="md:col-span-1">
+          <Field label="同案人员" className="md:col-span-1">
             <textarea
               value={coDefendantsText}
               onChange={(event) => setCoDefendantsText(event.currentTarget.value)}
               rows={3}
-              placeholder="每行填写一人"
+              placeholder="每行填写一名材料明确记载的同案人员"
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-foreground focus:outline-none"
             />
           </Field>

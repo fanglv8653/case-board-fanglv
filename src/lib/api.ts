@@ -54,6 +54,10 @@ export function refreshLprData(): Promise<LprRefreshResult> {
 
 import type {
   Case,
+  CaseArchivePreflight,
+  CaseFee,
+  CaseFeeInput,
+  CaseLifecycleInput,
   FeishuConnectionInput,
   FeishuConnectionStatus,
   FeishuPullResult,
@@ -102,6 +106,8 @@ import type {
   CourtFilingEnvReport,
   ExtractedFields,
   FeishuCalendarEvent,
+  FeishuCalendarAuthorization,
+  FeishuCalendarDiagnostic,
   LawyerProfile,
   NewCaseInstance,
   MaterialBatchDetail,
@@ -561,6 +567,38 @@ export function getCaseWithDocs(id: string): Promise<CaseWithDocs> {
 /** 删除一个案件(级联删除关联文档)。不动原始文件夹。 */
 export function deleteCase(id: string): Promise<void> {
   return invoke<void>("delete_case", { id });
+}
+
+export function getCaseArchivePreflight(caseId: string): Promise<CaseArchivePreflight> {
+  return invoke<CaseArchivePreflight>("get_case_archive_preflight", { caseId });
+}
+
+export function closeCase(input: CaseLifecycleInput): Promise<Case> {
+  return invoke<Case>("close_case", { input });
+}
+
+export function reopenCase(input: CaseLifecycleInput): Promise<Case> {
+  return invoke<Case>("reopen_case", { input });
+}
+
+export function archiveCase(input: CaseLifecycleInput): Promise<Case> {
+  return invoke<Case>("archive_case", { input });
+}
+
+export function restoreCase(input: CaseLifecycleInput): Promise<Case> {
+  return invoke<Case>("restore_case", { input });
+}
+
+export function listCaseFees(caseId: string): Promise<CaseFee[]> {
+  return invoke<CaseFee[]>("list_case_fees", { caseId });
+}
+
+export function upsertCaseFee(input: CaseFeeInput): Promise<CaseFee> {
+  return invoke<CaseFee>("upsert_case_fee", { input });
+}
+
+export function setCaseFeeDeleted(id: string, deleted: boolean): Promise<CaseFee> {
+  return invoke<CaseFee>("set_case_fee_deleted", { id, deleted });
 }
 
 /**
@@ -1587,6 +1625,18 @@ export function fetchFeishuCalendar(
   end: string,
 ): Promise<FeishuCalendarEvent[]> {
   return invoke<FeishuCalendarEvent[]>("fetch_feishu_calendar", { start, end });
+}
+
+export function testFeishuCalendarConnection(start: string, end: string): Promise<FeishuCalendarDiagnostic> {
+  return invoke<FeishuCalendarDiagnostic>("test_feishu_calendar_connection", { start, end });
+}
+
+export function startFeishuCalendarAuthorization(): Promise<FeishuCalendarAuthorization> {
+  return invoke<FeishuCalendarAuthorization>("start_feishu_calendar_authorization");
+}
+
+export function finishFeishuCalendarAuthorization(deviceCode: string): Promise<FeishuCalendarDiagnostic> {
+  return invoke<FeishuCalendarDiagnostic>("finish_feishu_calendar_authorization", { deviceCode });
 }
 
 /** 按飞书日历事件标题反查本地案件目录(需配案件池表);未配/未命中返回 null。 */

@@ -739,8 +739,8 @@ async fn fresh_database_reaches_current_lineage_and_all_frozen_sentinels() {
         .expect("inspect failed migration count");
 
     assert_eq!(actual_versions, embedded_versions);
-    assert_eq!(actual_versions.len(), 64);
-    assert_eq!(actual_versions.last(), Some(&65));
+    assert_eq!(actual_versions.len(), 67);
+    assert_eq!(actual_versions.last(), Some(&68));
     assert!(!actual_versions.contains(&36), "version 36 is a legal gap");
     assert_eq!(failed, 0);
     pool.close().await;
@@ -767,7 +767,7 @@ async fn fresh_database_reaches_current_lineage_and_all_frozen_sentinels() {
         .fetch_one(&migrated_empty)
         .await
         .expect("inspect migrated empty database");
-    assert_eq!(migrated_count, 64);
+    assert_eq!(migrated_count, embedded_versions.len() as i64);
     migrated_empty.close().await;
 }
 
@@ -858,7 +858,7 @@ fn rc_local_production_init_child() {
         .fetch_one(&pool)
         .await
         .expect("inspect production migration state");
-        assert_eq!(state, (64, 65, 1));
+        assert_eq!(state, (67, 68, 1));
         assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT name FROM cases WHERE id='rc-pre-0063-marker'",
@@ -913,7 +913,7 @@ async fn audited_legacy_migration_36_upgrades_through_production_init_and_preser
     .fetch_one(&pool)
     .await
     .expect("inspect upgraded compatibility lineage");
-    assert_eq!(state, (65, 65, 1, 1));
+    assert_eq!(state, (68, 68, 1, 1));
     let after_legacy_row: RawMigrationHistoryRow = sqlx::query_as(
         "SELECT version, description, installed_on, success, checksum, execution_time
          FROM _sqlx_migrations WHERE version=36",
@@ -969,7 +969,7 @@ async fn authorized_preflight_then_missing_v36_fails_without_forging_history() {
     .fetch_one(&pool)
     .await
     .expect("inspect migration history after unconditional placeholder failure");
-    assert_eq!(migration_state, (0, 65));
+    assert_eq!(migration_state, (0, 68));
     pool.close().await;
 }
 

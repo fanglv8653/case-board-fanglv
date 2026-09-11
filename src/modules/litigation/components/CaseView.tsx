@@ -3,10 +3,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   BookMarked,
   BookOpen,
+  Archive,
+  CheckCircle2,
   FolderSearch,
   Loader2,
   Pencil,
   RefreshCw,
+  RotateCcw,
   Trash2,
 } from "lucide-react";
 
@@ -68,6 +71,7 @@ export function CaseView({
   isEditMode,
   onToggleEditMode,
   onDeleteCase,
+  onCaseLifecycle,
   onRefreshFiles,
   refreshingFiles,
   onOpenReport,
@@ -93,6 +97,7 @@ export function CaseView({
   isEditMode: boolean;
   onToggleEditMode: () => void;
   onDeleteCase: () => void;
+  onCaseLifecycle: (action: "close" | "reopen" | "archive" | "restore") => void;
   onRefreshFiles: () => void;
   refreshingFiles: boolean;
   onOpenReport: () => void;
@@ -328,6 +333,27 @@ export function CaseView({
       <header className="border-b border-border bg-card/50 px-8 py-5">
         <div className="mx-auto flex max-w-6xl items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => onCaseLifecycle(selectedCase?.archived_at ? "restore" : selectedCase?.management_status === "closed" ? "archive" : "close")}
+              disabled={!selectedCase}
+              className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+              title={selectedCase?.archived_at ? "从归档恢复" : selectedCase?.management_status === "closed" ? "归档案件" : "标记办结"}
+              aria-label={selectedCase?.archived_at ? "从归档恢复" : selectedCase?.management_status === "closed" ? "归档案件" : "标记办结"}
+            >
+              {selectedCase?.archived_at ? <RotateCcw className="size-4" /> : selectedCase?.management_status === "closed" ? <Archive className="size-4" /> : <CheckCircle2 className="size-4" />}
+            </button>
+            {selectedCase?.management_status === "closed" && !selectedCase.archived_at && (
+            <button
+              type="button"
+              onClick={() => onCaseLifecycle("reopen")}
+              className="rounded p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              title="恢复在办"
+              aria-label="恢复在办"
+            >
+              <RotateCcw className="size-4" />
+            </button>
+            )}
             <button
               type="button"
               onClick={onGoHome}

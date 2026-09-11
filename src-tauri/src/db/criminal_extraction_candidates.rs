@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::llm::{CriminalDocumentExtraction, CriminalExtractValue, ExtractedFields};
 
-pub const CRIMINAL_SCHEMA_VERSION: &str = "criminal-document-v1";
+pub const CRIMINAL_SCHEMA_VERSION: &str = "criminal-document-v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct CriminalExtractionCandidateBatch {
@@ -498,6 +498,25 @@ fn proposed_fields(extract: &CriminalDocumentExtraction) -> Result<Vec<ProposedF
         "meritorious_service_status",
         extract.meritorious_service_status
     );
+    if !extract.co_defendants.is_empty() {
+        let confidence = extract
+            .co_defendants
+            .iter()
+            .filter_map(|value| value.confidence)
+            .reduce(f64::min);
+        let evidence = extract
+            .co_defendants
+            .iter()
+            .filter_map(|value| value.evidence.clone())
+            .collect::<Vec<_>>()
+            .join("；");
+        out.push(ProposedField {
+            key: "co_defendants_json".into(),
+            value: serde_json::to_value(&extract.co_defendants).map_err(|e| e.to_string())?,
+            confidence: normalize_confidence(confidence)?,
+            evidence: (!evidence.is_empty()).then_some(evidence),
+        });
+    }
     if !extract.charge_changes.is_empty() {
         let confidence = extract
             .charge_changes
@@ -623,9 +642,9 @@ fn validate_candidate_value(key: &str, raw: &str) -> Result<(), String> {
         if value.as_f64().is_none_or(|v| !v.is_finite() || v < 0.0) {
             return Err("restitution_amount 必须是非负数".into());
         }
-    } else if key == "charge_history_json" {
+    } else if matches!(key, "charge_history_json" | "co_defendants_json") {
         if !value.is_array() {
-            return Err("charge_history_json 必须是数组".into());
+            return Err(format!("{} 必须是数组", key));
         }
     } else {
         return Err(format!("非法刑事画像字段 {}", key));
@@ -658,7 +677,7 @@ async fn apply_profile_field(
         .map(|_| ())
         .map_err(|e| e.to_string());
     }
-    let text = if key == "charge_history_json" {
+    let text = if matches!(key, "charge_history_json" | "co_defendants_json") {
         serde_json::to_string(&value).unwrap()
     } else {
         value.as_str().unwrap().to_string()
@@ -694,6 +713,7 @@ async fn apply_profile_field(
         "surrender_status" => update!("surrender_status"),
         "meritorious_service_status" => update!("meritorious_service_status"),
         "charge_history_json" => update!("charge_history_json"),
+        "co_defendants_json" => update!("co_defendants_json"),
         "detention_date" => update!("detention_date"),
         "arrest_request_date" => update!("arrest_request_date"),
         "arrest_review_received_date" => update!("arrest_review_received_date"),
@@ -855,6 +875,31 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn co_defendants_are_structured_reviewable_candidates() {
+        let extract = CriminalDocumentExtraction {
+            co_defendants: vec![crate::llm::CriminalCoDefendantExtraction {
+                name: Some("测试同案人员".into()),
+                role: Some("材料明确记载的共同参与人".into()),
+                suspected_charge: Some("示例罪名".into()),
+                procedural_status: Some("另案处理".into()),
+                confidence: Some(0.78),
+                evidence: Some("脱敏测试摘录".into()),
+            }],
+            ..Default::default()
+        };
+        let proposed = proposed_fields(&extract).unwrap();
+        let field = proposed
+            .iter()
+            .find(|field| field.key == "co_defendants_json")
+            .expect("同案人员必须进入候选字段");
+        assert!(field.value.is_array());
+        assert_eq!(field.value[0]["name"], "测试同案人员");
+        assert_eq!(field.confidence, Some(0.78));
+        assert_eq!(field.evidence.as_deref(), Some("脱敏测试摘录"));
+        assert!(validate_candidate_value("co_defendants_json", &field.value.to_string()).is_ok());
     }
 
     #[tokio::test]

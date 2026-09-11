@@ -272,6 +272,71 @@ async fn list_cases(pool: tauri::State<'_, SqlitePool>) -> Result<Vec<Case>, Str
     cases_db::list_cases(pool.inner()).await.map_err(db_err)
 }
 
+#[tauri::command]
+async fn get_case_archive_preflight(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<db::case_lifecycle::CaseArchivePreflight, String> {
+    db::case_lifecycle::archive_preflight(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn list_case_fees(
+    pool: tauri::State<'_, SqlitePool>,
+    case_id: String,
+) -> Result<Vec<db::case_fees::CaseFee>, String> {
+    db::case_fees::list(pool.inner(), &case_id).await
+}
+
+#[tauri::command]
+async fn upsert_case_fee(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_fees::CaseFeeInput,
+) -> Result<db::case_fees::CaseFee, String> {
+    db::case_fees::upsert(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn set_case_fee_deleted(
+    pool: tauri::State<'_, SqlitePool>,
+    id: String,
+    deleted: bool,
+) -> Result<db::case_fees::CaseFee, String> {
+    db::case_fees::set_deleted(pool.inner(), &id, deleted).await
+}
+
+#[tauri::command]
+async fn close_case(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_lifecycle::CaseLifecycleInput,
+) -> Result<Case, String> {
+    db::case_lifecycle::close_case(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn reopen_case(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_lifecycle::CaseLifecycleInput,
+) -> Result<Case, String> {
+    db::case_lifecycle::reopen_case(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn archive_case(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_lifecycle::CaseLifecycleInput,
+) -> Result<Case, String> {
+    db::case_lifecycle::archive_case(pool.inner(), input).await
+}
+
+#[tauri::command]
+async fn restore_case(
+    pool: tauri::State<'_, SqlitePool>,
+    input: db::case_lifecycle::CaseLifecycleInput,
+) -> Result<Case, String> {
+    db::case_lifecycle::restore_case(pool.inner(), input).await
+}
+
 /// 删除一个案件(级联删除所有关联文档/事件/联系人)。
 ///
 /// 不动原始文件夹,只删 CaseBoard 数据库里这个案件的记录。
@@ -1901,7 +1966,57 @@ async fn fetch_feishu_calendar(
         return Ok(Vec::new());
     }
     let bin = feishu::lark_bin(&settings);
-    feishu::fetch_calendar_events(&bin, &start, &end).await
+    feishu::calendar_connection(&bin, &start, &end)
+        .await
+        .map(|(_, events)| events)
+        .map_err(|diagnostic| {
+            format!(
+                "FEISHU_CALENDAR_CONNECTION_FAILED:{}: {}",
+                diagnostic.category, diagnostic.message
+            )
+        })
+}
+
+#[tauri::command]
+async fn test_feishu_calendar_connection(
+    start: String,
+    end: String,
+) -> Result<feishu::FeishuCalendarDiagnostic, String> {
+    let settings = settings::read_settings()?;
+    let bin = feishu::lark_bin(&settings);
+    Ok(
+        match feishu::calendar_connection(&bin, &start, &end).await {
+            Ok((diagnostic, _)) => diagnostic,
+            Err(diagnostic) => diagnostic,
+        },
+    )
+}
+
+#[tauri::command]
+async fn start_feishu_calendar_authorization() -> Result<feishu::FeishuCalendarAuthorization, String>
+{
+    let settings = settings::read_settings()?;
+    let bin = feishu::lark_bin(&settings);
+    feishu::start_calendar_authorization(&bin).await
+}
+
+#[tauri::command]
+async fn finish_feishu_calendar_authorization(
+    device_code: String,
+) -> Result<feishu::FeishuCalendarDiagnostic, String> {
+    let settings = settings::read_settings()?;
+    let bin = feishu::lark_bin(&settings);
+    feishu::finish_calendar_authorization(&bin, &device_code).await?;
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    Ok(
+        match feishu::calendar_connection(&bin, &today, &today).await {
+            Ok((diagnostic, _)) => diagnostic,
+            Err(diagnostic) => diagnostic,
+        },
+    )
 }
 
 /// 按飞书日历事件标题反查本地案件目录(需配案件池多维表格);未配返回 None。
@@ -6924,6 +7039,14 @@ pub fn run() {
             ingest::material_control::ignore_failed_material_items,
             scan_case_folder,
             list_cases,
+            get_case_archive_preflight,
+            list_case_fees,
+            upsert_case_fee,
+            set_case_fee_deleted,
+            close_case,
+            reopen_case,
+            archive_case,
+            restore_case,
             get_case_with_docs,
             delete_case,
             read_text_file,
@@ -7083,6 +7206,9 @@ pub fn run() {
             list_calendar_events,
             delete_calendar_event,
             fetch_feishu_calendar,
+            test_feishu_calendar_connection,
+            start_feishu_calendar_authorization,
+            finish_feishu_calendar_authorization,
             find_feishu_case_path,
             get_feishu_sync_preview,
             bind_feishu_sync_case,

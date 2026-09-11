@@ -35,6 +35,9 @@ pub fn start(pool: SqlitePool) -> JoinHandle<()> {
                 "SELECT EXISTS(
                      SELECT 1 FROM device_sync_dirty_entities
                      WHERE changed_at <= datetime('now','-5 seconds')
+                     UNION ALL
+                     SELECT 1 FROM device_sync_case_fee_dirty_entities
+                     WHERE changed_at <= datetime('now','-5 seconds')
                  )",
             )
             .fetch_one(&pool)

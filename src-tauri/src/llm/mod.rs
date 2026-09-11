@@ -119,6 +119,17 @@ pub struct CriminalKeyDateExtraction {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct CriminalCoDefendantExtraction {
+    pub name: Option<String>,
+    pub role: Option<String>,
+    pub suspected_charge: Option<String>,
+    pub procedural_status: Option<String>,
+    pub confidence: Option<f64>,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CriminalDocumentExtraction {
     pub document_type: CriminalExtractValue<String>,
     pub current_stage: CriminalExtractValue<String>,
@@ -136,6 +147,7 @@ pub struct CriminalDocumentExtraction {
     pub victim_forgiveness: CriminalExtractValue<String>,
     pub surrender_status: CriminalExtractValue<String>,
     pub meritorious_service_status: CriminalExtractValue<String>,
+    pub co_defendants: Vec<CriminalCoDefendantExtraction>,
     pub charge_changes: Vec<CriminalChargeChange>,
     pub key_dates: Vec<CriminalKeyDateExtraction>,
 }

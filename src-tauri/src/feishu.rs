@@ -25,6 +25,7 @@ use tokio::time::timeout;
 use crate::settings::Settings;
 
 const LARK_CLI_TIMEOUT: Duration = Duration::from_secs(30);
+const FEISHU_CALENDAR_READ_SCOPE: &str = "calendar:calendar.event:read";
 const BITABLE_MAX_PAGES: usize = 50;
 const BITABLE_FIELD_MAX_PAGES: usize = 5;
 
@@ -81,6 +82,30 @@ pub struct FeishuCalendarEvent {
     pub description: Option<String>,
     pub location: Option<String>,
     pub app_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuCalendarDiagnostic {
+    pub cli_path: String,
+    pub cli_version: Option<String>,
+    pub app_id_masked: Option<String>,
+    pub identity: Option<String>,
+    pub user_available: bool,
+    pub user_verified: bool,
+    pub token_status: Option<String>,
+    pub scope_granted: bool,
+    pub real_request_ok: bool,
+    pub category: String,
+    pub message: String,
+    pub event_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuCalendarAuthorization {
+    pub verification_url: String,
+    pub user_code: Option<String>,
+    pub device_code: String,
+    pub expires_in: Option<i64>,
 }
 
 /// 案件管理预演用的飞书记录。只保留字段值和远端修改时间。
@@ -146,6 +171,17 @@ fn default_lark_bin() -> String {
             return "/usr/local/bin/lark-cli".to_string();
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let npm_cmd = std::path::PathBuf::from(appdata)
+                .join("npm")
+                .join("lark-cli.cmd");
+            if npm_cmd.is_file() {
+                return npm_cmd.to_string_lossy().to_string();
+            }
+        }
+    }
     // Windows / Linux:靠系统 PATH(Windows 自动补 .exe)。
     "lark-cli".to_string()
 }
@@ -157,6 +193,8 @@ fn default_lark_bin() -> String {
 /// `lark-cli.exe`(它不在这些 Unix 目录里),是致命 bug。
 fn apply_lark_env(cmd: &mut Command) {
     cmd.env("LARK_CLI_NO_PROXY", "1");
+    cmd.env("LARKSUITE_CLI_NO_UPDATE_NOTIFIER", "1");
+    cmd.env("LARKSUITE_CLI_NO_SKILLS_NOTIFIER", "1");
     #[cfg(unix)]
     cmd.env(
         "PATH",
@@ -166,6 +204,35 @@ fn apply_lark_env(cmd: &mut Command) {
     crate::proc_util::hide_console_window(cmd);
 }
 
+fn lark_command(bin: &str) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let lower = bin.to_ascii_lowercase();
+        if lower.ends_with(".cmd") || lower.ends_with(".bat") {
+            let mut command = Command::new("cmd.exe");
+            command.arg("/D").arg("/S").arg("/C").arg(bin);
+            apply_lark_env(&mut command);
+            return command;
+        }
+        if lower.ends_with(".ps1") {
+            let mut command = Command::new("powershell.exe");
+            command
+                .arg("-NoLogo")
+                .arg("-NoProfile")
+                .arg("-NonInteractive")
+                .arg("-ExecutionPolicy")
+                .arg("Bypass")
+                .arg("-File")
+                .arg(bin);
+            apply_lark_env(&mut command);
+            return command;
+        }
+    }
+    let mut command = Command::new(bin);
+    apply_lark_env(&mut command);
+    command
+}
+
 /// 调一次 lark-cli 的 `api` 子命令(复用用户登录态),返回解析后的 JSON。
 async fn lark_cli_api(
     bin: &str,
@@ -173,8 +240,7 @@ async fn lark_cli_api(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, String> {
-    let mut cmd = Command::new(bin);
-    apply_lark_env(&mut cmd);
+    let mut cmd = lark_command(bin);
     cmd.arg("api")
         .arg(method)
         .arg(path)
@@ -242,6 +308,59 @@ fn ensure_lark_ok(value: Value) -> Result<Value, String> {
         }
     }
     Ok(value)
+}
+
+fn parse_lark_cli_envelope(stderr: &[u8], stdout: &[u8]) -> Option<Value> {
+    [stderr, stdout].into_iter().find_map(|bytes| {
+        let text = std::str::from_utf8(bytes).ok()?.trim();
+        (!text.is_empty())
+            .then(|| serde_json::from_str::<Value>(text).ok())
+            .flatten()
+    })
+}
+
+fn compact_lark_error_message(message: &str) -> String {
+    let compact = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    compact.chars().take(240).collect()
+}
+
+fn calendar_cli_failure(stderr: &[u8], stdout: &[u8]) -> String {
+    let Some(envelope) = parse_lark_cli_envelope(stderr, stdout) else {
+        return "FEISHU_CALENDAR_CLI_FAILED: lark-cli 日历查询失败，且未返回可识别的 JSON 错误"
+            .to_string();
+    };
+    let error = envelope.get("error").unwrap_or(&Value::Null);
+    let error_type = error.get("type").and_then(Value::as_str).unwrap_or("");
+    let subtype = error.get("subtype").and_then(Value::as_str).unwrap_or("");
+    if envelope.get("identity").and_then(Value::as_str) == Some("user")
+        && matches!(error_type, "authentication" | "authorization")
+        && matches!(
+            subtype,
+            "token_missing" | "missing_scope" | "token_expired" | "refresh_failed"
+        )
+    {
+        return format!("FEISHU_CALENDAR_AUTH_REQUIRED: 飞书日历需要重新授权最小只读权限 {FEISHU_CALENDAR_READ_SCOPE}");
+    }
+    let code = error
+        .get("code")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "unknown".into());
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(compact_lark_error_message)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "未知错误".into());
+    format!("FEISHU_CALENDAR_CLI_FAILED: lark-cli 日历查询失败 code={code}: {message}")
+}
+
+fn calendar_cli_data(value: Value) -> Result<Value, String> {
+    let data = ensure_lark_ok(value)?;
+    if data.is_array() {
+        Ok(data)
+    } else {
+        Err("FEISHU_CALENDAR_RESPONSE_INVALID: 飞书日历响应 data 不是事件列表".into())
+    }
 }
 
 fn response_data(value: &Value) -> &Value {
@@ -1322,6 +1441,284 @@ fn clean_required(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|s| !s.is_empty())
 }
 
+async fn run_lark_output(bin: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = lark_command(bin);
+    command.args(args);
+    timeout(LARK_CLI_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "FEISHU_CALENDAR_CLI_TIMEOUT: lark-cli 调用超时".to_string())?
+        .map_err(|e| format!("FEISHU_CALENDAR_CLI_NOT_FOUND: 无法启动 lark-cli: {e}"))
+}
+
+async fn run_lark_json(bin: &str, args: &[&str]) -> Result<Value, String> {
+    let output = run_lark_output(bin, args).await?;
+    if !output.status.success() {
+        return Err(calendar_cli_failure(&output.stderr, &output.stdout));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("FEISHU_CALENDAR_RESPONSE_INVALID: lark-cli 输出非 JSON: {e}"))
+}
+
+fn mask_identifier(value: Option<&str>) -> Option<String> {
+    value.map(|value| {
+        let chars = value.chars().collect::<Vec<_>>();
+        if chars.len() <= 6 {
+            "***".to_string()
+        } else {
+            format!(
+                "{}***{}",
+                chars[..3].iter().collect::<String>(),
+                chars[chars.len() - 3..].iter().collect::<String>()
+            )
+        }
+    })
+}
+
+fn nested_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_str)
+}
+
+fn nested_bool(value: &Value, path: &[&str]) -> bool {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn scope_is_granted(value: &Value) -> bool {
+    value
+        .get("granted")
+        .and_then(Value::as_bool)
+        .or_else(|| value.get("ok").and_then(Value::as_bool))
+        .or_else(|| value.pointer("/data/granted").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn classify_calendar_error(error: &str) -> (&'static str, String) {
+    let category = if error.contains("CLI_NOT_FOUND") {
+        "cli_missing"
+    } else if error.contains("AUTH_REQUIRED") {
+        "authorization_required"
+    } else if error.contains("PERMISSION") || error.contains("missing_scope") {
+        "scope_missing"
+    } else if error.contains("TIMEOUT") {
+        "network_or_timeout"
+    } else if error.contains("RESPONSE_INVALID") {
+        "response_invalid"
+    } else {
+        "api_error"
+    };
+    let message = error
+        .split_once(':')
+        .map(|(_, value)| value.trim())
+        .unwrap_or(error)
+        .to_string();
+    (category, message)
+}
+
+pub async fn calendar_connection(
+    bin: &str,
+    start: &str,
+    end: &str,
+) -> Result<(FeishuCalendarDiagnostic, Vec<FeishuCalendarEvent>), FeishuCalendarDiagnostic> {
+    let version = run_lark_output(bin, &["--version"])
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty());
+    let status = match run_lark_json(bin, &["auth", "status", "--verify", "--json"]).await {
+        Ok(value) => value,
+        Err(error) => {
+            let (category, message) = classify_calendar_error(&error);
+            return Err(FeishuCalendarDiagnostic {
+                cli_path: bin.into(),
+                cli_version: version,
+                app_id_masked: None,
+                identity: None,
+                user_available: false,
+                user_verified: false,
+                token_status: None,
+                scope_granted: false,
+                real_request_ok: false,
+                category: category.into(),
+                message,
+                event_count: None,
+            });
+        }
+    };
+    let user_available = nested_bool(&status, &["identities", "user", "available"]);
+    let user_verified = nested_bool(&status, &["identities", "user", "verified"]);
+    let identity = status
+        .get("identity")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let token_status =
+        nested_string(&status, &["identities", "user", "tokenStatus"]).map(str::to_string);
+    let app_id_masked = mask_identifier(status.get("appId").and_then(Value::as_str));
+    if !user_available || !user_verified {
+        return Err(FeishuCalendarDiagnostic {
+            cli_path: bin.into(),
+            cli_version: version,
+            app_id_masked,
+            identity,
+            user_available,
+            user_verified,
+            token_status,
+            scope_granted: false,
+            real_request_ok: false,
+            category: "authorization_required".into(),
+            message: "当前应用进程未取得有效的飞书用户授权".into(),
+            event_count: None,
+        });
+    }
+    let scope_granted = run_lark_json(
+        bin,
+        &[
+            "auth",
+            "check",
+            "--scope",
+            FEISHU_CALENDAR_READ_SCOPE,
+            "--json",
+        ],
+    )
+    .await
+    .map(|value| scope_is_granted(&value))
+    .unwrap_or(false);
+    if !scope_granted {
+        return Err(FeishuCalendarDiagnostic {
+            cli_path: bin.into(),
+            cli_version: version,
+            app_id_masked,
+            identity,
+            user_available,
+            user_verified,
+            token_status,
+            scope_granted: false,
+            real_request_ok: false,
+            category: "scope_missing".into(),
+            message: format!("缺少日历只读权限 {FEISHU_CALENDAR_READ_SCOPE}"),
+            event_count: None,
+        });
+    }
+    match fetch_calendar_events(bin, start, end).await {
+        Ok(events) => Ok((
+            FeishuCalendarDiagnostic {
+                cli_path: bin.into(),
+                cli_version: version,
+                app_id_masked,
+                identity,
+                user_available,
+                user_verified,
+                token_status,
+                scope_granted,
+                real_request_ok: true,
+                category: "ok".into(),
+                message: "飞书日历连接正常".into(),
+                event_count: Some(events.len()),
+            },
+            events,
+        )),
+        Err(error) => {
+            let (category, message) = classify_calendar_error(&error);
+            Err(FeishuCalendarDiagnostic {
+                cli_path: bin.into(),
+                cli_version: version,
+                app_id_masked,
+                identity,
+                user_available,
+                user_verified,
+                token_status,
+                scope_granted,
+                real_request_ok: false,
+                category: category.into(),
+                message,
+                event_count: None,
+            })
+        }
+    }
+}
+
+fn find_string_by_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    if let Value::Object(map) = value {
+        for key in keys {
+            if let Some(text) = map
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                return Some(text.to_string());
+            }
+        }
+        for child in map.values() {
+            if let Some(found) = find_string_by_keys(child, keys) {
+                return Some(found);
+            }
+        }
+    } else if let Value::Array(items) = value {
+        for child in items {
+            if let Some(found) = find_string_by_keys(child, keys) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+pub async fn start_calendar_authorization(
+    bin: &str,
+) -> Result<FeishuCalendarAuthorization, String> {
+    let value = run_lark_json(
+        bin,
+        &[
+            "auth",
+            "login",
+            "--scope",
+            FEISHU_CALENDAR_READ_SCOPE,
+            "--no-wait",
+            "--json",
+        ],
+    )
+    .await?;
+    let verification_url = find_string_by_keys(
+        &value,
+        &[
+            "verification_url",
+            "verification_uri",
+            "verificationUri",
+            "verificationUrl",
+        ],
+    )
+    .ok_or_else(|| "FEISHU_CALENDAR_AUTH_RESPONSE_INVALID: 授权响应缺少验证链接".to_string())?;
+    let device_code = find_string_by_keys(&value, &["device_code", "deviceCode"])
+        .ok_or_else(|| "FEISHU_CALENDAR_AUTH_RESPONSE_INVALID: 授权响应缺少设备代码".to_string())?;
+    let user_code = find_string_by_keys(&value, &["user_code", "userCode"]);
+    let expires_in = value
+        .get("expires_in")
+        .and_then(Value::as_i64)
+        .or_else(|| value.pointer("/data/expires_in").and_then(Value::as_i64));
+    Ok(FeishuCalendarAuthorization {
+        verification_url,
+        user_code,
+        device_code,
+        expires_in,
+    })
+}
+
+pub async fn finish_calendar_authorization(bin: &str, device_code: &str) -> Result<(), String> {
+    if device_code.trim().is_empty() || device_code.len() > 2048 {
+        return Err("FEISHU_CALENDAR_DEVICE_CODE_INVALID".into());
+    }
+    run_lark_json(
+        bin,
+        &["auth", "login", "--device-code", device_code, "--json"],
+    )
+    .await
+    .map(|_| ())
+}
+
 /// 从飞书日历获取指定日期范围内的事件。
 ///
 /// 使用 `lark-cli calendar +agenda --as user` 获取(复用本机登录态)。
@@ -1330,8 +1727,7 @@ pub async fn fetch_calendar_events(
     start: &str,
     end: &str,
 ) -> Result<Vec<FeishuCalendarEvent>, String> {
-    let mut cmd = Command::new(bin);
-    apply_lark_env(&mut cmd);
+    let mut cmd = lark_command(bin);
     cmd.arg("calendar")
         .arg("+agenda")
         .arg("--as")
@@ -1349,17 +1745,7 @@ pub async fn fetch_calendar_events(
         .map_err(|e| format!("无法启动 lark-cli(确认已安装并加入 PATH): {}", e))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "飞书日历查询失败: {}{}",
-            stderr.trim(),
-            if stdout.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" · {}", stdout.trim())
-            }
-        ));
+        return Err(calendar_cli_failure(&output.stderr, &output.stdout));
     }
 
     let stdout =
@@ -1367,10 +1753,8 @@ pub async fn fetch_calendar_events(
     let value: Value =
         serde_json::from_str(&stdout).map_err(|e| format!("lark-cli 输出非 JSON: {}", e))?;
 
-    let events = value
-        .pointer("/data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "飞书日历响应缺少 data".to_string())?;
+    let data = calendar_cli_data(value)?;
+    let events = data.as_array().expect("calendar_cli_data guarantees array");
 
     let mut result = Vec::new();
     for event in events {
@@ -1526,6 +1910,38 @@ pub async fn find_case_local_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_scope_and_error_contract_is_structured() {
+        assert!(scope_is_granted(
+            &serde_json::json!({"ok": true, "granted": true})
+        ));
+        assert!(!scope_is_granted(
+            &serde_json::json!({"ok": false, "missing": [FEISHU_CALENDAR_READ_SCOPE]})
+        ));
+        assert_eq!(
+            classify_calendar_error("FEISHU_AUTH_REQUIRED: expired").0,
+            "authorization_required"
+        );
+        assert_eq!(
+            classify_calendar_error("FEISHU_CALENDAR_RESPONSE_INVALID: shape").0,
+            "response_invalid"
+        );
+        assert_eq!(
+            classify_calendar_error("FEISHU_CALENDAR_CLI_TIMEOUT: slow").0,
+            "network_or_timeout"
+        );
+    }
+
+    #[test]
+    fn calendar_diagnostics_mask_application_identity() {
+        assert_eq!(
+            mask_identifier(Some("cli_a123456789")),
+            Some("cli***789".into())
+        );
+        assert_eq!(mask_identifier(Some("short")), Some("***".into()));
+        assert_eq!(mask_identifier(None), None);
+    }
 
     fn qa_text(value: Option<&Value>) -> Option<String> {
         fn collect(value: &Value, output: &mut Vec<String>) {

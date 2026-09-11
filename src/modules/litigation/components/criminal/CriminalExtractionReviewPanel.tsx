@@ -19,9 +19,9 @@ import {
   confidenceLabel,
   criminalFieldLabel,
   formatCandidateFieldValue,
+  isBatchAcceptable,
+  isNoChangeCandidate,
   parseTechnicalWarnings,
-  shouldDefaultAccept,
-  valuesAreEqual,
   type CandidateDecision,
   type CriminalExtractionCandidateBatchView,
 } from "./criminalExtractionReviewModels";
@@ -82,7 +82,7 @@ export function CriminalExtractionReviewPanel({
       for (const batch of sortedBatches) {
         for (const field of batch.fields) {
           if (next[field.id]) continue;
-          next[field.id] = shouldDefaultAccept(field) ? "accept" : "pending";
+          next[field.id] = "pending";
         }
       }
       return next;
@@ -91,7 +91,9 @@ export function CriminalExtractionReviewPanel({
 
   const pendingCount = batches.reduce(
     (sum, batch) =>
-      sum + batch.fields.filter((field) => field.review_status === "pending").length,
+      sum + batch.fields.filter(
+        (field) => field.review_status === "pending" && !isNoChangeCandidate(field),
+      ).length,
     0,
   );
 
@@ -142,7 +144,12 @@ export function CriminalExtractionReviewPanel({
             const warnings = parseTechnicalWarnings(batch.warning_json);
             const reviewable = REVIEWABLE.has(batch.review_status);
             const submitting = submittingBatchId === batch.id;
-            const decidedFields = batch.fields
+            const visibleFields = batch.fields.filter((field) => !isNoChangeCandidate(field));
+            const batchAcceptableFields = visibleFields.filter(isBatchAcceptable);
+            const pendingVisibleFields = visibleFields.filter(
+              (field) => field.review_status === "pending",
+            );
+            const decidedFields = visibleFields
               .filter((field) => field.review_status === "pending")
               .flatMap((field): CriminalCandidateDecisionInput[] => {
                 const decision = decisions[field.id] ?? "pending";
@@ -171,7 +178,7 @@ export function CriminalExtractionReviewPanel({
                         <BatchStatus batch={batch} />
                       </div>
                       <p className="mt-1 text-[11px] text-muted-foreground">
-                        生成于 {formatDateTime(batch.created_at)} · {batch.fields.length} 个字段
+                        生成于 {formatDateTime(batch.created_at)} · {visibleFields.length} 个待核对字段
                       </p>
                     </div>
                   </div>
@@ -191,26 +198,40 @@ export function CriminalExtractionReviewPanel({
                       </div>
                     )}
 
-                    {batch.fields.length === 0 ? (
-                      <p className="py-3 text-center text-xs text-muted-foreground">该批次没有可确认字段。</p>
+                    {visibleFields.length === 0 ? (
+                      <p className="py-3 text-center text-xs text-muted-foreground">本次识别没有新增变化。</p>
                     ) : (
                       <div className="space-y-2">
-                        {batch.fields.map((field) => {
+                        {visibleFields.map((field) => {
                           const protectedField = field.is_user_protected || field.review_status === "protected";
-                          const noChange = valuesAreEqual(field.current_value_json, field.value_json);
                           const decision = decisions[field.id] ?? "pending";
                           const mutable = reviewable && field.review_status === "pending" && !protectedField;
+                          const batchSelectable = reviewable && isBatchAcceptable(field);
                           return (
                             <div key={field.id} className="rounded-md border border-border p-3">
                               <div className="flex flex-wrap items-start justify-between gap-2">
-                                <div>
-                                  <p className="text-xs font-medium">{criminalFieldLabel(field.field_key)}</p>
-                                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                    {confidenceLabel(field.confidence)} · 来源：{field.source_filename}
-                                  </p>
+                                <div className="flex items-start gap-2">
+                                  <input
+                                    type="checkbox"
+                                    className="mt-0.5 size-4 rounded border-border"
+                                    checked={decision === "accept"}
+                                    disabled={!batchSelectable}
+                                    aria-label={`选择接受${criminalFieldLabel(field.field_key)}`}
+                                    onChange={(event) =>
+                                      setDecisions((current) => ({
+                                        ...current,
+                                        [field.id]: event.target.checked ? "accept" : "pending",
+                                      }))
+                                    }
+                                  />
+                                  <div>
+                                    <p className="text-xs font-medium">{criminalFieldLabel(field.field_key)}</p>
+                                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                      {confidenceLabel(field.confidence)} · 来源：{field.source_filename}
+                                    </p>
+                                  </div>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-1.5">
-                                  {noChange && <Tag className="bg-muted text-muted-foreground">无变化</Tag>}
                                   {protectedField && (
                                     <Tag className="bg-blue-500/10 text-blue-700 dark:text-blue-300">
                                       <ShieldAlert className="size-3" /> 人工保护
@@ -261,8 +282,45 @@ export function CriminalExtractionReviewPanel({
                       </div>
                     )}
 
-                    {reviewable && (
-                      <div className="mt-3 flex flex-wrap justify-end gap-2 border-t border-border pt-3">
+                    {reviewable && visibleFields.length > 0 && (
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={submitting || batchAcceptableFields.length === 0}
+                            onClick={() =>
+                              setDecisions((current) => {
+                                const next = { ...current };
+                                for (const field of batchAcceptableFields) next[field.id] = "accept";
+                                return next;
+                              })
+                            }
+                          >
+                            全选有变化字段
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={submitting || pendingVisibleFields.length === 0}
+                            onClick={() =>
+                              setDecisions((current) => {
+                                const next = { ...current };
+                                for (const field of pendingVisibleFields) next[field.id] = "pending";
+                                return next;
+                              })
+                            }
+                          >
+                            清空选择
+                          </Button>
+                          <span className="text-[11px] text-muted-foreground">
+                            已选接受 {decidedFields.filter((field) => field.decision === "accept").length} 项，
+                            拒绝 {decidedFields.filter((field) => field.decision === "reject").length} 项
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2">
                         <Button
                           type="button"
                           variant="outline"
@@ -287,6 +345,7 @@ export function CriminalExtractionReviewPanel({
                           {submitting && <Loader2 className="size-3.5 animate-spin" />}
                           提交已选决定
                         </Button>
+                        </div>
                       </div>
                     )}
                   </div>

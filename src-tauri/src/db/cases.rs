@@ -125,6 +125,10 @@ pub struct Case {
     /// 跨领域管理状态，与民事 workflow_status / 刑事程序阶段分离。
     pub management_status: String,
     pub management_status_source: String,
+    /// v0.8.5：管理生命周期；与程序阶段、民事 workflow_status 分离。
+    pub closed_at: Option<String>,
+    pub archived_at: Option<String>,
+    pub archive_note: Option<String>,
 }
 
 /// 仅取用户在详情页确认/纠正的我方立场(user_overrides_json.fields.agg_our_side)。空返回 None。
@@ -535,14 +539,14 @@ mod tests {
             &pool,
             &case.id,
             "criminal",
-            Some(Some("杨赛清贪污罪、受贿罪")),
+            Some(Some("示例甲涉嫌贪污、受贿案")),
         )
         .await
         .unwrap();
         assert_eq!(case.domain_source, "manual");
         assert_eq!(
             case.display_name_override.as_deref(),
-            Some("杨赛清贪污罪、受贿罪")
+            Some("示例甲涉嫌贪污、受贿案")
         );
 
         let case = update_legal_identity(&pool, &case.id, "civil", None)
@@ -551,7 +555,7 @@ mod tests {
         assert_eq!(case.legal_domain, "civil");
         assert_eq!(
             case.display_name_override.as_deref(),
-            Some("杨赛清贪污罪、受贿罪")
+            Some("示例甲涉嫌贪污、受贿案")
         );
 
         let case = update_legal_identity(&pool, &case.id, "criminal", Some(Some("   ")))

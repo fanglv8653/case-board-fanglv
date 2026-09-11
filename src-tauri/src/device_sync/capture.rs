@@ -27,6 +27,7 @@ struct DirtyRow {
     entity_id: String,
     case_id: Option<String>,
     action: String,
+    fee_queue: i64,
 }
 
 pub async fn ensure_initial_baseline(
@@ -51,13 +52,24 @@ pub async fn ensure_initial_baseline(
             .case_column
             .map(|column| format!("\"{column}\""))
             .unwrap_or_else(|| "NULL".to_string());
-        let sql = format!(
-            "INSERT OR IGNORE INTO device_sync_dirty_entities (
+        let sql = if policy.entity_type == "case_fee" {
+            format!(
+                "INSERT OR IGNORE INTO device_sync_case_fee_dirty_entities (
+                     entity_id, case_id, action, changed_at
+                 )
+                 SELECT id, {case_expr}, 'upsert', datetime('now') FROM \"{}\"
+                 WHERE ?1='case_fee'",
+                policy.table
+            )
+        } else {
+            format!(
+                "INSERT OR IGNORE INTO device_sync_dirty_entities (
                  entity_type, entity_id, case_id, action, changed_at
              )
              SELECT ?1, id, {case_expr}, 'upsert', datetime('now') FROM \"{}\"",
-            policy.table
-        );
+                policy.table
+            )
+        };
         inserted += sqlx::query(&sql)
             .bind(policy.entity_type)
             .execute(&mut *tx)
@@ -82,8 +94,13 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
         .collect::<Vec<_>>()
         .join(" ");
     let dirty_sql = format!(
-        "SELECT entity_type, entity_id, case_id, action
-         FROM device_sync_dirty_entities
+        "SELECT entity_type, entity_id, case_id, action, fee_queue FROM (
+           SELECT entity_type, entity_id, case_id, action, changed_at, 0 AS fee_queue
+           FROM device_sync_dirty_entities
+           UNION ALL
+           SELECT 'case_fee', entity_id, case_id, action, changed_at, 1 AS fee_queue
+           FROM device_sync_case_fee_dirty_entities
+         )
          ORDER BY changed_at,
            CASE WHEN action='tombstone'
              THEN -(CASE entity_type {dependency_order} ELSE 10000 END)
@@ -141,14 +158,16 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
                 .map(|(field, _)| field.clone())
                 .collect::<BTreeSet<_>>();
             if changed_names.is_empty() && !prior_tombstone {
-                sqlx::query(
-                    "DELETE FROM device_sync_dirty_entities
-                     WHERE entity_type=?1 AND entity_id=?2",
-                )
-                .bind(&row.entity_type)
-                .bind(&row.entity_id)
-                .execute(&mut *tx)
-                .await?;
+                let delete_sql = if row.fee_queue == 1 {
+                    "DELETE FROM device_sync_case_fee_dirty_entities WHERE entity_id=?2"
+                } else {
+                    "DELETE FROM device_sync_dirty_entities WHERE entity_type=?1 AND entity_id=?2"
+                };
+                sqlx::query(delete_sql)
+                    .bind(&row.entity_type)
+                    .bind(&row.entity_id)
+                    .execute(&mut *tx)
+                    .await?;
                 tx.commit().await?;
                 continue;
             }
@@ -256,14 +275,16 @@ pub async fn capture_dirty_entities(pool: &SqlitePool, group_id: &str) -> Result
         .bind(&local_device_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "DELETE FROM device_sync_dirty_entities
-             WHERE entity_type=?1 AND entity_id=?2",
-        )
-        .bind(&row.entity_type)
-        .bind(&row.entity_id)
-        .execute(&mut *tx)
-        .await?;
+        let delete_sql = if row.fee_queue == 1 {
+            "DELETE FROM device_sync_case_fee_dirty_entities WHERE entity_id=?2"
+        } else {
+            "DELETE FROM device_sync_dirty_entities WHERE entity_type=?1 AND entity_id=?2"
+        };
+        sqlx::query(delete_sql)
+            .bind(&row.entity_type)
+            .bind(&row.entity_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         captured += 1;
     }

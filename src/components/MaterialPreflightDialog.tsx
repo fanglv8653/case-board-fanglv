@@ -105,7 +105,17 @@ export function MaterialPreflightDialog({
         ]),
       ),
     );
-  const submit = (startProcessing: boolean) =>
+  const submit = (startProcessing: boolean) => {
+    if (
+      startProcessing &&
+      preflight.largeCriminalBatch &&
+      counts.recognize >= 20 &&
+      !window.confirm(
+        `即将对 ${counts.recognize} 份刑事材料启动正文提取、必要的 OCR 和模型识别。大案卷建议只选择关键程序材料；是否仍继续？`,
+      )
+    ) {
+      return;
+    }
     onConfirm(
       preflight.items.map((item) => ({
         sourcePath: item.sourcePath,
@@ -113,6 +123,7 @@ export function MaterialPreflightDialog({
       })),
       startProcessing,
     );
+  };
 
   const renderNode = (node: Tree, depth = 0): ReactNode => {
     const files = node.files.filter((item) => visiblePaths.has(item.sourcePath));
@@ -195,7 +206,7 @@ export function MaterialPreflightDialog({
           </p>
           {preflight.largeCriminalBatch && (
             <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              刑事材料共 {preflight.totalFiles} 份，已按大批量保护策略默认设为“仅索引”。
+              刑事材料共 {preflight.totalFiles} 份，已按大批量保护策略默认设为“仅索引”。请优先选择起诉意见书、起诉书、强制措施文书等关键程序材料；一次识别 20 份以上还会再次确认。
             </p>
           )}
         </div>

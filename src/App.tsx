@@ -37,12 +37,17 @@ import { ProgressBanner } from "@/modules/litigation/components/ProgressBanner";
 import { confirmDialog } from "@/lib/dialog";
 import {
   checkForUpdate,
+  archiveCase,
+  closeCase,
   deleteCase,
+  getCaseArchivePreflight,
   getCaseWithDocs,
   getSettings,
   globalExtractCase,
   commitMaterialPreflight,
   listCases,
+  reopenCase,
+  restoreCase,
   findFeishuCasePath,
   openInDefaultApp,
   previewMaterialImport,
@@ -665,6 +670,55 @@ function App() {
     [cases],
   );
 
+  const applyCaseLifecycle = useCallback(
+    async (caseId: string, action: "close" | "reopen" | "archive" | "restore") => {
+      const target = cases.find((caseData) => caseData.id === caseId);
+      if (!target) return;
+      const labels = {
+        close: "标记办结",
+        reopen: "恢复在办",
+        archive: "归档案件",
+        restore: "从归档恢复",
+      } as const;
+      if (action === "archive") {
+        const preflight = await getCaseArchivePreflight(caseId);
+        const todoWarning = preflight.open_todo_count > 0
+          ? `\n\n本案还有 ${preflight.open_todo_count} 项未完成待办。继续归档后，这些待办仍会保留，但不再进入默认在办提醒。`
+          : "";
+        const ok = await confirmDialog(
+          `确认归档「${getCaseDisplayName(target)}」？归档不会删除材料、收费、待办、进展、联系人、飞书绑定或本地文件夹。${todoWarning}`,
+          { okLabel: "确认归档" },
+        );
+        if (!ok) return;
+      } else {
+        const ok = await confirmDialog(`确认${labels[action]}「${getCaseDisplayName(target)}」？`, {
+          okLabel: labels[action],
+        });
+        if (!ok) return;
+      }
+      const occurredOn = window.prompt(`${labels[action]}日期（YYYY-MM-DD）`, new Date().toISOString().slice(0, 10));
+      if (occurredOn === null) return;
+      const note = window.prompt(`${labels[action]}备注（可留空）`, "");
+      if (note === null) return;
+      try {
+        const input = { case_id: caseId, occurred_on: occurredOn, note };
+        const updated = action === "close"
+          ? await closeCase(input)
+          : action === "reopen"
+            ? await reopenCase(input)
+            : action === "archive"
+              ? await archiveCase(input)
+              : await restoreCase(input);
+        setCases((current) => current.map((caseData) => caseData.id === caseId ? updated : caseData));
+        if (selectedCase?.id === caseId) setSelectedCase(updated);
+        toast(`${labels[action]}成功`, "success");
+      } catch (e) {
+        toast(`${labels[action]}失败：${String(e)}`, "error");
+      }
+    },
+    [cases, selectedCase],
+  );
+
   /**
    * 首页「多选」批量删除:一次确认 → 逐个删 → 刷新一次。只删库记录,不动原始文件夹。
    */
@@ -953,6 +1007,9 @@ function App() {
     isEditMode,
     onToggleEditMode: () => setIsEditMode((v) => !v),
     onDeleteCase: handleDeleteCase,
+    onCaseLifecycle: (action: "close" | "reopen" | "archive" | "restore") => {
+      if (selectedCase) void applyCaseLifecycle(selectedCase.id, action);
+    },
     onRefreshFiles: handleRefreshFiles,
     refreshingFiles,
     onOpenReport: handleOpenReport,
@@ -984,6 +1041,7 @@ function App() {
         onImport={handleImport}
         onDeleteCase={handleDeleteCaseById}
         onDeleteCases={handleDeleteCases}
+        onRestoreCase={(caseId) => void applyCaseLifecycle(caseId, "restore")}
         onImportFolder={handleCalendarImport}
         networkStatus={networkStatus}
         configWarnings={homeStatusWarnings}
@@ -1018,6 +1076,7 @@ function App() {
           onImport={handleImport}
           onDeleteCase={handleDeleteCaseById}
           onDeleteCases={handleDeleteCases}
+          onRestoreCase={(caseId) => void applyCaseLifecycle(caseId, "restore")}
           onImportFolder={handleCalendarImport}
           networkStatus={networkStatus}
           configWarnings={homeStatusWarnings}
@@ -1085,6 +1144,7 @@ function App() {
           onImport={handleImport}
           onDeleteCase={handleDeleteCaseById}
           onDeleteCases={handleDeleteCases}
+          onRestoreCase={(caseId) => void applyCaseLifecycle(caseId, "restore")}
           onImportFolder={handleCalendarImport}
           networkStatus={networkStatus}
           configWarnings={homeStatusWarnings}

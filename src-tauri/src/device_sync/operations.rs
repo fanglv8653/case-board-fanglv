@@ -936,6 +936,12 @@ pub async fn apply_incoming(
     .bind(&operation.entity_id)
     .execute(&mut **tx)
     .await?;
+    if operation.entity_type == "case_fee" {
+        sqlx::query("DELETE FROM device_sync_case_fee_dirty_entities WHERE entity_id=?1")
+            .bind(&operation.entity_id)
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(ApplyOutcome {
         operation_id: operation.operation_id.clone(),
         applied_fields,

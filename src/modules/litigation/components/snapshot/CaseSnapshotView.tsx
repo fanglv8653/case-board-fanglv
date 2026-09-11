@@ -41,6 +41,7 @@ import { CaseTimeline } from "./CaseTimeline";
 import { EditableField } from "./EditableField";
 import { SortableCard } from "./SortableCard";
 import { TodosCard } from "@/components/TodosCard";
+import { CriminalFeesCard } from "./CriminalFeesCard";
 
 /**
  * 案件画像主视图。
@@ -385,13 +386,13 @@ export function CaseSnapshotView({
       render: (dragHandle) => (
         <CardSection
           title={TITLES.FEE}
-          subtitle="案件受理费/律师代理费/保全费等"
+          subtitle={isCriminal ? "律师服务收费及其他适用项目；支持人工录入" : "案件受理费/律师代理费/保全费等"}
           isEditMode={isEditMode}
           hidden={ov.overrides.hidden_sections?.includes(TITLES.FEE)}
           onToggleHidden={() => ov.toggleHidden(TITLES.FEE)}
           dragHandle={dragHandle}
         >
-          <TablePeople
+          {isCriminal ? <CriminalFeesCard caseId={caseData.id} recognizedFees={snap.fees} /> : <TablePeople
             headers={["收费项目", "金额(元)", "收费时间", "收据号", "备注"]}
             rows={feeRows}
             emptyText="未抽到收费记录"
@@ -407,7 +408,7 @@ export function CaseSnapshotView({
               { colIndex: 4, inner: "note", placeholder: "备注" },
             ]}
             {...cellEdit("agg_fees")}
-          />
+          />}
         </CardSection>
       ),
     },

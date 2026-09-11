@@ -76,7 +76,9 @@ fn run_init_pool_after_preflight_hook(database_path: &Path) {
 
 pub mod bookmarks;
 pub mod calendar_events;
+pub mod case_fees;
 pub mod case_instances;
+pub mod case_lifecycle;
 pub mod case_memory;
 pub mod case_work_items;
 pub mod cases;

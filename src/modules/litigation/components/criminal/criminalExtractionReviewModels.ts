@@ -172,6 +172,24 @@ export function shouldDefaultAccept(field: CriminalExtractionCandidateFieldView)
   return (field.confidence ?? 0) >= 0.5;
 }
 
+/** 批量接受只覆盖有变化、无人工保护、无冲突且技术上可处理的待确认字段。 */
+export function isBatchAcceptable(field: CriminalExtractionCandidateFieldView) {
+  return (
+    field.review_status === "pending" &&
+    !field.is_user_protected &&
+    !field.has_conflict &&
+    !valuesAreEqual(field.current_value_json, field.value_json)
+  );
+}
+
+/** 与当前画像相同的候选只保留审计事实，不进入用户待确认界面。 */
+export function isNoChangeCandidate(field: CriminalExtractionCandidateFieldView) {
+  return (
+    field.review_status === "pending" &&
+    valuesAreEqual(field.current_value_json, field.value_json)
+  );
+}
+
 export function candidateBatchStatusLabel(
   reviewStatus: CriminalCandidateReviewStatus,
   technicalStatus: CriminalCandidateTechnicalStatus,

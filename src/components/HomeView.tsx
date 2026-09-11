@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Archive,
   ArrowUpDown,
   CalendarClock,
   CalendarDays,
@@ -123,6 +124,7 @@ export interface HomeViewProps {
   onDeleteCase: (caseId: string) => void;
   /** 批量删除选中案件(筛选工具栏「多选」模式)。由 App 弹一次确认 + 逐个删 + 刷新列表。 */
   onDeleteCases: (caseIds: string[]) => void;
+  onRestoreCase: (caseId: string) => void;
   /** 飞书日历:点日历事件后导入对应案件文件夹(反查案件池表→有则直接导,否则弹选择器)。 */
   onImportFolder?: (eventTitle: string) => void;
   networkStatus?: "unknown" | "online" | "offline";
@@ -265,6 +267,7 @@ export function HomeView({
   onImport,
   onDeleteCase,
   onDeleteCases,
+  onRestoreCase,
   onImportFolder,
   networkStatus = "unknown",
   configWarnings = [],
@@ -274,7 +277,11 @@ export function HomeView({
   onOpenExecutionModule,
 }: HomeViewProps) {
   const showFullCalendar = shouldMountFullCalendar(mode);
-  const overviewCases = cases;
+  const [showArchived, setShowArchived] = useState(false);
+  const overviewCases = cases.filter((caseData) => !caseData.archived_at);
+  const listedCases = cases.filter((caseData) =>
+    showArchived ? Boolean(caseData.archived_at) : !caseData.archived_at,
+  );
   const greeting = getGreeting(userDisplayName);
   const monthLabel = new Date()
     .toLocaleString("en-US", { month: "short", year: "numeric" })
@@ -295,6 +302,7 @@ export function HomeView({
   const { viewMode, sortKey, sortDir } = listPreferences;
   const [statusFilters, setStatusFilters] = useState<Set<DomainStatusId>>(new Set());
   const [courtFilter, setCourtFilter] = useState("");
+  const [archiveDateFilter, setArchiveDateFilter] = useState("");
   // 2026-06-16 · 首页模糊搜索(原告/被告名,公司或人名都可子串匹配)
   const [search, setSearch] = useState("");
   // 带日期的待办 → 汇入日程日历(2026-06-14:手动日程 = 带日期的待办)
@@ -444,7 +452,7 @@ export function HomeView({
     };
   }, []);
 
-  const casesWithOverride = cases.map((c) =>
+  const casesWithOverride = listedCases.map((c) =>
     !isCriminalCase(c) && c.id in statusOverride
       ? { ...c, workflow_status: statusOverride[c.id] as StatusId | null }
       : c,
@@ -541,9 +549,10 @@ export function HomeView({
 
   const searchQuery = search.trim().toLowerCase();
   const filteredRows = sortedRows.filter((row) => {
-    if (!filterBarOn) return true; // 工具栏关闭 → 不过滤,显示全部案件
+    if (!filterBarOn && !showArchived) return true; // 归档视图始终保留检索能力
     if (statusFilters.size > 0 && !statusFilters.has(row.status.id)) return false;
     if (courtFilter && row.display.court !== courtFilter) return false;
+    if (showArchived && archiveDateFilter && row.caseData.archived_at !== archiveDateFilter) return false;
     // 模糊搜索统一覆盖显示名、自定义名、案由、原文件夹名和当事人。
     if (searchQuery) {
       if (!caseMatchesSearch(row.caseData, searchQuery)) return false;
@@ -626,6 +635,7 @@ export function HomeView({
   const clearFilters = () => {
     setStatusFilters(new Set());
     setCourtFilter("");
+    setArchiveDateFilter("");
     setSearch("");
   };
 
@@ -789,12 +799,26 @@ export function HomeView({
             <div className="mb-4 flex flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-baseline gap-3">
-                  <h2 className="text-lg font-semibold tracking-tight">在办案件</h2>
+                  <h2 className="text-lg font-semibold tracking-tight">{showArchived ? "归档案件" : "在办案件"}</h2>
                   <span className="font-mono text-caption uppercase tracking-wider text-muted-foreground">
                     {filteredRows.length} / {cases.length} CASES
                   </span>
                 </div>
-                {filterBarOn && (
+                <Button
+                  type="button"
+                  variant={showArchived ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    setShowArchived((value) => !value);
+                    setSelectedIds(new Set());
+                  }}
+                >
+                  <Archive className="size-3.5" />
+                  {showArchived
+                    ? "返回在办"
+                    : `归档案件（${cases.filter((caseData) => caseData.archived_at).length}）`}
+                </Button>
+                {(filterBarOn || showArchived) && (
                 <div className="flex flex-wrap items-center gap-2">
                   <IconToggle
                     active={viewMode === "grid"}
@@ -824,7 +848,7 @@ export function HomeView({
                 )}
               </div>
 
-              {filterBarOn && (
+              {(filterBarOn || showArchived) && (
               <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card/60 p-3">
                 <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   排序
@@ -850,6 +874,17 @@ export function HomeView({
                     )}
                   </select>
                 </label>
+                {showArchived && (
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    归档日期
+                    <input
+                      type="date"
+                      value={archiveDateFilter}
+                      onChange={(event) => setArchiveDateFilter(event.target.value)}
+                      className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+                    />
+                  </label>
+                )}
                 {/* 与左右两个 select 同尺寸(px-2 py-1 text-xs),别用 Button size=sm(更高) */}
                 <button
                   type="button"
@@ -893,7 +928,7 @@ export function HomeView({
                     </button>
                   ))}
                 </div>
-                {(statusFilters.size > 0 || courtFilter || search.trim()) && (
+                {(statusFilters.size > 0 || courtFilter || archiveDateFilter || search.trim()) && (
                   <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>
                     <X className="size-3.5" />
                     清空筛选
@@ -981,8 +1016,12 @@ export function HomeView({
 
             </div>
 
-            {cases.length === 0 ? (
+            {listedCases.length === 0 && cases.length === 0 ? (
               <EmptyCases onImport={onImport} />
+            ) : listedCases.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border bg-card/30 px-6 py-12 text-center text-sm text-muted-foreground">
+                {showArchived ? "暂无归档案件" : "暂无在办案件"}
+              </div>
             ) : filteredRows.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border bg-card/30 px-6 py-12 text-center text-sm text-muted-foreground">
                 没有符合筛选条件的案件
@@ -1037,6 +1076,20 @@ export function HomeView({
           // 菜单自身的右键/点击不冒泡到 window 的关闭监听之外的逻辑(关闭仍由 window 捕获处理)
           onContextMenu={(e) => e.preventDefault()}
         >
+          {cases.find((caseData) => caseData.id === ctxMenu.id)?.archived_at ? (
+          <button
+            type="button"
+            onClick={() => {
+              const id = ctxMenu.id;
+              setCtxMenu(null);
+              onRestoreCase(id);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground hover:bg-muted"
+          >
+            <Archive className="size-4" />
+            从归档恢复
+          </button>
+          ) : (
           <button
             type="button"
             onClick={() => {
@@ -1049,6 +1102,7 @@ export function HomeView({
             <FolderOpen className="size-4 text-muted-foreground" />
             打开案件
           </button>
+          )}
           <button
             type="button"
             onClick={() => {

@@ -163,6 +163,47 @@ export interface Case {
   /** 跨领域管理状态，与民事 workflow_status / 刑事程序阶段分离。 */
   management_status: "negotiating" | "active" | "closed" | "unknown" | string;
   management_status_source: "manual" | "feishu" | "legacy" | string;
+  /** v0.8.5 管理生命周期；归档不删除案件或关联业务数据。 */
+  closed_at: string | null;
+  archived_at: string | null;
+  archive_note: string | null;
+}
+
+export interface CaseLifecycleInput {
+  case_id: string;
+  occurred_on?: string | null;
+  note?: string | null;
+}
+
+export interface CaseArchivePreflight {
+  case_id: string;
+  open_todo_count: number;
+  is_closed: boolean;
+  is_archived: boolean;
+}
+
+export interface CaseFee {
+  id: string;
+  case_id: string;
+  item_name: string;
+  amount: number;
+  charged_at: string | null;
+  receipt_no: string | null;
+  notes: string | null;
+  created_at: string;
+  source: "manual" | "recognized" | "legacy";
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface CaseFeeInput {
+  id?: string | null;
+  case_id: string;
+  item_name: string;
+  amount: number;
+  charged_at?: string | null;
+  receipt_no?: string | null;
+  notes?: string | null;
 }
 
 /**
@@ -1318,6 +1359,28 @@ export interface FeishuCalendarEvent {
   description: string | null;
   location: string | null;
   app_link: string | null;
+}
+
+export interface FeishuCalendarDiagnostic {
+  cli_path: string;
+  cli_version: string | null;
+  app_id_masked: string | null;
+  identity: string | null;
+  user_available: boolean;
+  user_verified: boolean;
+  token_status: string | null;
+  scope_granted: boolean;
+  real_request_ok: boolean;
+  category: "ok" | "cli_missing" | "authorization_required" | "scope_missing" | "network_or_timeout" | "response_invalid" | "api_error" | string;
+  message: string;
+  event_count: number | null;
+}
+
+export interface FeishuCalendarAuthorization {
+  verification_url: string;
+  user_code: string | null;
+  device_code: string;
+  expires_in: number | null;
 }
 
 export interface FeishuSyncLinkPreview {

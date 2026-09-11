@@ -5,7 +5,7 @@
  * 日历功能继续复用本机 lark-cli 登录态；案件受控同步使用相邻的「案件同步连接」，两者互不依赖。
  *
  * 依赖(诚实标明,装不上属正常):
- *   1. 本机装好飞书官方 `lark-cli` 并 `lark-cli login`(macOS / Windows / Linux 都有);
+ *   1. 本机装好飞书官方 `lark-cli` 并授权日历只读 scope;
  *   2. (可选)飞书"案件池"多维表格,用于点日历事件反查并导入本地案件目录。
  */
 import { useEffect, useState } from "react";
@@ -17,10 +17,18 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
 } from "lucide-react";
 
-import { getSettings, saveSettings, fetchFeishuCalendar } from "@/lib/api";
-import type { Settings } from "@/lib/types";
+import {
+  finishFeishuCalendarAuthorization,
+  getSettings,
+  openUrl,
+  saveSettings,
+  startFeishuCalendarAuthorization,
+  testFeishuCalendarConnection,
+} from "@/lib/api";
+import type { FeishuCalendarAuthorization, FeishuCalendarDiagnostic, Settings } from "@/lib/types";
 import { toast } from "@/components/ui/toast";
 
 function todayISO(): string {
@@ -44,6 +52,9 @@ export function FeishuCalendarTool() {
   const [testing, setTesting] = useState(false);
   const [testOk, setTestOk] = useState<boolean | null>(null);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<FeishuCalendarDiagnostic | null>(null);
+  const [authorization, setAuthorization] = useState<FeishuCalendarAuthorization | null>(null);
+  const [authorizing, setAuthorizing] = useState(false);
 
   useEffect(() => {
     getSettings()
@@ -104,14 +115,48 @@ export function FeishuCalendarTool() {
         setDirty(false);
       }
       const today = todayISO();
-      const events = await fetchFeishuCalendar(today, today);
-      setTestOk(true);
-      setTestMsg(`连接成功 · 今天有 ${events.length} 个日程`);
+      const result = await testFeishuCalendarConnection(today, today);
+      setDiagnostic(result);
+      setTestOk(result.real_request_ok);
+      setTestMsg(result.real_request_ok ? `连接成功 · 今天有 ${result.event_count ?? 0} 个日程` : result.message);
     } catch (e) {
       setTestOk(false);
       setTestMsg(String(e));
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleAuthorize = async () => {
+    setAuthorizing(true);
+    try {
+      const result = await startFeishuCalendarAuthorization();
+      setAuthorization(result);
+      await openUrl(result.verification_url);
+      setTestOk(null);
+      setTestMsg("授权页面已打开。完成授权后，请返回这里点击“我已授权，完成连接”。");
+    } catch (error) {
+      setTestOk(false);
+      setTestMsg(`启动授权失败：${String(error)}`);
+    } finally {
+      setAuthorizing(false);
+    }
+  };
+
+  const handleFinishAuthorization = async () => {
+    if (!authorization) return;
+    setAuthorizing(true);
+    try {
+      const result = await finishFeishuCalendarAuthorization(authorization.device_code);
+      setDiagnostic(result);
+      setTestOk(result.real_request_ok);
+      setTestMsg(result.real_request_ok ? `授权完成 · 今天有 ${result.event_count ?? 0} 个日程` : result.message);
+      if (result.real_request_ok) setAuthorization(null);
+    } catch (error) {
+      setTestOk(false);
+      setTestMsg(`授权收尾失败：${String(error)}`);
+    } finally {
+      setAuthorizing(false);
     }
   };
 
@@ -129,8 +174,8 @@ export function FeishuCalendarTool() {
         <p className="mt-1 text-[13px] leading-relaxed text-slate-600">这里仅配置首页飞书日历。案件管理数据请在「案件同步连接」中授权，不需要开启日历。</p>
         <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-[13px] leading-relaxed">
           <li>
-            本机安装飞书官方 <code className="rounded bg-white px-1">lark-cli</code> 并登录
-            (<code className="rounded bg-white px-1">lark-cli login</code>);CaseBoard 只复用它的登录态,不保存你的飞书 token。
+            本机安装飞书官方 <code className="rounded bg-white px-1">lark-cli</code>，并为当前用户授权
+            <code className="rounded bg-white px-1">calendar:calendar.event:read</code>。CaseBoard 只复用它的登录态，不保存你的飞书 token。
           </li>
           <li>
             macOS 自动找 Homebrew 路径;<b>Windows / Linux</b> 需把 lark-cli 加入系统 PATH,
@@ -241,6 +286,27 @@ export function FeishuCalendarTool() {
         </div>
       )}
 
+      {diagnostic && (
+        <div className="grid gap-2 rounded-lg border border-border bg-muted/20 p-3 text-xs md:grid-cols-2">
+          <p><span className="text-muted-foreground">CLI：</span>{diagnostic.cli_path}</p>
+          <p><span className="text-muted-foreground">版本：</span>{diagnostic.cli_version || "未识别"}</p>
+          <p><span className="text-muted-foreground">身份：</span>{diagnostic.identity || "未识别"} {diagnostic.app_id_masked ? `· ${diagnostic.app_id_masked}` : ""}</p>
+          <p><span className="text-muted-foreground">用户授权：</span>{diagnostic.user_available && diagnostic.user_verified ? "有效" : "无效"}</p>
+          <p><span className="text-muted-foreground">日历权限：</span>{diagnostic.scope_granted ? "已授予" : "缺失"}</p>
+          <p><span className="text-muted-foreground">真实请求：</span>{diagnostic.real_request_ok ? "成功" : "失败"}</p>
+        </div>
+      )}
+
+      {authorization && (
+        <div className="rounded-lg border border-sky-300 bg-sky-50 p-3 text-sm text-slate-700">
+          <p>请在飞书授权页确认日历只读权限{authorization.user_code ? `，验证码：${authorization.user_code}` : ""}。</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" onClick={() => void openUrl(authorization.verification_url)} className="inline-flex items-center gap-1 rounded-md border bg-white px-3 py-1.5"><ExternalLink className="size-3.5" />重新打开授权页</button>
+            <button type="button" disabled={authorizing} onClick={() => void handleFinishAuthorization()} className="rounded-md bg-slate-900 px-3 py-1.5 text-white disabled:opacity-50">我已授权，完成连接</button>
+          </div>
+        </div>
+      )}
+
       {/* 操作按钮 */}
       <div className="flex items-center gap-2">
         <button
@@ -252,6 +318,17 @@ export function FeishuCalendarTool() {
           {testing ? <Loader2 className="size-4 animate-spin" /> : <CalendarClock className="size-4" />}
           测试连接
         </button>
+        {testOk === false && (
+          <button
+            type="button"
+            onClick={() => void handleAuthorize()}
+            disabled={authorizing || testing || saving}
+            className="inline-flex items-center gap-1.5 rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-800 disabled:opacity-50"
+          >
+            {authorizing ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
+            重新授权日历
+          </button>
+        )}
         <button
           type="button"
           onClick={handleSave}

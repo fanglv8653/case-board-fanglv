@@ -5,6 +5,8 @@ import {
   confidenceLabel,
   formatCandidateFieldValue,
   formatValueJson,
+  isBatchAcceptable,
+  isNoChangeCandidate,
   parseProtectedFieldKeys,
   shouldDefaultAccept,
   valuesAreEqual,
@@ -59,6 +61,11 @@ assert.equal(
   false,
   "低置信候选不得默认接受",
 );
+assert.equal(isBatchAcceptable(baseField), true);
+assert.equal(isBatchAcceptable({ ...baseField, current_value_json: '"诈骗罪"' }), false);
+assert.equal(isBatchAcceptable({ ...baseField, is_user_protected: true }), false);
+assert.equal(isBatchAcceptable({ ...baseField, has_conflict: true }), false);
+assert.equal(isNoChangeCandidate({ ...baseField, current_value_json: '"诈骗罪"' }), true);
 assert.equal(candidateBatchStatusLabel("pending", "success"), "待确认");
 assert.equal(candidateBatchStatusLabel("pending", "partial"), "部分识别失败");
 assert.equal(candidateBatchStatusLabel("pending", "failed"), "识别失败");
