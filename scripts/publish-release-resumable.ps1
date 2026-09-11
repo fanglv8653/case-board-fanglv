@@ -100,7 +100,11 @@ function Get-LiveRelease {
     # back to the authenticated release list so an interrupted publication can
     # resume the exact draft instead of trying to create a duplicate.
     $listJson = Invoke-RetryNative -FilePath 'gh' -Arguments @('api', "repos/$Repository/releases?per_page=100") -Label '查询 GitHub Release 列表'
-    $releases = @($listJson | ConvertFrom-Json)
+    # Windows PowerShell 5.1 may return a JSON top-level array as one nested
+    # Object[] pipeline item. Assign first, then array-wrap so its members are
+    # enumerated and draft releases remain resumable after a transient 404.
+    $parsedReleases = $listJson | ConvertFrom-Json
+    $releases = @($parsedReleases)
     Select-CaseBoardReleaseByTag -Releases $releases -Tag $Tag
 }
 
