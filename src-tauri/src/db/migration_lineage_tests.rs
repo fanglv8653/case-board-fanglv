@@ -159,6 +159,15 @@ async fn database_fingerprint(database: &Path) -> DatabaseFingerprint {
     fingerprint
 }
 
+async fn production_database_fingerprint(database: &Path) -> DatabaseFingerprint {
+    let pool = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("reopen migrated fixture through production init");
+    let fingerprint = database_fingerprint_from_pool(&pool).await;
+    pool.close().await;
+    fingerprint
+}
+
 async fn database_fingerprint_from_pool(pool: &SqlitePool) -> DatabaseFingerprint {
     let migration_history = sqlx::query_as(
         "SELECT version, description, success, checksum, execution_time \
@@ -828,11 +837,11 @@ async fn rc_local_pre_0063_database_upgrades_through_production_init_idempotentl
     // A clean child-process exit may retain a valid, non-empty WAL on some
     // SQLite/macOS combinations. Reopening through SQLite below proves the
     // complete migrated state without assuming sidecar deletion timing.
-    let first_upgrade_fingerprint = database_fingerprint(&database).await;
+    let first_upgrade_fingerprint = production_database_fingerprint(&database).await;
 
     run_rc_production_init_child(&database);
     assert_eq!(
-        database_fingerprint(&database).await,
+        production_database_fingerprint(&database).await,
         first_upgrade_fingerprint
     );
 }
