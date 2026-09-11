@@ -277,9 +277,9 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     let is_memory = db_path == ":memory:";
     let is_existing_file = !is_memory && Path::new(db_path).is_file();
     if is_existing_file {
-        // A stopped 0.8.2 process may leave committed rows in a complete
-        // WAL/SHM pair. Preserve and verify the exact trio first, then let
-        // SQLite checkpoint it normally before immutable lineage preflight.
+        // A stopped process may leave committed rows in a complete WAL/SHM
+        // pair. Preserve and verify the exact trio first, then let SQLite
+        // checkpoint it normally before immutable lineage preflight.
         migration_safety::recover_complete_wal_pair(Path::new(db_path)).await?;
     } else if !is_memory {
         // A sidecar without a main database is never a recoverable trio.
@@ -330,17 +330,33 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
         .map_err(|e| DbError::Connect(e.to_string()))?;
 
     let embedded_migrator = sqlx::migrate!("./migrations");
-    if migration_preflight.allow_missing_legacy_migration_36 {
-        // Add only the fixed compatibility metadata. `ignore_missing` remains
-        // false, so SQLx still rejects every unknown applied version other than
-        // the explicitly represented version 36. Its placeholder SQL is
-        // an unconditional SQLite syntax error if a different file without
+    if migration_preflight.allow_missing_legacy_migration_36
+        || !migration_preflight.checksum_overrides.is_empty()
+    {
+        // Build only the compatibility metadata proven by the read-only
+        // preflight. `ignore_missing` remains false, so SQLx still rejects
+        // every unknown applied version. The legacy-v36 placeholder SQL is an
+        // unconditional SQLite syntax error if a different file without
         // applied v36 is substituted after immutable preflight.
         let mut migrations: Vec<_> = embedded_migrator.iter().cloned().collect();
-        let legacy_migration = migration_safety::legacy_migration_36_metadata();
-        let insertion_index =
-            migrations.partition_point(|migration| migration.version < legacy_migration.version);
-        migrations.insert(insertion_index, legacy_migration);
+        for migration in &mut migrations {
+            if let Some(stored_checksum) = migration_preflight
+                .checksum_overrides
+                .get(&migration.version)
+            {
+                // The read-only preflight proved this is the SHA-384 of the
+                // same SQL under the other LF/CRLF representation. Present
+                // that exact applied checksum to sqlx without rewriting the
+                // database migration history.
+                migration.checksum = Cow::Owned(stored_checksum.clone());
+            }
+        }
+        if migration_preflight.allow_missing_legacy_migration_36 {
+            let legacy_migration = migration_safety::legacy_migration_36_metadata();
+            let insertion_index = migrations
+                .partition_point(|migration| migration.version < legacy_migration.version);
+            migrations.insert(insertion_index, legacy_migration);
+        }
         let compatible_migrator = Migrator {
             migrations: Cow::Owned(migrations),
             ignore_missing: false,

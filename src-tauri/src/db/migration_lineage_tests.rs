@@ -1684,26 +1684,40 @@ async fn combined_lineage_audit_failure_keeps_active_and_exact_backup() {
 
 #[cfg(target_os = "windows")]
 #[tokio::test]
-async fn complete_v63_wal_pair_is_rejected_without_mutating_active_trio() {
-    let (_directory, database) = frozen_current_wal_fixture("v63-reject").await;
+async fn complete_current_wal_pair_is_backed_up_recovered_and_reopened() {
+    let (_directory, database) = frozen_current_wal_fixture("current-recover").await;
     let before = physical_fingerprint(&database);
-    let error = recover_complete_wal_pair(&database)
+    let backup = recover_complete_wal_pair(&database)
         .await
-        .expect_err("v63 abnormal-exit trio must not use the 0.8.2 bridge");
-    assert_eq!(
-        expect_compatibility(&error, DB_MIGRATION_LINEAGE_INCOMPATIBLE).reason,
-        "wal_sidecar_version_not_legacy_082"
-    );
-    let after = physical_fingerprint(&database);
-    assert_eq!(after.database, before.database);
-    assert_eq!(after.wal, before.wal);
-    assert!(after.shm.is_some());
-    let backup_database = expected_wal_backup_directory(&database)
+        .expect("audited current-version abnormal-exit trio must recover")
+        .expect("current-version recovery creates an exact backup");
+    let backup_database = backup
+        .directory
         .join(database.file_name().expect("database file name"));
-    let backup = physical_fingerprint(&backup_database);
-    assert_eq!(backup.database, before.database);
-    assert_eq!(backup.wal, before.wal);
-    assert!(backup.shm.is_some());
+    let backup_physical = physical_fingerprint(&backup_database);
+    assert_eq!(backup_physical.database, before.database);
+    assert_eq!(backup_physical.wal, before.wal);
+    assert!(backup_physical.shm.is_some());
+    assert!(!sidecar_path(&database, "-wal").exists());
+    assert!(!sidecar_path(&database, "-journal").exists());
+
+    let reopened = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("recovered current database must reopen and finish pending migrations");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT name FROM cases WHERE id='v63-wal-marker'")
+            .fetch_one(&reopened)
+            .await
+            .expect("current WAL-only business marker survives recovery"),
+        "v63 WAL marker"
+    );
+    let max_version: i64 =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success = 1")
+            .fetch_one(&reopened)
+            .await
+            .expect("read migration head after reopen");
+    assert_eq!(max_version, 68);
+    reopened.close().await;
 }
 
 #[tokio::test]
@@ -1752,6 +1766,40 @@ async fn current_database_reopen_keeps_all_fingerprints_unchanged() {
         .expect("current lineage must reopen");
     let after = database_fingerprint_from_pool(&reopened).await;
     assert_eq!(after, before);
+    reopened.close().await;
+}
+
+#[tokio::test]
+async fn line_ending_only_migration_checksum_variant_is_accepted() {
+    let (_directory, database) = migrated_fixture("line-ending-checksum").await;
+    let embedded = sqlx::migrate!("./migrations");
+    let migration = embedded
+        .iter()
+        .find(|migration| migration.version == 66)
+        .expect("migration 66 exists");
+    let lf_sql = migration.sql.replace("\r\n", "\n");
+    let alternate_sql = if migration.sql.contains("\r\n") {
+        lf_sql
+    } else {
+        lf_sql.replace('\n', "\r\n")
+    };
+    let alternate_checksum = Sha384::digest(alternate_sql.as_bytes()).to_vec();
+    assert_ne!(alternate_checksum.as_slice(), migration.checksum.as_ref());
+
+    let pool = fixture_pool(&database, true).await;
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 66")
+        .bind(&alternate_checksum)
+        .execute(&pool)
+        .await
+        .expect("install newline-only checksum variant");
+    pool.close().await;
+
+    preflight_existing_database(&database)
+        .await
+        .expect("LF and CRLF hashes of identical migration SQL are compatible");
+    let reopened = init_pool(database.to_str().expect("UTF-8 fixture path"))
+        .await
+        .expect("database with newline-only checksum variant must reopen");
     reopened.close().await;
 }
 

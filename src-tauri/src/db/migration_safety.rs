@@ -12,8 +12,9 @@ use std::io::{self, BufReader, Read, Write};
 #[cfg(target_os = "windows")]
 use std::time::Duration;
 
+use sha2::{Digest, Sha384};
 #[cfg(target_os = "windows")]
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use sqlx::migrate::{Migration, MigrationType};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -81,9 +82,10 @@ struct IndexColumnDefinition {
     is_key: i64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct MigrationPreflight {
     pub(crate) allow_missing_legacy_migration_36: bool,
+    pub(crate) checksum_overrides: HashMap<i64, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +235,28 @@ fn checksum_hex(checksum: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+fn migration_checksum_matches_line_ending_variants(
+    stored_checksum: &[u8],
+    migration: &Migration,
+) -> bool {
+    if stored_checksum == migration.checksum.as_ref() {
+        return true;
+    }
+
+    // sqlx hashes the migration source bytes. Git checkouts created before
+    // the repository standardized line endings may therefore contain the
+    // exact same SQL with either LF or CRLF. Accept only those two hashes;
+    // every other byte-level change remains an unknown checksum.
+    let lf_sql = migration.sql.replace("\r\n", "\n");
+    let lf_checksum = Sha384::digest(lf_sql.as_bytes());
+    if stored_checksum == &lf_checksum[..] {
+        return true;
+    }
+    let crlf_sql = lf_sql.replace('\n', "\r\n");
+    let crlf_checksum = Sha384::digest(crlf_sql.as_bytes());
+    stored_checksum == &crlf_checksum[..]
 }
 
 pub(crate) fn legacy_migration_36_metadata() -> Migration {
@@ -559,7 +583,7 @@ fn write_atomic_bytes(target: &Path, bytes: &[u8]) -> Result<(), DbError> {
     atomic_replace_file(&temporary, target)
 }
 
-/// Recover a legacy, complete WAL/SHM trio before immutable lineage preflight.
+/// Recover a complete WAL/SHM trio before immutable lineage preflight.
 ///
 /// After a physical WAL check, one SQLite connection acquires exclusive writer
 /// ownership with checkpoint-on-close disabled. The raw trio at that locked
@@ -755,21 +779,12 @@ async fn recover_complete_wal_pair_windows(
     // transaction was opened by `after_connect`; no second writer can enter
     // between the backed-up bytes, lineage classification and checkpoint.
     let audit_result = preflight_pool(&exclusive_pool).await;
-    let max_version = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(version) FROM _sqlx_migrations WHERE success = 1",
-    )
-    .fetch_one(&exclusive_pool)
-    .await
-    .map_err(|_| sidecar_recovery_error("wal_sidecar_combined_audit_failed"));
     let integrity: Result<String, DbError> = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_one(&exclusive_pool)
         .await
         .map_err(|_| sidecar_recovery_error("wal_sidecar_combined_audit_failed"));
     let audit_failure = audit_result
         .and_then(|preflight| {
-            if max_version?.unwrap_or(0) > 62 {
-                return Err(sidecar_recovery_error("wal_sidecar_version_not_legacy_082"));
-            }
             if !integrity?.eq_ignore_ascii_case("ok") {
                 return Err(sidecar_recovery_error("wal_sidecar_integrity_check_failed"));
             }
@@ -1061,6 +1076,7 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<MigrationPreflight, DbError
         .collect();
 
     let mut allow_missing_legacy_migration_36 = false;
+    let mut checksum_overrides = HashMap::new();
     for (version, description, success, checksum) in &history {
         if *success != 1 {
             return Err(compatibility_error(
@@ -1152,6 +1168,10 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<MigrationPreflight, DbError
         if stored_checksum.as_slice() == current_checksum {
             continue;
         }
+        if migration_checksum_matches_line_ending_variants(stored_checksum, embedded) {
+            checksum_overrides.insert(*version, stored_checksum.clone());
+            continue;
+        }
 
         return Err(compatibility_error(
             DB_MIGRATION_CHECKSUM_UNKNOWN,
@@ -1165,6 +1185,7 @@ async fn preflight_pool(pool: &SqlitePool) -> Result<MigrationPreflight, DbError
 
     Ok(MigrationPreflight {
         allow_missing_legacy_migration_36,
+        checksum_overrides,
     })
 }
 
