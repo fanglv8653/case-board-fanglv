@@ -30,11 +30,43 @@ export type CrimeName =
 
 export type AreaType = "一类地区" | "二类地区" | "全国";
 export type MonthRange = [minimum: number, maximum: number | null];
+export type PrincipalPenaltyKind =
+  | "control"
+  | "detention"
+  | "fixed_term"
+  | "life"
+  | "death"
+  | "fine_only"
+  | "exemption";
+export type QuantitativeStatus = "starting_point_only" | "statutory_only" | "direct_sentence";
+export type TemporalRuleBasis =
+  | "conduct_on_or_after_2026_05_01"
+  | "pre_effective_current_rule_reviewed"
+  | "individual_comparison_required";
+export type CalculationStatus = "complete" | "requires_manual_base" | "blocked";
 
 export interface CrimeDefinition {
   id: CrimeId;
   name: CrimeName;
   desc: string;
+  culpability: "intentional" | "negligent";
+  amountRequired: boolean;
+}
+
+export interface SentenceOption {
+  kind: PrincipalPenaltyKind;
+  minimumMonths?: number;
+  maximumMonths?: number | null;
+  label: string;
+}
+
+export interface StatutoryPenaltyBand {
+  label: string;
+  article: string;
+  monthBounds: MonthRange;
+  mitigatedMonthBounds?: MonthRange;
+  options: SentenceOption[];
+  mitigatedOptions?: SentenceOption[];
 }
 
 export interface SentencingStandard {
@@ -42,30 +74,40 @@ export interface SentencingStandard {
   tier: string;
   minAmount: number | null;
   maxAmount: number | null;
-  startMin: number;
-  startMax: number | null;
+  startMin?: number;
+  startMax?: number | null;
+  startKinds?: PrincipalPenaltyKind[];
   subType?: "电信诈骗";
-  effFrom?: string;
-  effTo?: string;
+  quantitativeStatus: QuantitativeStatus;
+  statutory: StatutoryPenaltyBand;
+  sourceIds: string[];
+  temporalRuleRequired?: boolean;
 }
 
-export interface SentencingIncrementRule {
-  area: AreaType;
-  tier: string;
-  perAmount: number;
-  penaltyMin: number;
-  penaltyMax: number | null;
-  maxCap?: number;
-  subType?: "一般诈骗" | "电信诈骗";
-}
+export type FactorLegalEffect =
+  | "lighter"
+  | "lighter_or_mitigated"
+  | "lighter_or_mitigated_or_exempt"
+  | "mitigated_or_exempt"
+  | "heavier"
+  | "exempt"
+  | "qualitative";
 
 export interface SentencingFactorRule {
   id: string;
   name: string;
   direction: "reduce" | "increase";
-  minPct: number;
-  maxPct: number;
-  fixMonths?: number;
+  minPct?: number;
+  maxPct?: number;
+  minimumIncreaseMonths?: number;
+  quantitative: boolean;
+  legalEffect: FactorLegalEffect;
+  conflictGroup?: string;
+  conflictsWith?: string[];
+  applicableCrimeIds?: CrimeId[];
+  excludedCrimeIds?: CrimeId[];
+  applicableFactTiers?: string[];
+  note?: string;
 }
 
 export interface SentencingKeywords {
@@ -75,10 +117,33 @@ export interface SentencingKeywords {
   telecom: string[];
 }
 
+export interface SentencingSource {
+  id: string;
+  title: string;
+  authority: string;
+  documentNo?: string;
+  effectiveFrom?: string;
+  url: string;
+  verifiedOn: string;
+  status: "current" | "scope_limited" | "current_applicability_unverified";
+  note?: string;
+}
+
+export interface SentencingRulesetMetadata {
+  id: string;
+  version: string;
+  engineVersion: string;
+  schemaVersion: string;
+  contentHash: string;
+  verifiedOn: string;
+  sources: SentencingSource[];
+  limitations: string[];
+}
+
 export interface SentencingData {
+  ruleset: SentencingRulesetMetadata;
   crimes: CrimeDefinition[];
   standards: Record<CrimeId, SentencingStandard[]>;
-  increments: Partial<Record<CrimeId, SentencingIncrementRule[]>>;
   priorityFactors: SentencingFactorRule[];
   generalFactors: SentencingFactorRule[];
   keywords: SentencingKeywords;
@@ -94,7 +159,7 @@ export interface CalculationProcessEntry {
 export interface FactorAdjustment {
   factor: string;
   percentRange?: [minimum: number, maximum: number];
-  fixMonths?: number;
+  minimumIncreaseMonths?: number;
   newRange: MonthRange;
 }
 
@@ -105,26 +170,40 @@ export interface SentencingCalculationInput {
   factors: Readonly<Record<string, boolean>>;
   crimeDate: string;
   judgeAdjustment?: number;
+  judgeAdjustmentReason?: string;
   isTelecom?: boolean;
   factTier?: string | null;
+  manualBasePenaltyRange?: MonthRange | null;
+  manualBaseSource?: string;
+  temporalRuleBasis?: TemporalRuleBasis | null;
 }
 
 export interface SentencingCalculationResult extends SentencingCalculationInput {
   judgeAdjustment: number;
   factTier: string | null;
+  manualBasePenaltyRange: MonthRange | null;
+  temporalRuleBasis: TemporalRuleBasis | null;
+  calculationStatus: CalculationStatus;
   process: CalculationProcessEntry[];
+  warnings: string[];
+  blockingIssues: string[];
+  ruleset: SentencingRulesetMetadata;
   error?: string;
+  statutoryPenalty?: StatutoryPenaltyBand;
   startingPointRange?: MonthRange;
+  startingPointKinds?: PrincipalPenaltyKind[];
   tier?: string | null;
   tierLabel?: string | null;
   standardDetail?: SentencingStandard;
   legalReferences?: readonly string[];
-  extraPenaltyRange?: MonthRange;
   basePenaltyRange?: MonthRange;
   priorityAdjustments?: FactorAdjustment[];
   generalAdjustments?: FactorAdjustment[];
+  rawAdjustedPenaltyRange?: MonthRange;
   finalPenaltyRange?: MonthRange;
+  finalPenaltyKinds?: PrincipalPenaltyKind[];
   finalSentence?: string;
+  disposition?: "term_range" | "exemption" | "manual_review";
 }
 
 export interface ExtractedSentencingInput {

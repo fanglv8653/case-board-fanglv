@@ -1,4 +1,10 @@
-import { CRIME_NAME_TO_ID, LEGAL_REFERENCES, SENTENCING_DATA } from "./data.ts";
+import {
+  CRIME_NAME_TO_ID,
+  factorAppliesTo,
+  LEGAL_REFERENCES,
+  PRINCIPAL_PENALTY_LABELS,
+  SENTENCING_DATA,
+} from "./data.ts";
 import type {
   AreaType,
   CalculationProcessEntry,
@@ -7,10 +13,12 @@ import type {
   ExtractedSentencingInput,
   FactorAdjustment,
   MonthRange,
+  PrincipalPenaltyKind,
   SentencingCalculationInput,
   SentencingCalculationResult,
   SentencingFactorRule,
   SentencingStandard,
+  TemporalRuleBasis,
 } from "./types.ts";
 
 interface TierSelection {
@@ -20,11 +28,29 @@ interface TierSelection {
   error?: string;
 }
 
+interface FactorSelection {
+  priority: SentencingFactorRule[];
+  general: SentencingFactorRule[];
+  qualitative: SentencingFactorRule[];
+  exemption: SentencingFactorRule | null;
+  errors: string[];
+  warnings: string[];
+}
+
 interface FactorAdjustmentResult {
   priorityAdjustments: FactorAdjustment[];
   generalAdjustments: FactorAdjustment[];
   afterFactors: MonthRange;
 }
+
+const CURRENT_TEMPORAL_EFFECTIVE_DATE = "2026-05-01";
+const PLEA_COMBINATION_FACTOR_IDS = new Set([
+  "surrender",
+  "confess_heavy",
+  "restitution",
+  "compensation_forgiven",
+  "reconciliation",
+]);
 
 function isCrimeName(value: string): value is CrimeName {
   return value in CRIME_NAME_TO_ID;
@@ -40,26 +66,25 @@ function isValidIsoDate(value: string): boolean {
   return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
 }
 
-/**
- * 量刑计算器 — 计算引擎
- * 翻译自 sentencing_engine.py v2.0
- *
- * 量刑三步法：量刑起点 → 基准刑 → 宣告刑
- * 优先情节先调（连乘）→ 一般情节后调（逐项作用于前一结果）→ ±20%微调 → 兜底条款
- */
+function hasMitigatedEffect(rule: SentencingFactorRule): boolean {
+  return [
+    "lighter_or_mitigated",
+    "lighter_or_mitigated_or_exempt",
+    "mitigated_or_exempt",
+  ].includes(rule.legalEffect);
+}
 
+function cloneRange(range: MonthRange | null | undefined): MonthRange | null {
+  return range ? [range[0], range[1]] : null;
+}
+
+/**
+ * 全国规则量刑辅助引擎。
+ *
+ * 计算边界：法定刑/量刑起点由规则集给出；除危险驾驶罪的直接宣告刑幅度外，
+ * 基准刑必须由律师依据完整案情和案件实际适用的现行实施细则人工核验后录入。
+ */
 export class SentencingEngine {
-  /**
-   * 完整量刑计算
-   * @param {string} crimeName - 罪名中文名
-   * @param {number} amount - 涉案金额（元）
-   * @param {string} areaType - '一类地区'/'二类地区'/'全国'
-   * @param {Object} factors - 量刑情节字典 { '自首': true, '累犯': true, ... }
-   * @param {string} crimeDate - '2026-05-01' 格式日期
-   * @param {number} judgeAdjustment - -20~20 审判员微调
-   * @param {boolean} isTelecom - 是否为电信诈骗
-   * @returns {Object} 完整计算结果（区间形式）
-   */
   calculate(input: SentencingCalculationInput): SentencingCalculationResult {
     const {
       crimeName,
@@ -68,645 +93,616 @@ export class SentencingEngine {
       factors,
       crimeDate,
       judgeAdjustment = 0,
+      judgeAdjustmentReason = "",
       isTelecom = false,
       factTier = null,
+      manualBasePenaltyRange = null,
+      manualBaseSource = "",
+      temporalRuleBasis = null,
     } = input;
-    const processLog: CalculationProcessEntry[] = [];
+    const process: CalculationProcessEntry[] = [];
     const result: SentencingCalculationResult = {
-      crimeName, amount, areaType, factors: { ...factors }, crimeDate, judgeAdjustment, factTier,
+      crimeName,
+      amount,
+      areaType,
+      factors: { ...factors },
+      crimeDate,
+      judgeAdjustment,
+      judgeAdjustmentReason,
       isTelecom,
-      process: processLog,
+      factTier,
+      manualBasePenaltyRange: cloneRange(manualBasePenaltyRange),
+      manualBaseSource,
+      temporalRuleBasis,
+      calculationStatus: "blocked",
+      process,
+      warnings: [],
+      blockingIssues: [],
+      ruleset: SENTENCING_DATA.ruleset,
     };
 
-    processLog.push({ step: '开始计算', detail: `${crimeName}，${amount ? `涉案金额${amount}元` : ''}，${areaType}，犯罪日期${crimeDate}` });
-
-    if (!isCrimeName(crimeName)) {
-      processLog.push({ step: '错误', detail: `未知罪名: ${crimeName}` });
-      result.error = `未知罪名: ${crimeName}`;
+    const fail = (message: string) => {
+      result.error = message;
+      result.blockingIssues.push(message);
+      process.push({ step: "阻断", detail: message });
       return result;
+    };
+
+    if (!isCrimeName(crimeName)) return fail(`未知罪名：${crimeName}`);
+    if (!Number.isFinite(amount) || amount < 0) return fail("涉案金额必须是大于或等于0的有效数字");
+    if (!isValidIsoDate(crimeDate)) return fail("请提供有效的 YYYY-MM-DD 犯罪日期");
+    if (!Number.isFinite(judgeAdjustment) || judgeAdjustment < -20 || judgeAdjustment > 20) {
+      return fail("裁判情景调整必须在-20%至20%之间");
     }
+    if (judgeAdjustment !== 0 && judgeAdjustmentReason.trim().length < 4) {
+      return fail("使用裁判情景调整时，必须填写具体调整理由");
+    }
+
     const crimeId = CRIME_NAME_TO_ID[crimeName];
     result.legalReferences = LEGAL_REFERENCES[crimeName];
-
-    if (!Number.isFinite(amount) || amount < 0) {
-      result.error = '涉案金额必须是大于或等于0的有效数字';
-      return result;
-    }
-
-    // ===== Step 1: 量刑起点（区间） =====
-    processLog.push({ step: '第一步：确定量刑起点', detail: '根据犯罪数额/事实确定量刑起点幅度' });
-
-    const { tier, tierLabel, standard, error } = this._getTierAndStandard(
-      crimeId, amount, areaType, crimeDate, processLog, isTelecom, factTier
-    );
-    if (!standard) {
-      result.error = error || '无法确定量刑标准';
-      return result;
-    }
-
-    const startRange = this._calcStartingRange(standard, processLog);
-    result.startingPointRange = startRange;  // [下限, 上限]
-    result.tier = tier;
-    result.tierLabel = tierLabel;
-    result.standardDetail = { ...standard };
-
-    // ===== Step 2: 基准刑（区间） =====
-    processLog.push({ step: '第二步：确定基准刑', detail: '量刑起点 + 超额增加刑罚量' });
-
-    const extraRange = this._calcBasePenaltyRange(
-      crimeId, amount, areaType, tier ?? standard.tier, crimeDate, processLog, isTelecom
-    );
-    const baseLow = startRange[0] + extraRange[0];
-    const baseHigh = startRange[1] != null && extraRange[1] != null
-      ? startRange[1] + extraRange[1]
-      : null;
-    result.extraPenaltyRange = extraRange;
-    result.basePenaltyRange = [baseLow, baseHigh];
-
-    const baseDetail = baseHigh != null
-      ? `量刑起点${this._formatMonthRange(startRange)} + 超额刑罚量${this._formatMonthRange(extraRange)} = 基准刑${this._formatMonthRange([baseLow, baseHigh])}`
-      : `量刑起点与超额刑罚量合并后，基准刑为${baseLow}个月以上`;
-    processLog.push({ step: '基准刑', detail: baseDetail, valueRange: [baseLow, baseHigh] });
-
-    // ===== Step 3: 宣告刑（区间） =====
-    processLog.push({ step: '第三步：确定宣告刑', detail: '优先情节先调 → 一般情节后调 → 微调 → 兜底' });
-
-    const adjResult = this._applyFactorAdjustmentsRange([baseLow, baseHigh], factors, processLog);
-    result.priorityAdjustments = adjResult.priorityAdjustments;
-    result.generalAdjustments = adjResult.generalAdjustments;
-
-    let finalLow = adjResult.afterFactors[0];
-    let finalHigh = adjResult.afterFactors[1];
-
-    // 审判员微调（±20%）
-    if (judgeAdjustment !== 0) {
-      const judgePct = Math.max(-20, Math.min(20, judgeAdjustment));
-      const adjLow = Math.round(finalLow * judgePct / 100);
-      const adjHigh = finalHigh != null ? Math.round(finalHigh * judgePct / 100) : adjLow;
-      finalLow += adjLow;
-      if (finalHigh != null) finalHigh += adjHigh;
-      processLog.push({
-        step: '审判员微调',
-        detail: `审判员调整${judgePct}%: ${finalLow}~${finalHigh != null ? finalHigh : '∞'}月`,
-      });
-    } else {
-      processLog.push({ step: '审判员微调', detail: '审判员未做调整' });
-    }
-
-    // 兜底条款
-    if (finalLow < 0) finalLow = 0;
-    if (finalHigh != null && finalHigh < 0) finalHigh = 0;
-
-    // 危险驾驶罪最高6个月拘役
-    if (crimeName === '危险驾驶罪') {
-      if (finalHigh == null || finalHigh > 6) finalHigh = 6;
-      if (finalLow > 6) finalLow = 6;
-    }
-
-    if (finalLow > 0 && finalLow < 1) finalLow = 1;
-    if (finalHigh != null && finalHigh > 0 && finalHigh < 1) finalHigh = 1;
-
-    result.finalPenaltyRange = [finalLow, finalHigh];
-    result.finalSentence = this._formatSentenceRange(finalLow, finalHigh);
-
-    processLog.push({
-      step: '宣告刑',
-      detail: `最终宣告刑范围: ${result.finalSentence}`,
+    process.push({
+      step: "规则集",
+      detail: `${SENTENCING_DATA.ruleset.id} ${SENTENCING_DATA.ruleset.version}；引擎${SENTENCING_DATA.ruleset.engineVersion}`,
     });
 
+    const temporalError = this._validateTemporalBasis(crimeId, crimeDate, temporalRuleBasis);
+    if (temporalError) return fail(temporalError);
+
+    process.push({ step: "第一步：法定刑与量刑起点", detail: "先定位法定刑档，再单独展示量刑起点；二者不得混同" });
+    const selection = this._getTierAndStandard(
+      crimeId,
+      amount,
+      areaType,
+      process,
+      isTelecom,
+      factTier,
+    );
+    if (!selection.standard) return fail(selection.error || "无法确定量刑标准");
+
+    const standard = selection.standard;
+    result.tier = selection.tier;
+    result.tierLabel = selection.tierLabel;
+    result.standardDetail = { ...standard };
+    result.statutoryPenalty = standard.statutory;
+    process.push({
+      step: "法定刑",
+      detail: `${standard.statutory.article}：${standard.statutory.label}`,
+      valueRange: standard.statutory.monthBounds,
+    });
+
+    if (standard.startMin != null) {
+      result.startingPointRange = [standard.startMin, standard.startMax ?? null];
+      result.startingPointKinds = standard.startKinds ? [...standard.startKinds] : [];
+      process.push({
+        step: standard.quantitativeStatus === "direct_sentence" ? "直接宣告刑幅度" : "量刑起点",
+        detail: `${this._formatMonthRange(result.startingPointRange)}；刑种：${this._formatKinds(result.startingPointKinds)}`,
+        valueRange: result.startingPointRange,
+      });
+    } else {
+      result.warnings.push("全国规则集未为该罪名提供可直接套用的量刑起点，当前仅展示法定刑档。");
+      process.push({ step: "量刑起点", detail: "当前全国规则集没有可直接套用的量刑起点，须人工核对" });
+    }
+
+    const factorSelection = this._selectAndValidateFactors(crimeId, factTier, factors);
+    result.warnings.push(...factorSelection.warnings);
+    if (factorSelection.errors.length > 0) return fail(factorSelection.errors.join("；"));
+
+    if (factorSelection.exemption) {
+      result.calculationStatus = "complete";
+      result.disposition = "exemption";
+      result.finalPenaltyRange = [0, 0];
+      result.finalPenaltyKinds = ["exemption"];
+      result.finalSentence = "免予刑事处罚（中止犯未造成损害）";
+      process.push({
+        step: "法定处理",
+        detail: "《刑法》第24条规定，中止犯没有造成损害的，应当免除处罚；此处的0仅表示明确的免予刑事处罚，不表示零月刑期。",
+      });
+      return result;
+    }
+
+    if (factorSelection.qualitative.length > 0) {
+      const names = factorSelection.qualitative.map((item) => item.name).join("、");
+      result.blockingIssues.push(`所选情节“${names}”需要依法作定性或下档判断，当前规则集不虚构百分比`);
+      result.disposition = "manual_review";
+      process.push({ step: "定性情节", detail: result.blockingIssues[result.blockingIssues.length - 1] ?? names });
+      return result;
+    }
+
+    let baseRange: MonthRange;
+    if (standard.quantitativeStatus === "direct_sentence" && !manualBasePenaltyRange) {
+      baseRange = [standard.startMin ?? standard.statutory.monthBounds[0], standard.startMax ?? standard.statutory.monthBounds[1]];
+      result.warnings.push("危险驾驶罪使用法发〔2021〕21号规定的1至6个月拘役直接宣告刑幅度；具体点位仍须结合行为、后果和罚金能力人工判断。");
+      process.push({ step: "第二步：确定基准输入", detail: "该罪名适用直接宣告刑幅度，不使用未核实的地方增刑公式", valueRange: baseRange });
+    } else {
+      const baseError = this._validateManualBaseRange(manualBasePenaltyRange, manualBaseSource, standard);
+      if (baseError) {
+        result.calculationStatus = "requires_manual_base";
+        result.blockingIssues.push(baseError);
+        process.push({ step: "第二步：等待人工核验基准刑", detail: baseError });
+        return result;
+      }
+      baseRange = cloneRange(manualBasePenaltyRange)!;
+      process.push({
+        step: "第二步：采用人工核验基准刑",
+        detail: `${this._formatMonthRange(baseRange)}；来源：${manualBaseSource.trim()}`,
+        valueRange: baseRange,
+      });
+    }
+    result.basePenaltyRange = baseRange;
+
+    process.push({
+      step: "第三步：量刑情节调节",
+      detail: "修正情节依次调节；一般情节以修正后的同一基数同向相加、逆向相减",
+    });
+    const adjusted = this._applyFactorAdjustmentsRange(
+      baseRange,
+      factorSelection.priority,
+      factorSelection.general,
+      process,
+    );
+    result.priorityAdjustments = adjusted.priorityAdjustments;
+    result.generalAdjustments = adjusted.generalAdjustments;
+
+    let rawRange = adjusted.afterFactors;
+    if (judgeAdjustment !== 0) {
+      rawRange = this._applyPercentRange(rawRange, judgeAdjustment, judgeAdjustment);
+      process.push({
+        step: "裁判情景模拟",
+        detail: `${judgeAdjustment}%（理由：${judgeAdjustmentReason.trim()}）→ ${this._formatMonthRange(rawRange)}；该步骤不是规范性自动计算`,
+        valueRange: rawRange,
+      });
+    } else {
+      process.push({ step: "裁判情景模拟", detail: "未启用" });
+    }
+    result.rawAdjustedPenaltyRange = rawRange;
+
+    const allQuantitativeFactors = [...factorSelection.priority, ...factorSelection.general];
+    const permitsMitigation = allQuantitativeFactors.some(hasMitigatedEffect);
+    const clamped = this._applyStatutoryBounds(rawRange, standard, permitsMitigation, result.warnings, process);
+    result.finalPenaltyRange = clamped;
+    result.finalPenaltyKinds = this._inferFiniteKinds(clamped, standard, permitsMitigation);
+    result.finalSentence = this._formatSentenceRange(clamped, result.finalPenaltyKinds);
+    result.disposition = "term_range";
+    result.calculationStatus = "complete";
+
+    if (standard.statutory.options.some((option) => ["life", "death", "fine_only", "control"].includes(option.kind))) {
+      result.warnings.push("月数调节结果只覆盖可用月数表达的刑期；法定刑中的无期徒刑、死刑、管制或单处罚金须另行判断。 ");
+    }
+    process.push({ step: "量刑辅助结果", detail: result.finalSentence, valueRange: clamped });
     return result;
   }
 
-  /**
-   * 确定档位和量刑标准
-   */
+  _validateTemporalBasis(
+    crimeId: CrimeId,
+    crimeDate: string,
+    temporalRuleBasis: TemporalRuleBasis | null,
+  ): string | null {
+    if (!["embezzlement", "non_official_bribery"].includes(crimeId)) return null;
+    if (!temporalRuleBasis) {
+      return "该罪名涉及法释〔2026〕6号时间效力，不能仅按犯罪日期自动切换；请选择并确认规则时间依据";
+    }
+    if (temporalRuleBasis === "individual_comparison_required") {
+      return "行为跨越规则施行日或新旧规则适用尚未核定，须先完成个案时间效力和有利性比较，本工具停止数值测算";
+    }
+    if (temporalRuleBasis === "conduct_on_or_after_2026_05_01" && crimeDate < CURRENT_TEMPORAL_EFFECTIVE_DATE) {
+      return "犯罪日期早于2026-05-01，与所选“施行后行为”时间依据冲突";
+    }
+    if (temporalRuleBasis === "pre_effective_current_rule_reviewed" && crimeDate >= CURRENT_TEMPORAL_EFFECTIVE_DATE) {
+      return "犯罪日期不早于2026-05-01，无需选择“施行前行为经核对适用现规则”";
+    }
+    return null;
+  }
+
   _getTierAndStandard(
     crimeId: CrimeId,
     amount: number,
     areaType: AreaType,
-    crimeDate: string,
-    processLog: CalculationProcessEntry[],
+    process: CalculationProcessEntry[],
     isTelecom: boolean,
     factTier: string | null,
   ): TierSelection {
-    const standards = SENTENCING_DATA.standards[crimeId];
-    if (!standards || standards.length === 0) {
-      processLog.push({ step: '错误', detail: `未找到${crimeId}的量刑标准` });
-      return { tier: null, tierLabel: null, standard: null, error: '当前罪名没有可用的量刑标准' };
+    let standards = SENTENCING_DATA.standards[crimeId] ?? [];
+    if (crimeId === "fraud") {
+      standards = standards.filter((standard) => isTelecom
+        ? standard.subType === "电信诈骗"
+        : standard.subType !== "电信诈骗");
     }
-
-    if (standards.some((standard) => standard.effFrom || standard.effTo) && !isValidIsoDate(crimeDate)) {
-      const message = "该罪名存在按犯罪日期区分的标准，请提供有效的 YYYY-MM-DD 犯罪日期";
-      processLog.push({ step: "错误", detail: message });
-      return { tier: null, tierLabel: null, standard: null, error: message };
-    }
-
-    // 过滤有效的标准（按日期）
-    const effective = standards.filter(s => {
-      if (s.effFrom && crimeDate < s.effFrom) return false;
-      if (s.effTo && crimeDate > s.effTo) return false;
-      return true;
-    });
-    if (effective.length === 0) {
-      const message = `犯罪日期${crimeDate}没有可用的有效量刑标准`;
-      processLog.push({ step: "错误", detail: message });
-      return { tier: null, tierLabel: null, standard: null, error: message };
-    }
-
-    // 按地区优先
-    let byArea = effective.filter(s => s.area === areaType || s.area === '全国');
+    const availableAreas = [...new Set(standards.map((standard) => standard.area))];
+    const resolvedArea = availableAreas.length === 1 ? availableAreas[0] : areaType;
+    const byArea = standards.filter((standard) => standard.area === resolvedArea);
     if (byArea.length === 0) {
-      processLog.push({ step: '错误', detail: `未找到${areaType}的量刑标准` });
       return { tier: null, tierLabel: null, standard: null, error: `未找到${areaType}的有效量刑标准` };
     }
 
-    // 电信诈骗：只选电信诈骗专用标准
-    if (isTelecom && crimeId === 'fraud') {
-      byArea = byArea.filter(s => s.subType === '电信诈骗');
-      if (byArea.length === 0) {
-        processLog.push({ step: '错误', detail: '未找到电信诈骗的独立量刑标准' });
-        return { tier: null, tierLabel: null, standard: null, error: '未找到电信网络诈骗专用标准' };
+    if (factTier) {
+      const manual = byArea.find((standard) => standard.tier === factTier);
+      if (!manual) {
+        return { tier: null, tierLabel: null, standard: null, error: `人工确认档位“${factTier}”不在当前罪名可选范围` };
       }
-    } else if (crimeId === 'fraud') {
-      // 普通诈骗：排除电信诈骗专用标准
-      byArea = byArea.filter(s => !s.subType || s.subType !== '电信诈骗');
+      process.push({ step: "确定档位", detail: `采用人工确认的“${manual.tier}”档；金额不替代其他严重情节判断` });
+      return { tier: manual.tier, tierLabel: manual.tier, standard: manual };
     }
 
-    // 非金额犯罪必须按案件事实选择档位，不能静默使用第一档。
-    if (byArea.every(s => s.minAmount == null && s.maxAmount == null)) {
-      const s = factTier
-        ? byArea.find(item => item.tier === factTier)
-        : (byArea.length === 1 ? byArea[0] : null);
-      if (!s) {
-        return {
-          tier: null,
-          tierLabel: null,
-          standard: null,
-          error: `请补充案件事实档位，可选：${byArea.map(item => item.tier).join('、')}`,
-        };
-      }
-      processLog.push({ step: '确定档位', detail: `根据案件事实选择“${s.tier}”档` });
-      return { tier: s.tier, tierLabel: s.tier, standard: s };
+    if (byArea.length === 1) {
+      const only = byArea[0];
+      process.push({ step: "确定档位", detail: `该罪名当前只有“${only.tier}”档` });
+      return { tier: only.tier, tierLabel: only.tier, standard: only };
     }
 
-    // 按金额匹配档位
-    for (const s of byArea) {
-      const minA = s.minAmount != null ? s.minAmount : 0;
-      const maxA = s.maxAmount != null ? s.maxAmount : Infinity;
-      if (minA <= amount && amount < maxA) {
-        processLog.push({ step: '确定档位', detail: `涉案金额${amount}元，属于"${s.tier}"档` });
-        return { tier: s.tier, tierLabel: s.tier, standard: s };
+    if (byArea.every((standard) => standard.minAmount == null && standard.maxAmount == null)) {
+      return {
+        tier: null,
+        tierLabel: null,
+        standard: null,
+        error: `请根据案件事实人工确认法定刑档位，可选：${byArea.map((item) => item.tier).join("、")}`,
+      };
+    }
+
+    for (const standard of byArea) {
+      const minimum = standard.minAmount ?? 0;
+      const maximum = standard.maxAmount ?? Number.POSITIVE_INFINITY;
+      if (minimum <= amount && amount < maximum) {
+        process.push({ step: "确定档位", detail: `金额${amount}元初步匹配“${standard.tier}”档；仍须复核其他入罪或升档情节` });
+        return { tier: standard.tier, tierLabel: standard.tier, standard };
       }
     }
 
-    const thresholds = byArea
-      .map(s => s.minAmount)
-      .filter(value => value != null)
-      .sort((a, b) => a - b);
-    const minimum = thresholds[0];
-    if (minimum != null && amount < minimum) {
-      const message = `涉案金额${amount}元低于当前数据表的最低数额起点${minimum}元，不能按最高档计算`;
-      processLog.push({ step: '错误', detail: message });
-      return { tier: null, tierLabel: null, standard: null, error: message };
+    const minimum = Math.min(...byArea.map((standard) => standard.minAmount ?? Number.POSITIVE_INFINITY));
+    if (Number.isFinite(minimum) && amount < minimum) {
+      return {
+        tier: null,
+        tierLabel: null,
+        standard: null,
+        error: `涉案金额${amount}元低于当前规则集数额起点${minimum}元；如有其他入罪情节，请人工选择档位并核对法源`,
+      };
+    }
+    return { tier: null, tierLabel: null, standard: null, error: "金额未匹配连续档位，请复核规则和输入" };
+  }
+
+  _validateManualBaseRange(
+    range: MonthRange | null | undefined,
+    source: string,
+    standard: SentencingStandard,
+  ): string | null {
+    if (!range) {
+      return "当前规则只确定法定刑和量刑起点；请录入已按本案适用现行实施细则及完整事实人工核验的基准刑区间";
+    }
+    const [minimum, maximum] = range;
+    if (!Number.isFinite(minimum) || maximum == null || !Number.isFinite(maximum) || minimum < 0 || maximum < minimum) {
+      return "人工基准刑必须是下限不小于0、上限不小于下限的有限月数区间";
+    }
+    const [statutoryMinimum, statutoryMaximum] = standard.statutory.monthBounds;
+    if (minimum < statutoryMinimum || (statutoryMaximum != null && maximum > statutoryMaximum)) {
+      return `人工基准刑${this._formatMonthRange(range)}超出当前法定刑月数边界${this._formatMonthRange(standard.statutory.monthBounds)}`;
+    }
+    if (source.trim().length < 4) {
+      return "请填写人工基准刑的核验来源，例如适用实施细则条款、量刑建议或阅卷底稿定位";
+    }
+    return null;
+  }
+
+  _selectAndValidateFactors(
+    crimeId: CrimeId,
+    factTier: string | null,
+    factors: Readonly<Record<string, boolean>>,
+  ): FactorSelection {
+    const allRules = [...SENTENCING_DATA.priorityFactors, ...SENTENCING_DATA.generalFactors];
+    const selected: SentencingFactorRule[] = [];
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    for (const [name, enabled] of Object.entries(factors)) {
+      if (!enabled) continue;
+      const rule = allRules.find((item) => item.name === name);
+      if (!rule) {
+        errors.push(`未知量刑情节“${name}”`);
+        continue;
+      }
+      if (!factorAppliesTo(rule.id, crimeId, factTier)) {
+        errors.push(`量刑情节“${name}”不适用于当前罪名或事实档位`);
+        continue;
+      }
+      selected.push(rule);
+      if (rule.note) warnings.push(`${rule.name}：${rule.note}`);
     }
 
+    const groups = new Map<string, SentencingFactorRule[]>();
+    for (const rule of selected) {
+      if (!rule.conflictGroup) continue;
+      groups.set(rule.conflictGroup, [...(groups.get(rule.conflictGroup) ?? []), rule]);
+    }
+    for (const rules of groups.values()) {
+      if (rules.length > 1) errors.push(`互斥情节不能同时选择：${rules.map((item) => item.name).join("、")}`);
+    }
+
+    const selectedIds = new Set(selected.map((item) => item.id));
+    const conflictPairs = new Set<string>();
+    for (const rule of selected) {
+      for (const conflictId of rule.conflictsWith ?? []) {
+        if (!selectedIds.has(conflictId)) continue;
+        const pair = [rule.id, conflictId].sort().join("|");
+        if (conflictPairs.has(pair)) continue;
+        conflictPairs.add(pair);
+        const other = allRules.find((item) => item.id === conflictId);
+        errors.push(`为避免重复评价，不能同时选择：${rule.name}、${other?.name ?? conflictId}`);
+      }
+    }
+
+    const exemption = selected.find((item) => item.legalEffect === "exempt") ?? null;
+    const qualitative = selected.filter((item) => !item.quantitative && item.legalEffect !== "exempt");
     return {
-      tier: null,
-      tierLabel: null,
-      standard: null,
-      error: `涉案金额${amount}元未匹配到连续有效的数额档位，请复核数据表`,
+      priority: SENTENCING_DATA.priorityFactors.filter((item) => selectedIds.has(item.id) && item.quantitative),
+      general: SENTENCING_DATA.generalFactors.filter((item) => selectedIds.has(item.id) && item.quantitative),
+      qualitative,
+      exemption,
+      errors,
+      warnings,
     };
   }
 
-  /**
-   * Step 1: 量刑起点 — 返回区间
-   * @returns {Array} [下限月数, 上限月数]  上限为null表示无限
-   */
-  _calcStartingRange(
-    standard: SentencingStandard,
-    processLog: CalculationProcessEntry[],
-  ): MonthRange {
-    const { startMin, startMax } = standard;
-    if (startMin == null) {
-      processLog.push({ step: '量刑起点', detail: '无明确量刑起点' });
-      return [0, null];
-    }
-
-    const detail = startMax != null
-      ? `量刑起点幅度：${startMin}~${startMax}月`
-      : `量刑起点：${startMin}月以上`;
-    processLog.push({ step: '量刑起点', detail, valueRange: [startMin, startMax] });
-    return [startMin, startMax];
-  }
-
-  /**
-   * Step 2: 增加刑罚量
-   */
-  _calcBasePenaltyRange(
-    crimeId: CrimeId,
-    amount: number,
-    areaType: AreaType,
-    tier: string,
-    crimeDate: string,
-    processLog: CalculationProcessEntry[],
-    isTelecom: boolean,
-  ): MonthRange {
-    // 无金额的犯罪不计算增加刑罚量
-    if (!amount || amount <= 0) {
-      processLog.push({ step: '超额刑罚量', detail: '无涉案金额或非金额犯罪，无增加刑罚量', valueMonths: 0 });
-      return [0, 0];
-    }
-
-    const incRules = SENTENCING_DATA.increments[crimeId];
-    if (!incRules) {
-      processLog.push({ step: '超额刑罚量', detail: `未找到${tier}档的增加刑罚量规则`, valueMonths: 0 });
-      return [0, 0];
-    }
-
-    // 筛选适用规则
-    let rules = incRules.filter(r => (r.area === areaType || r.area === '全国') && r.tier === tier);
-
-    // 电信诈骗过滤
-    if (isTelecom && crimeId === 'fraud') {
-      rules = rules.filter(r => r.subType === '电信诈骗' || (!r.subType && r.tier === '特别巨大'));
-    } else if (crimeId === 'fraud') {
-      rules = rules.filter(r => r.subType === '一般诈骗' || !r.subType);
-    }
-
-    if (rules.length === 0) {
-      processLog.push({ step: '超额刑罚量', detail: `未找到适用规则`, valueMonths: 0 });
-      return [0, 0];
-    }
-
-    // 确定基准数额（该档位的最低金额）
-    const standards = SENTENCING_DATA.standards[crimeId];
-    let baseAmount = 0;
-    const areaStandards = standards.filter(s => {
-      if (!(s.area === areaType || s.area === '全国') || s.tier !== tier) return false;
-      if (s.effFrom && crimeDate < s.effFrom) return false;
-      if (s.effTo && crimeDate > s.effTo) return false;
-      if (crimeId === 'fraud') {
-        return isTelecom ? s.subType === '电信诈骗' : s.subType !== '电信诈骗';
-      }
-      return true;
-    });
-    for (const s of areaStandards) {
-      if (s.minAmount != null) {
-        baseAmount = s.minAmount;
-        break;
-      }
-    }
-
-    if (baseAmount <= 0) {
-      processLog.push({ step: '超额刑罚量', detail: '无法确定基准数额', valueMonths: 0 });
-      return [0, 0];
-    }
-
-    const excess = amount - baseAmount;
-    if (excess <= 0) {
-      processLog.push({ step: '超额刑罚量', detail: `未超过基准数额${baseAmount}元，无增加刑罚量`, valueMonths: 0 });
-      return [0, 0];
-    }
-
-    processLog.push({
-      step: '超额计算',
-      detail: `涉案金额${amount}元 - 基准${baseAmount}元 = 超额${excess}元`,
-    });
-
-    let totalLow = 0;
-    let totalHigh: number | null = 0;
-    const proportionalRules = rules.filter(rule => rule.perAmount > 0);
-    const fixedRules = rules.filter(rule => rule.perAmount === 0);
-
-    for (const rule of proportionalRules) {
-      const numUnits = Math.floor(excess / rule.perAmount);
-      if (numUnits <= 0) continue;
-      const low = numUnits * rule.penaltyMin;
-      const high = rule.penaltyMax == null ? null : numUnits * rule.penaltyMax;
-      totalLow += low;
-      totalHigh = totalHigh == null || high == null ? null : totalHigh + high;
-      const label = rule.subType ? `（${rule.subType}）` : '';
-      processLog.push({
-        step: '超额刑罚量（每金额）',
-        detail: `超额${excess}元，每${rule.perAmount}元${label}增加${rule.penaltyMin}~${rule.penaltyMax ?? '以上'}月，共${this._formatMonthRange([low, high])}`,
-        valueRange: [low, high],
-      });
-    }
-
-    if (fixedRules.length > 0) {
-      const selected = fixedRules.find(rule => rule.maxCap != null && excess <= rule.maxCap)
-        || fixedRules.find(rule => rule.maxCap == null);
-      if (selected) {
-        totalLow += selected.penaltyMin;
-        totalHigh = totalHigh == null || selected.penaltyMax == null
-          ? null
-          : totalHigh + selected.penaltyMax;
-        processLog.push({
-          step: '超额刑罚量（分档）',
-          detail: `超额${excess}元适用分档增加幅度${this._formatMonthRange([selected.penaltyMin, selected.penaltyMax])}`,
-          valueRange: [selected.penaltyMin, selected.penaltyMax],
-        });
-      }
-    }
-
-    return [totalLow, totalHigh];
-  }
-
-  /**
-   * Step 3: 情节调节（区间版）
-   * 对区间两端分别做相同的比例调节
-   * 优先情节连乘 → 一般情节后调并逐项按比例作用于前一结果
-   * @param {Array} penaltyRange - [下限月数, 上限月数]
-   * @returns {Object} { priorityAdjustments, generalAdjustments, afterFactors: [low, high] }
-   */
   _applyFactorAdjustmentsRange(
     penaltyRange: MonthRange,
-    factors: Readonly<Record<string, boolean>>,
-    processLog: CalculationProcessEntry[],
+    priority: SentencingFactorRule[],
+    general: SentencingFactorRule[],
+    process: CalculationProcessEntry[],
   ): FactorAdjustmentResult {
     const priorityAdjustments: FactorAdjustment[] = [];
-    const generalAdjustments: FactorAdjustment[] = [];
-    let currentLow = penaltyRange[0];
-    let currentHigh = penaltyRange[1];
-
-    // 分离优先情节和一般情节
-    const priorityInputs: SentencingFactorRule[] = [];
-    const generalInputs: SentencingFactorRule[] = [];
-
-    for (const [factorName, value] of Object.entries(factors)) {
-      if (!value) continue;
-      const pf = SENTENCING_DATA.priorityFactors.find(f => f.name === factorName);
-      if (pf) {
-        priorityInputs.push(pf);
-        continue;
-      }
-      const gf = SENTENCING_DATA.generalFactors.find(f => f.name === factorName);
-      if (gf) {
-        generalInputs.push(gf);
-      }
-    }
-
-    processLog.push({
-      step: '情节分类',
-      detail: `优先情节（先调）: ${priorityInputs.length}个，一般情节（后调）: ${generalInputs.length}个`,
-    });
-
-    // 百分比本身也是幅度，按最宽边界传播，避免再取无依据的中值。
-    for (const f of priorityInputs) {
-      const before: MonthRange = [currentLow, currentHigh];
-      [currentLow, currentHigh] = this._applyPercentRange(before, f.minPct, f.maxPct);
+    let current = cloneRange(penaltyRange)!;
+    for (const factor of priority) {
+      current = this._applyPercentRange(current, factor.minPct ?? 0, factor.maxPct ?? 0);
       priorityAdjustments.push({
-        factor: f.name, percentRange: [f.minPct, f.maxPct],
-        newRange: [currentLow, currentHigh],
+        factor: factor.name,
+        percentRange: [factor.minPct ?? 0, factor.maxPct ?? 0],
+        newRange: cloneRange(current)!,
       });
-      processLog.push({
-        step: '优先情节调节',
-        detail: `${f.name}: ${f.minPct}%~${f.maxPct}% → ${this._formatMonthRange([currentLow, currentHigh])}`,
+      process.push({
+        step: "修正情节依次调节",
+        detail: `${factor.name} ${factor.minPct ?? 0}%至${factor.maxPct ?? 0}% → ${this._formatMonthRange(current)}`,
+        valueRange: current,
       });
     }
 
-    // 一般情节后调：逐项按比例作用于前一结果；固定月数另行增加。
-    for (const f of generalInputs) {
-      if (f.fixMonths) {
-        // 固定月份（如累犯固定+3月），区间两端都加同样的固定值
-        currentLow += f.fixMonths;
-        if (currentHigh != null) currentHigh += f.fixMonths;
-        generalAdjustments.push({
-          factor: f.name, fixMonths: f.fixMonths,
-          newRange: [currentLow, currentHigh],
-        });
-        const highStr = currentHigh != null ? `${currentHigh}月` : '∞';
-        processLog.push({
-          step: '一般情节调节',
-          detail: `${f.name}: 固定+${f.fixMonths}月 → 区间[${currentLow}~${highStr}]月`,
-        });
-      } else {
-        const before: MonthRange = [currentLow, currentHigh];
-        [currentLow, currentHigh] = this._applyPercentRange(before, f.minPct, f.maxPct);
-        generalAdjustments.push({
-          factor: f.name, percentRange: [f.minPct, f.maxPct],
-          newRange: [currentLow, currentHigh],
-        });
-        processLog.push({
-          step: '一般情节调节',
-          detail: `${f.name}: ${f.minPct}%~${f.maxPct}% → ${this._formatMonthRange([currentLow, currentHigh])}`,
-        });
+    if (general.length === 0) {
+      process.push({ step: "一般情节合并调节", detail: "未选择一般情节" });
+      return { priorityAdjustments, generalAdjustments: [], afterFactors: current };
+    }
+
+    const reductionFactors = general.filter((item) => item.direction === "reduce");
+    let reduceMinPct = reductionFactors.reduce((sum, item) => sum + (item.minPct ?? 0), 0);
+    const reduceMaxPct = reductionFactors.reduce((sum, item) => sum + (item.maxPct ?? 0), 0);
+    const hasPlea = general.some((item) => item.id === "plea_guilty");
+    const hasPleaCombination = general.some((item) => PLEA_COMBINATION_FACTOR_IDS.has(item.id));
+    if (hasPlea && hasPleaCombination) {
+      const cappedIds = new Set([...PLEA_COMBINATION_FACTOR_IDS, "plea_guilty"]);
+      const combinationMinPct = reductionFactors
+        .filter((item) => cappedIds.has(item.id))
+        .reduce((sum, item) => sum + (item.minPct ?? 0), 0);
+      if (combinationMinPct < -60) {
+        const otherMinPct = reductionFactors
+          .filter((item) => !cappedIds.has(item.id))
+          .reduce((sum, item) => sum + (item.minPct ?? 0), 0);
+        reduceMinPct = -60 + otherMinPct;
+        process.push({ step: "认罪认罚合并上限", detail: "认罪认罚与指定相关从宽情节的合并幅度按60%封顶；其他独立情节仍另行评价" });
       }
     }
 
-    const highStr = currentHigh != null ? `${currentHigh}月` : '∞';
-    processLog.push({
-      step: '情节调节完成',
-      detail: `经优先情节+一般情节调节后，量刑区间为[${currentLow}~${highStr}]月`,
+    const [baseLow, baseHigh] = current;
+    const lowAfterReduction = Math.max(0, Math.floor(baseLow * (100 + reduceMinPct) / 100));
+    const highAfterReduction = baseHigh == null
+      ? null
+      : Math.max(0, Math.ceil(baseHigh * (100 + reduceMaxPct) / 100));
+    let lowIncrease = 0;
+    let highIncrease = 0;
+    for (const factor of general.filter((item) => item.direction === "increase")) {
+      const lowDelta = Math.floor(baseLow * (factor.minPct ?? 0) / 100);
+      const highDelta = baseHigh == null ? 0 : Math.ceil(baseHigh * (factor.maxPct ?? 0) / 100);
+      lowIncrease += factor.minimumIncreaseMonths != null
+        ? Math.max(lowDelta, factor.minimumIncreaseMonths)
+        : lowDelta;
+      highIncrease += factor.minimumIncreaseMonths != null
+        ? Math.max(highDelta, factor.minimumIncreaseMonths)
+        : highDelta;
+    }
+    const afterGeneral: MonthRange = [
+      Math.max(0, lowAfterReduction + lowIncrease),
+      highAfterReduction == null ? null : Math.max(0, highAfterReduction + highIncrease),
+    ];
+    const normalized: MonthRange = afterGeneral[1] == null
+      ? afterGeneral
+      : [Math.min(afterGeneral[0], afterGeneral[1]), afterGeneral[1]];
+    const generalAdjustments = general.map((factor): FactorAdjustment => ({
+      factor: factor.name,
+      percentRange: [factor.minPct ?? 0, factor.maxPct ?? 0],
+      minimumIncreaseMonths: factor.minimumIncreaseMonths,
+      newRange: cloneRange(normalized)!,
+    }));
+    process.push({
+      step: "一般情节合并调节",
+      detail: `以${this._formatMonthRange(current)}为同一基数，同向相加、逆向相减 → ${this._formatMonthRange(normalized)}`,
+      valueRange: normalized,
     });
-
-    return { priorityAdjustments, generalAdjustments, afterFactors: [currentLow, currentHigh] };
+    return { priorityAdjustments, generalAdjustments, afterFactors: normalized };
   }
 
-  /**
-   * 格式化宣告刑（区间版）
-   * 输出"X~Y年有期徒刑"或"X年有期徒刑"等
-   */
-  _formatSentenceRange(low: number, high: number | null): string {
-    if (low <= 0 && high != null && high <= 0) return '免予刑事处罚';
-    if (low <= 0 && high == null) return '刑期上限未配置，需人工判断';
+  _applyStatutoryBounds(
+    rawRange: MonthRange,
+    standard: SentencingStandard,
+    permitsMitigation: boolean,
+    warnings: string[],
+    process: CalculationProcessEntry[],
+  ): MonthRange {
+    const currentBounds = standard.statutory.monthBounds;
+    const lowerBounds = permitsMitigation && standard.statutory.mitigatedMonthBounds
+      ? standard.statutory.mitigatedMonthBounds
+      : currentBounds;
+    const floor = lowerBounds[0];
+    const cap = currentBounds[1];
+    let low = Math.max(rawRange[0], floor);
+    let high = rawRange[1] == null ? cap : rawRange[1];
+    if (cap != null) high = Math.min(high ?? cap, cap);
+    if (high != null && high < floor) high = floor;
+    if (cap != null && low > cap) low = cap;
+    if (high != null && low > high) low = high;
 
-    const lowStr = this._monthsToText(low);
-    if (high == null) return `${this._monthsToDuration(low)}以上有期徒刑`;
-
-    const highStr = this._monthsToText(high);
-    if (low === high) return lowStr;
-
-    return `${lowStr}～${highStr}`;
+    if (low !== rawRange[0] || high !== rawRange[1]) {
+      const rule = permitsMitigation && standard.statutory.mitigatedMonthBounds
+        ? "存在可减轻情节，最低边界按下一法定刑幅度控制；最高边界仍受本档法定最高刑控制"
+        : "只有从轻或从重情节时，结果控制在本档法定刑月数边界内";
+      warnings.push(rule);
+      process.push({ step: "法定刑边界校正", detail: `${rule}：${this._formatMonthRange(rawRange)} → ${this._formatMonthRange([low, high])}` });
+    }
+    return [low, high];
   }
 
-  /**
-   * 月数转文字：如 23月 → "1年11个月"，6月 → "6个月拘役"
-   */
-  _monthsToText(months: number): string {
-    if (months <= 0) return '免予刑事处罚';
-    if (months <= 6) return `${months}个月拘役`;
-    if (months < 12) return `${months}个月有期徒刑`;
-
-    const years = Math.floor(months / 12);
-    const remain = months % 12;
-    if (remain === 0) return `${years}年有期徒刑`;
-    return `${years}年${remain}个月有期徒刑`;
+  _inferFiniteKinds(
+    range: MonthRange,
+    standard: SentencingStandard,
+    permitsMitigation: boolean,
+  ): PrincipalPenaltyKind[] {
+    const usesMitigatedBand = permitsMitigation
+      && standard.statutory.mitigatedMonthBounds
+      && range[0] < standard.statutory.monthBounds[0];
+    const candidateOptions = usesMitigatedBand
+      ? [...standard.statutory.options, ...(standard.statutory.mitigatedOptions ?? [])]
+      : standard.statutory.options;
+    const kinds = candidateOptions
+      .filter((option) => option.minimumMonths != null)
+      .filter((option) => {
+        const maximum = option.maximumMonths ?? Number.POSITIVE_INFINITY;
+        const rangeMaximum = range[1] ?? Number.POSITIVE_INFINITY;
+        return option.minimumMonths! <= rangeMaximum && maximum >= range[0];
+      })
+      .map((option) => option.kind);
+    return [...new Set(kinds)];
   }
 
-  _monthsToDuration(months: number): string {
-    if (months < 12) return `${months}个月`;
-    const years = Math.floor(months / 12);
-    const remain = months % 12;
-    return remain === 0 ? `${years}年` : `${years}年${remain}个月`;
+  _formatSentenceRange(range: MonthRange, kinds: PrincipalPenaltyKind[]): string {
+    return `月数调节结果${this._formatMonthRange(range)}（可能刑种：${this._formatKinds(kinds)}；具体宣告刑须人工判断）`;
+  }
+
+  _formatKinds(kinds: readonly PrincipalPenaltyKind[]): string {
+    if (kinds.length === 0) return "须人工判断";
+    return [...new Set(kinds)].map((kind) => PRINCIPAL_PENALTY_LABELS[kind]).join("、");
   }
 
   _formatMonthRange(range: MonthRange): string {
     const [low, high] = range;
     if (high == null) return `${low}个月以上`;
     if (low === high) return `${low}个月`;
-    return `${low}~${high}个月`;
+    return `${low}至${high}个月`;
   }
 
   _applyPercentRange(range: MonthRange, minPct: number, maxPct: number): MonthRange {
     const [low, high] = range;
-    const nextLow = Math.floor(low * (100 + minPct) / 100);
-    const nextHigh = high == null ? null : Math.ceil(high * (100 + maxPct) / 100);
+    const nextLow = Math.max(0, Math.floor(low * (100 + minPct) / 100));
+    const nextHigh = high == null ? null : Math.max(0, Math.ceil(high * (100 + maxPct) / 100));
     return [Math.min(nextLow, nextHigh ?? nextLow), nextHigh];
   }
 
-  /**
-   * 从自然语言中提取罪名
-   */
   extractCrime(text: string): string | null {
     for (const [crimeName, keywords] of SENTENCING_DATA.keywords.crime) {
-      for (const kw of keywords) {
-        if (text.includes(kw)) return crimeName;
-      }
+      if (keywords.some((keyword) => text.includes(keyword))) return crimeName;
     }
     return null;
   }
 
-  /**
-   * 从自然语言中提取地区
-   */
   extractRegion(text: string): AreaType | null {
     for (const [region, cities] of SENTENCING_DATA.keywords.region) {
-      for (const city of cities) {
-        if (text.includes(city)) return region;
-      }
+      if (cities.some((city) => text.includes(city))) return region;
     }
     return null;
   }
 
-  /**
-   * 从自然语言中提取金额（元）
-   */
   extractAmount(text: string): number | null {
-    const normalized = text.replace(/[,，]/g, '');
-    let m = normalized.match(/(\d+(?:\.\d+)?)\s*亿\s*(\d+(?:\.\d+)?)?\s*万?/);
-    if (m) return Math.round(Number(m[1]) * 100000000 + Number(m[2] || 0) * 10000);
-
-    m = normalized.match(/(\d+(?:\.\d+)?)\s*万\s*(\d+)?\s*元?/);
-    if (m) return Math.round(Number(m[1]) * 10000 + Number(m[2] || 0));
-
-    m = normalized.match(/(\d+(?:\.\d+)?)\s*元/);
-    if (m) return Math.round(Number(m[1]));
-
-    return null;
+    const normalized = text.replace(/[,，]/g, "");
+    let match = normalized.match(/(\d+(?:\.\d+)?)\s*亿\s*(\d+(?:\.\d+)?)?\s*万?/);
+    if (match) return Math.round(Number(match[1]) * 100000000 + Number(match[2] || 0) * 10000);
+    match = normalized.match(/(\d+(?:\.\d+)?)\s*万\s*(\d+)?\s*元?/);
+    if (match) return Math.round(Number(match[1]) * 10000 + Number(match[2] || 0));
+    match = normalized.match(/(\d+(?:\.\d+)?)\s*元/);
+    return match ? Math.round(Number(match[1])) : null;
   }
 
-  /**
-   * 从自然语言中提取情节
-   */
   extractFactors(text: string): Record<string, boolean> {
     const factors: Record<string, boolean> = {};
     for (const [factorName, keywords] of Object.entries(SENTENCING_DATA.keywords.factor)) {
-      for (const kw of keywords) {
-        if (text.includes(kw)) {
-          factors[factorName] = true;
-          break;
-        }
-      }
+      if (keywords.some((keyword) => text.includes(keyword))) factors[factorName] = true;
     }
-    if (factors['重大立功']) delete factors['一般立功'];
-    if (factors['认罪认罚']) delete factors['当庭认罪'];
-    if (factors['自首']) delete factors['坦白'];
+    if (factors["重大立功"]) delete factors["一般立功"];
+    if (factors["认罪认罚"]) {
+      delete factors["当庭自愿认罪"];
+      delete factors["坦白"];
+    }
+    if (factors["自首"]) delete factors["坦白"];
     return factors;
   }
 
-  /**
-   * 判断是否为电信诈骗
-   */
   isTelecom(text: string): boolean {
-    return SENTENCING_DATA.keywords.telecom.some(kw => text.includes(kw));
+    return SENTENCING_DATA.keywords.telecom.some((keyword) => text.includes(keyword));
   }
 
-  /**
-   * 提取犯罪日期
-   */
   extractDate(text: string): string | null {
-    const m = text.match(/(\d{4})(?:\s*年|[-/.])(\d{1,2})(?:\s*月|[-/.]?)(\d{1,2})?/);
-    if (m) {
-      const year = Number(m[1]);
-      const month = Number(m[2]);
-      const day = Number(m[3] || 1);
-      const d = new Date(year, month - 1, day);
-      if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
-      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    }
-    return null;
+    const match = text.match(/(\d{4})(?:\s*年|[-/.])(\d{1,2})(?:\s*月|[-/.]?)(\d{1,2})?/);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3] || 1);
+    const date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
   }
 
   extractFactTier(text: string, crimeName: string | null): string | null {
-    if (crimeName === '寻衅滋事罪') {
-      if (/三次以上|三次|多次纠集|纠集/.test(text)) return '三次';
-      if (/一次|单次/.test(text)) return '一次';
+    if (crimeName === "寻衅滋事罪") {
+      if (/三次以上|纠集他人三次|每次构罪/.test(text)) return "纠集他人三次且每次构罪";
+      if (/一次|单次/.test(text)) return "一次";
     }
-    if (crimeName === '交通肇事罪') {
-      if (/逃逸致死|因逃逸致人死亡/.test(text)) return '逃逸致死';
-      if (/逃逸/.test(text)) return '逃逸';
-      if (/未逃逸|基本情形|一般情形/.test(text)) return '基本';
+    if (crimeName === "交通肇事罪") {
+      if (/逃逸致死|因逃逸致人死亡/.test(text)) return "因逃逸致人死亡";
+      if (/逃逸|特别恶劣/.test(text)) return "逃逸/其他特别恶劣情节";
+      if (/未逃逸|基本情形|一般情形/.test(text)) return "基本情形";
     }
-    if (crimeName === '故意伤害罪') {
-      if (/致人死亡|死亡|严重残疾|特别残忍/.test(text)) return '致死/严重残疾';
-      if (/重伤/.test(text)) return '重伤';
-      if (/轻伤/.test(text)) return '轻伤';
+    if (crimeName === "故意伤害罪") {
+      if (/致人死亡|特别残忍.*严重残疾/.test(text)) return "特别残忍手段致重伤严重残疾/致死";
+      if (/重伤/.test(text)) return "致一人重伤";
+      if (/轻伤/.test(text)) return "致一人轻伤";
     }
-    if (crimeName === '抢劫罪') {
-      if (/入户|公共交通|银行|多次抢劫|抢劫数额巨大|致人重伤|致人死亡|冒充军警|持枪|军用物资|救灾/.test(text)) return '加重';
-      if (/普通抢劫|基本情形|一般抢劫/.test(text)) return '基本';
+    if (crimeName === "抢劫罪") {
+      if (/入户|公共交通|银行|抢劫三次|抢劫数额巨大|致人重伤|致人死亡|冒充军警|持枪|军用物资|救灾/.test(text)) return "法定加重情形";
+      if (/抢劫一次|普通抢劫|基本情形/.test(text)) return "抢劫一次（基本情形）";
     }
     return null;
   }
 
-  /**
-   * 分析用户输入，提取所有信息
-   */
   analyzeInput(text: string, contextCrime: string | null = null): ExtractedSentencingInput {
-    const crime = this.extractCrime(text) || contextCrime;
-    const result = {
-      crime: this.extractCrime(text),
+    const extractedCrime = this.extractCrime(text);
+    const crime = extractedCrime || contextCrime;
+    return {
+      crime: extractedCrime,
       region: this.extractRegion(text),
       amount: this.extractAmount(text),
       date: this.extractDate(text),
       factors: this.extractFactors(text),
-      isTelecom: this.isTelecom(text) ? true as const : null,
+      isTelecom: this.isTelecom(text) ? true : null,
       factTier: this.extractFactTier(text, crime),
     };
-    return result;
   }
 
-  /**
-   * 返回缺失的要素列表
-   */
   getMissingFields(extracted: ExtractedSentencingInput): string[] {
     const missing: string[] = [];
-    if (!extracted.crime) missing.push('罪名');
-    if (!extracted.crime) return missing;
-
-    if (!isCrimeName(extracted.crime)) return [...missing, '罪名'];
+    if (!extracted.crime || !isCrimeName(extracted.crime)) return ["罪名"];
     const crimeId = CRIME_NAME_TO_ID[extracted.crime];
-    const standards = SENTENCING_DATA.standards[crimeId] || [];
-    if (!extracted.isTelecom
-        && standards.some(item => item.area === '一类地区' || item.area === '二类地区')
-        && !extracted.region) {
-      missing.push('地区');
+    const crime = SENTENCING_DATA.crimes.find((item) => item.id === crimeId)!;
+    let standards = SENTENCING_DATA.standards[crimeId] ?? [];
+    if (crimeId === "fraud") {
+      standards = standards.filter((item) => extracted.isTelecom
+        ? item.subType === "电信诈骗"
+        : item.subType !== "电信诈骗");
     }
-    if (standards.some(item => item.minAmount != null) && extracted.amount == null) {
-      missing.push('涉案金额');
-    }
-    if (standards.some(item => item.effFrom || item.effTo) && !extracted.date) {
-      missing.push('犯罪时间');
-    }
-    const factTiers = [...new Set(
-      standards
-        .filter(item => item.minAmount == null && item.maxAmount == null)
-        .map(item => item.tier)
-    )];
-    if (factTiers.length > 1 && !extracted.factTier) {
-      missing.push('案件事实档位');
-    }
+    if (crime.amountRequired && extracted.amount == null) missing.push("涉案金额");
+    if (!extracted.date) missing.push("犯罪时间");
+    if (["embezzlement", "non_official_bribery"].includes(crimeId)) missing.push("适用规则时间依据");
+    const canSelectByAmount = standards.some((item) => item.minAmount != null);
+    if (standards.length > 1 && !canSelectByAmount && !extracted.factTier) missing.push("案件事实档位");
     return missing;
   }
 }

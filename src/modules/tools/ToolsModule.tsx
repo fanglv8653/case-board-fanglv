@@ -82,7 +82,7 @@ const LEGAL_TOOLS: LegalTool[] = [
   {
     id: "sentencing",
     title: "刑事量刑辅助测算",
-    desc: "按罪名、数额、地区、犯罪日期、事实档位与量刑情节进行区间测算",
+    desc: "核对法定刑、量刑起点和基准刑后，按已确认情节进行区间测算",
     icon: Gavel,
   },
   {
