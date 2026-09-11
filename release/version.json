@@ -1,6 +1,6 @@
 {
-  "version": "0.8.4",
-  "released_at": "2026-08-19",
-  "notes": "方律案件看板 0.8.4。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
-  "download_url": "https://github.com/fanglv8653/case-board-fanglv/releases/tag/v0.8.4-fanglv"
+    "version":  "0.8.5",
+    "released_at":  "2026-09-11",
+    "notes":  "方律案件看板 0.8.5。发布前仍须验证最终安装包 updater minisign；该签名不是 Windows Authenticode。",
+    "download_url":  "https://github.com/fanglv8653/case-board-fanglv/releases/tag/v0.8.5-fanglv"
 }
