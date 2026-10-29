@@ -375,6 +375,15 @@ async fn wait_for_path_async(path: &Path, timeout: Duration) -> Result<(), Updat
     Err(UpdateLifecycleError::new(UPD_INSTALL_PREPARE_FAILED))
 }
 
+fn publish_helper_ready(path: &Path) -> Result<(), UpdateLifecycleError> {
+    if path.exists() {
+        return Err(UpdateLifecycleError::new(UPD_RECEIPT_PERSIST_FAILED));
+    }
+    // The parent treats this filename as the handoff signal. Do not expose it
+    // while write_new_secure is still flushing bytes or protecting its DACL.
+    atomic_replace_secure(path, b"ready", UPD_RECEIPT_PERSIST_FAILED)
+}
+
 fn startup_attempt_id() -> Option<String> {
     let mut args = std::env::args();
     while let Some(arg) = args.next() {
@@ -969,7 +978,7 @@ fn run_helper(args: HelperArgs) -> Result<(), UpdateLifecycleError> {
     }
     validate_secure_path(&args.installer)?;
     let ready = attempt_dir.join("helper.ready");
-    write_new_secure(&ready, b"ready", UPD_RECEIPT_PERSIST_FAILED)?;
+    publish_helper_ready(&ready)?;
 
     let deadline = Instant::now() + HELPER_TOTAL_TIMEOUT;
     loop {
@@ -1182,6 +1191,45 @@ mod tests {
         assert!(validate_secure_path(&path).is_err());
         ensure_secure_dir(&path).unwrap();
         validate_secure_path(&path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_ready_is_secure_at_first_visibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ready-publication");
+        ensure_secure_dir(&root).unwrap();
+        for round in 0..20 {
+            let ready = root.join(format!("helper-{round}.ready"));
+            let observed = ready.clone();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let observer_start = Arc::clone(&start);
+            let observer = std::thread::spawn(move || {
+                observer_start.wait();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !observed.is_file() {
+                    assert!(Instant::now() < deadline, "ready marker not published");
+                    std::thread::yield_now();
+                }
+                validate_secure_path(&observed).unwrap();
+                assert_eq!(fs::read(&observed).unwrap(), b"ready");
+            });
+            start.wait();
+            publish_helper_ready(&ready).unwrap();
+            observer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn helper_ready_does_not_replace_an_existing_signal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ready-replay");
+        ensure_secure_dir(&root).unwrap();
+        let ready = root.join("helper.ready");
+        write_new_secure(&ready, b"existing", UPD_RECEIPT_PERSIST_FAILED).unwrap();
+        let error = publish_helper_ready(&ready).unwrap_err();
+        assert_eq!(error.code, UPD_RECEIPT_PERSIST_FAILED);
+        assert_eq!(fs::read(&ready).unwrap(), b"existing");
     }
 
     #[test]
