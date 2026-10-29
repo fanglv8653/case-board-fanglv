@@ -7364,12 +7364,9 @@ pub fn run() {
             ticktick::ticktick_call,
         ])
         .on_window_event(|window, event| {
-            match event {
-                // 切回 App(窗口重新获得焦点)→ 触发一次滴答同步(已连接 + 开了自动同步才真跑)。
-                tauri::WindowEvent::Focused(true) => {
-                    ticktick::sync_on_focus(window.app_handle().clone());
-                }
-                _ => {}
+            // 切回 App(窗口重新获得焦点)→ 触发一次滴答同步(已连接 + 开了自动同步才真跑)。
+            if let tauri::WindowEvent::Focused(true) = event {
+                ticktick::sync_on_focus(window.app_handle().clone());
             }
         })
         .build(tauri::generate_context!())
