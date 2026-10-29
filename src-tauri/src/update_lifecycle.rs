@@ -771,17 +771,43 @@ mod windows_acl {
             UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
         })?;
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Reassigning even the existing owner requires WRITE_OWNER. A directory
+        // owned by this user may only grant Modify through its inherited ACL;
+        // its owner can still tighten the DACL without taking ownership again.
+        let mut owner = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let owner_status = unsafe {
+            GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                &mut descriptor,
+            )
+        };
+        if owner_status.0 != 0 || descriptor.is_invalid() || owner.0.is_null() {
+            return Err(UpdateLifecycleError::new(UPD_RECEIPT_ACL_INVALID));
+        }
+        let _owner_descriptor = LocalDescriptor(descriptor);
+        let already_owned = unsafe { EqualSid(owner, sid) }.is_ok();
         let info = windows::Win32::Security::OBJECT_SECURITY_INFORMATION(
-            OWNER_SECURITY_INFORMATION.0
-                | DACL_SECURITY_INFORMATION.0
-                | PROTECTED_DACL_SECURITY_INFORMATION.0,
+            DACL_SECURITY_INFORMATION.0
+                | PROTECTED_DACL_SECURITY_INFORMATION.0
+                | if already_owned {
+                    0
+                } else {
+                    OWNER_SECURITY_INFORMATION.0
+                },
         );
         let status = unsafe {
             SetNamedSecurityInfoW(
                 PWSTR(wide.as_ptr().cast_mut()),
                 SE_FILE_OBJECT,
                 info,
-                Some(sid),
+                if already_owned { None } else { Some(sid) },
                 None,
                 Some(acl),
                 None,
@@ -1129,6 +1155,33 @@ mod tests {
         assert!(!valid_version("0.08.4"));
         assert!(!valid_version("0.8"));
         assert!(valid_version("0.8.4"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_receipt_directory_can_be_secured_repeatedly_without_owner_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owned-receipts");
+        ensure_secure_dir(&path).unwrap();
+        validate_secure_path(&path).unwrap();
+        ensure_secure_dir(&path).unwrap();
+        let file = path.join("receipt.json");
+        write_new_secure(&file, b"original", UPD_RECEIPT_PERSIST_FAILED).unwrap();
+        validate_secure_path(&file).unwrap();
+        atomic_replace_secure(&file, b"updated", UPD_RECEIPT_PERSIST_FAILED).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"updated");
+        validate_secure_path(&file).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inherited_receipt_permissions_are_not_accepted_without_hardening() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("inherited");
+        fs::create_dir(&path).unwrap();
+        assert!(validate_secure_path(&path).is_err());
+        ensure_secure_dir(&path).unwrap();
+        validate_secure_path(&path).unwrap();
     }
 
     #[test]

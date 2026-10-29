@@ -11,6 +11,9 @@ import {
 import type { CriminalSentencingEstimate } from "@/lib/types";
 import { factorAppliesTo, SENTENCING_DATA } from "./data.ts";
 import { sentencingEngine } from "./engine.ts";
+import { isFirstBatch } from "./firstBatch.ts";
+import { formatHistoryTimestamp } from "./historyTime.ts";
+import { FirstBatchFactsForm, FirstBatchAdjustmentForm } from "./FirstBatchFields.tsx";
 import type { SentencingPrefill } from "./prefill.ts";
 import type {
   AreaType,
@@ -18,6 +21,7 @@ import type {
   SentencingCalculationResult,
   StatutoryPenaltyBand,
   TemporalRuleBasis,
+  FirstBatchReview,
 } from "./types.ts";
 
 export const SENTENCING_REVISION_CONFLICT_COPY =
@@ -79,6 +83,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
   const [judgeAdjustment, setJudgeAdjustment] = useState("0");
   const [judgeAdjustmentReason, setJudgeAdjustmentReason] = useState("");
   const [factors, setFactors] = useState<Record<string, boolean>>({});
+  const [firstBatchReview, setFirstBatchReview] = useState<FirstBatchReview>({});
   const [result, setResult] = useState<SentencingCalculationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -89,6 +94,8 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
 
   const crime = SENTENCING_DATA.crimes.find((item) => item.name === crimeName);
+  const batchId = crime && isFirstBatch(crime.id) ? crime.id : null;
+  const amountNeeded = !batchId || !!crime?.amountRequired || (batchId === "disturbance" && ["taking", "damage"].includes(String(firstBatchReview.facts?.behavior))) || (batchId === "forced_transaction" && ["goods", "service"].includes(String(firstBatchReview.facts?.transactionType)));
   const standards = crime ? SENTENCING_DATA.standards[crime.id] : [];
   const selectableStandards = crime?.id === "fraud"
     ? standards.filter((item) => isTelecom ? item.subType === "电信诈骗" : item.subType !== "电信诈骗")
@@ -130,7 +137,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
 
   const calculate = () => {
     setConfirmingSave(false);
-    const numericAmount = Number(amount);
+    const numericAmount = amountNeeded ? Number(amount) : 0;
     const adjustment = Number(judgeAdjustment);
     const effectiveArea = areaType || (availableAreas.length === 1 ? availableAreas[0] : "");
     const hasAnyBaseInput = manualBaseMinimum.trim() !== "" || manualBaseMaximum.trim() !== "";
@@ -140,11 +147,11 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
 
     if (!crime) return setError("请选择数据表中支持的罪名。未知罪名不能测算。");
     if (!crimeDate) return setError("请填写犯罪日期；案件受理、羁押等程序日期不能替代犯罪日期。");
-    if (amount.trim() === "" || !Number.isFinite(numericAmount) || numericAmount < 0) {
+    if (amountNeeded && (amount.trim() === "" || !Number.isFinite(numericAmount) || numericAmount < 0)) {
       return setError("请填写有效涉案金额；非金额型犯罪请明确填写 0。");
     }
     if (!effectiveArea) return setError("请选择适用地区，不能从法院名称自动推断。");
-    if (requiresManualFactTier && !factTier) return setError("当前金额标准未自动配置，请人工确认案件事实档位。");
+    if (!batchId && requiresManualFactTier && !factTier) return setError("当前金额标准未自动配置，请人工确认案件事实档位。");
     if (hasAnyBaseInput && (manualBaseMinimum.trim() === "" || manualBaseMaximum.trim() === "")) {
       return setError("人工核验基准刑必须同时填写上下限。");
     }
@@ -165,6 +172,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
       manualBasePenaltyRange: manualBase,
       manualBaseSource,
       temporalRuleBasis: temporalRuleBasis || null,
+      firstBatchReview: batchId ? firstBatchReview : undefined,
     });
     setError(next.error ?? null);
     setResult(next);
@@ -195,6 +203,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
           manualBaseSource: result.manualBaseSource,
           judgeAdjustment: result.judgeAdjustment,
           judgeAdjustmentReason: result.judgeAdjustmentReason,
+          firstBatchReview: result.firstBatchReview,
         },
         output_min_months: result.finalPenaltyRange[0],
         output_max_months: result.finalPenaltyRange[1],
@@ -210,6 +219,9 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
           finalSentence: result.finalSentence,
           tier: result.tier,
           warnings: result.warnings,
+          offenseAssessment: result.offenseAssessment,
+          additionalPenaltyReview: result.additionalPenaltyReview,
+          probationReview: result.probationReview,
         },
         process_snapshot: result.process,
         basis_snapshot: {
@@ -219,6 +231,8 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
           crimeDate: result.crimeDate,
           temporalRuleBasis: result.temporalRuleBasis,
           manualBaseSource: result.manualBaseSource,
+          firstBatchReview: result.firstBatchReview,
+          offenseAssessment: result.offenseAssessment,
         },
         created_source: "sentencing_calculator_ui",
       });
@@ -238,7 +252,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
   };
 
   return (
-    <div className="space-y-5" data-testid="sentencing-calculator">
+    <div className="min-w-0 space-y-5 [overflow-wrap:anywhere] [&_label]:min-w-0 [&_select]:min-w-0" data-testid="sentencing-calculator">
       {context.caseId && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
           已从刑事案件进入。仅精确罪名可预填，其余关键字段必须人工复核；页面不会自动计算或保存。
@@ -250,7 +264,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
 
       <div className="grid gap-4 rounded-xl border border-border bg-card p-5 md:grid-cols-2">
         <label className="space-y-1 text-sm">罪名
-          <select value={crimeName} onChange={(event) => update(() => {
+          <select aria-label="罪名" data-testid="sentencing-crime" value={crimeName} onChange={(event) => update(() => {
             const nextName = event.target.value;
             const nextCrime = SENTENCING_DATA.crimes.find((item) => item.name === nextName);
             const nextAreas = nextCrime ? [...new Set(SENTENCING_DATA.standards[nextCrime.id].map((item) => item.area))] : [];
@@ -259,14 +273,21 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
             setAreaType(nextAreas.length === 1 ? nextAreas[0] : "");
             setFactors({});
             setTemporalRuleBasis("");
+            setFirstBatchReview({});
+            setAmount("");
+            setManualBaseMinimum(""); setManualBaseMaximum(""); setManualBaseSource("");
+            setJudgeAdjustment("0"); setJudgeAdjustmentReason(""); setIsTelecom(false);
           })} className="h-10 w-full rounded-md border border-border bg-background px-3">
             <option value="">请选择</option>
             {SENTENCING_DATA.crimes.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
           </select>
         </label>
-        <label className="space-y-1 text-sm">涉案金额（元）
-          <input type="number" min="0" value={amount} onChange={(event) => update(() => setAmount(event.target.value))} placeholder="非金额型犯罪请填写 0" className="h-10 w-full rounded-md border border-border bg-background px-3" />
-        </label>
+        {amountNeeded && <label className="space-y-1 text-sm">{batchId === "illegal_deposits" ? "吸收全额（元；清退不直接扣减）" : batchId === "fundraising_fraud" ? "实际骗取总额（元；尚未扣案发前依法返还）" : batchId === "concealment" ? "依法确认财产责任价值（元；转入转出及循环去重）" : "涉案金额（元）"}
+          <input data-testid="sentencing-amount" type="number" min="0" step="any" value={amount} onChange={(event) => update(() => {
+            setAmount(event.target.value);
+            if (batchId) { setFirstBatchReview(current => ({ ...current, elementsConfirmed: false, roundedRange: null })); setManualBaseMinimum(""); setManualBaseMaximum(""); setManualBaseSource(""); }
+          })} placeholder="已核明的金额，未知请留空" className="h-10 w-full rounded-md border border-border bg-background px-3" />
+        </label>}
         <label className="space-y-1 text-sm">适用地区
           <select value={areaType} onChange={(event) => update(() => setAreaType(event.target.value as AreaType | ""))} className="h-10 w-full rounded-md border border-border bg-background px-3">
             <option value="">请选择</option>
@@ -274,9 +295,12 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
           </select>
         </label>
         <label className="space-y-1 text-sm">犯罪日期
-          <input type="date" value={crimeDate} onChange={(event) => update(() => setCrimeDate(event.target.value))} className="h-10 w-full rounded-md border border-border bg-background px-3" />
+          <input data-testid="sentencing-date" type="date" value={crimeDate} onChange={(event) => update(() => {
+            setCrimeDate(event.target.value);
+            if (batchId) { setFirstBatchReview(current => ({ ...current, elementsConfirmed: false, currentRulesConfirmed: false, temporalSource: "", roundedRange: null })); setManualBaseMinimum(""); setManualBaseMaximum(""); setManualBaseSource(""); }
+          })} className="h-10 w-full rounded-md border border-border bg-background px-3" />
         </label>
-        {factTiers.length > 1 && (
+        {!batchId && factTiers.length > 1 && (
           <label className="space-y-1 text-sm">案件事实档位{requiresManualFactTier ? "（必选）" : "（可人工覆盖金额初判）"}
             <select value={factTier} onChange={(event) => update(() => { setFactTier(event.target.value); setFactors({}); })} className="h-10 w-full rounded-md border border-border bg-background px-3">
               <option value="">{requiresManualFactTier ? "请选择" : "按金额初步定位"}</option>
@@ -302,6 +326,11 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
         )}
       </div>
 
+      {batchId && <FirstBatchFactsForm id={batchId} value={firstBatchReview} onChange={next => update(() => {
+        setFirstBatchReview(next);
+        if (next.facts !== firstBatchReview.facts || next.age !== firstBatchReview.age || next.subject !== firstBatchReview.subject) { setManualBaseMinimum(""); setManualBaseMaximum(""); setManualBaseSource(""); }
+      })} />}
+
       <section className="rounded-xl border border-border bg-card p-5">
         <h3 className="text-sm font-semibold">人工核验基准刑</h3>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -309,10 +338,10 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
         </p>
         <div className="mt-3 grid gap-4 md:grid-cols-3">
           <label className="space-y-1 text-sm">下限（月）
-            <input type="number" min="0" value={manualBaseMinimum} onChange={(event) => update(() => setManualBaseMinimum(event.target.value))} className="h-10 w-full rounded-md border border-border bg-background px-3" />
+            <input data-testid="sentencing-base-min" type="number" min="0" step="any" value={manualBaseMinimum} onChange={(event) => update(() => setManualBaseMinimum(event.target.value))} className="h-10 w-full rounded-md border border-border bg-background px-3" />
           </label>
           <label className="space-y-1 text-sm">上限（月）
-            <input type="number" min="0" value={manualBaseMaximum} onChange={(event) => update(() => setManualBaseMaximum(event.target.value))} className="h-10 w-full rounded-md border border-border bg-background px-3" />
+            <input data-testid="sentencing-base-max" type="number" min="0" step="any" value={manualBaseMaximum} onChange={(event) => update(() => setManualBaseMaximum(event.target.value))} className="h-10 w-full rounded-md border border-border bg-background px-3" />
           </label>
           <label className="space-y-1 text-sm">核验来源
             <input value={manualBaseSource} onChange={(event) => update(() => setManualBaseSource(event.target.value))} placeholder="实施细则条款/量刑建议/阅卷底稿定位" className="h-10 w-full rounded-md border border-border bg-background px-3" />
@@ -331,6 +360,8 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
           ))}
         </div>
       </section>
+
+      {batchId && <FirstBatchAdjustmentForm id={batchId} value={firstBatchReview} factors={availableFactors.filter(f => factors[f.name])} onChange={next => update(() => setFirstBatchReview({ ...next, roundedRange: next.factorPercents !== firstBatchReview.factorPercents || next.integratedReductionPct !== firstBatchReview.integratedReductionPct || next.mitigationDecision !== firstBatchReview.mitigationDecision ? null : next.roundedRange }))} />}
 
       <section className="rounded-xl border border-border bg-card p-5">
         <h3 className="text-sm font-semibold">裁判情景模拟（非规范性自动计算）</h3>
@@ -356,6 +387,9 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
             <ResultCard label="月数调节结果" value={formatRange(result.finalPenaltyRange)} />
           </div>
           {result.finalSentence && <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm font-semibold">辅助结论：{result.finalSentence}</div>}
+          {result.offenseAssessment && <div className="text-sm" data-testid="offense-assessment">条件核验：{result.offenseAssessment.status === "candidate" ? "候选，须人工确认" : "待核/分流，本情景不计算"}。{result.offenseAssessment.reasons.join("；")}</div>}
+          {result.additionalPenaltyReview && <div data-testid="additional-penalty-review" className="rounded-lg bg-muted/40 p-3 text-sm"><div className="font-medium">罚金、附加刑及财物处理</div><ul className="mt-1 list-disc pl-5">{result.additionalPenaltyReview.map(note => <li key={note}>{note}</li>)}</ul></div>}
+          {result.probationReview && <div className="text-sm" data-testid="probation-review">缓刑：{result.probationReview}</div>}
           <div className="text-sm">档位：{result.tierLabel ?? "—"}；适用地区：{result.standardDetail?.area ?? "—"}；犯罪日期：{result.crimeDate}</div>
           {result.blockingIssues.length > 0 && (
             <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
@@ -437,7 +471,7 @@ export function SentencingCalculator({ prefill = EMPTY_PREFILL }: { prefill?: Se
               return (
                 <div key={item.id} className="rounded-lg border border-border">
                   <button type="button" className="flex w-full items-center justify-between gap-3 p-3 text-left text-sm" onClick={() => setExpandedHistoryId(isExpanded ? null : item.id)}>
-                    <span className="flex min-w-0 items-center gap-2">{isExpanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}<span>{new Date(item.created_at).toLocaleString("zh-CN")}</span></span>
+                    <span className="flex min-w-0 items-center gap-2">{isExpanded ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}<span>{formatHistoryTimestamp(item.created_at)}</span></span>
                     <span className="font-semibold">{formatRange(historyRange(item))}</span>
                   </button>
                   {isExpanded && (

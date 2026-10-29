@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod app_shutdown;
 pub mod contract_draft;
 pub mod contract_review;
 pub mod court_filing_env;
@@ -6972,6 +6973,7 @@ pub fn run() {
                 update_lifecycle::UpdateShutdownCoordinator::start(pool.clone())
                     .map_err(|error| Box::<dyn std::error::Error>::from(error.to_string()))?;
             app.manage(pool);
+            app.manage(std::sync::Arc::new(app_shutdown::ShutdownCoordinator::default()));
             app.manage(update_coordinator);
             // chat 模块全局 cancel 注册表(V0.1.13+)
             app.manage(chat::ChatCancelRegistry::default());
@@ -7363,15 +7365,6 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             match event {
-                // 主窗口正常退出时先关闭数据库连接池，让 SQLite 自然完成 WAL
-                // checkpoint 并清理 sidecar；异常终止仍保留 sidecar 供下次启动阻断。
-                tauri::WindowEvent::Destroyed => {
-                    lifecycle::shutdown();
-                    if window.label() == "main" {
-                        let pool = window.state::<SqlitePool>();
-                        tauri::async_runtime::block_on(pool.close());
-                    }
-                }
                 // 切回 App(窗口重新获得焦点)→ 触发一次滴答同步(已连接 + 开了自动同步才真跑)。
                 tauri::WindowEvent::Focused(true) => {
                     ticktick::sync_on_focus(window.app_handle().clone());
@@ -7379,6 +7372,13 @@ pub fn run() {
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                app_shutdown::on_exit_requested(app, code, api);
+            }
+            tauri::RunEvent::Exit => crate::dlog!("[shutdown] native event loop exiting"),
+            _ => {}
+        });
 }

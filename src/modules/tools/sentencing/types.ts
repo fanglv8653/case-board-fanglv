@@ -11,7 +11,9 @@ export type CrimeId =
   | "bribery"
   | "intentional_injury"
   | "robbery"
-  | "aiding_cyber_crime";
+  | "aiding_cyber_crime"
+  | "concealment" | "extortion" | "illegal_detention" | "affray"
+  | "obstructing_duty" | "casino" | "illegal_deposits" | "fundraising_fraud" | "forced_transaction";
 
 export type CrimeName =
   | "盗窃罪"
@@ -26,7 +28,9 @@ export type CrimeName =
   | "受贿罪"
   | "故意伤害罪"
   | "抢劫罪"
-  | "帮助信息网络犯罪活动罪";
+  | "帮助信息网络犯罪活动罪"
+  | "掩饰、隐瞒犯罪所得、犯罪所得收益罪" | "敲诈勒索罪" | "非法拘禁罪" | "聚众斗殴罪"
+  | "妨害公务罪" | "开设赌场罪" | "非法吸收公众存款罪" | "集资诈骗罪" | "强迫交易罪";
 
 export type AreaType = "一类地区" | "二类地区" | "全国";
 export type MonthRange = [minimum: number, maximum: number | null];
@@ -37,13 +41,44 @@ export type PrincipalPenaltyKind =
   | "life"
   | "death"
   | "fine_only"
+  | "political_rights"
   | "exemption";
 export type QuantitativeStatus = "starting_point_only" | "statutory_only" | "direct_sentence";
 export type TemporalRuleBasis =
   | "conduct_on_or_after_2026_05_01"
   | "pre_effective_current_rule_reviewed"
   | "individual_comparison_required";
-export type CalculationStatus = "complete" | "requires_manual_base" | "blocked";
+export type CalculationStatus = "complete" | "requires_manual_base" | "requires_manual_review" | "blocked";
+
+export type OffenseFacts = Record<string, string | number | boolean | null>;
+export interface FirstBatchReview {
+  facts?: OffenseFacts;
+  evidenceSource?: string;
+  elementsConfirmed?: boolean;
+  currentRulesConfirmed?: boolean;
+  temporalSource?: string;
+  age?: number | null;
+  subject?: "individual" | "unit" | "unit_responsible";
+  penaltyKind?: PrincipalPenaltyKind;
+  mitigationDecision?: "lighter" | "mitigated" | "exempt";
+  adjustmentSource?: string;
+  factorPercents?: Record<string, number>;
+  integratedReductionPct?: number | null;
+  lighterCaseException?: boolean;
+  specialOrderSource?: string;
+  specialAdjustmentMethod?: "sequential" | "combined";
+  specialOrder?: string[];
+  roundingSource?: string;
+  roundedRange?: MonthRange | null;
+  guidelineAdoptionSource?: string;
+  probationConditionsConfirmed?: boolean;
+  probationExcluded?: boolean;
+  pregnancyConfirmed?: boolean;
+  fineRange?: [number, number] | null;
+  fineSource?: string;
+  fineSpecialDecision?: boolean;
+  propertyPenaltyKind?: "fine" | "confiscation" | "none";
+}
 
 export interface CrimeDefinition {
   id: CrimeId;
@@ -125,11 +160,13 @@ export interface SentencingSource {
   effectiveFrom?: string;
   url: string;
   verifiedOn: string;
-  status: "current" | "scope_limited" | "current_applicability_unverified";
+  status: "current" | "scope_limited" | "current_applicability_unverified" | "manually_confirmed_applicability";
+  manualConfirmation?: { confirmedOn: string; confirmedBy: string; decision: string; boundary: string };
   note?: string;
 }
 
 export interface SentencingRulesetMetadata {
+  implementationHash?: string;
   id: string;
   version: string;
   engineVersion: string;
@@ -141,6 +178,7 @@ export interface SentencingRulesetMetadata {
 }
 
 export interface SentencingData {
+  offenseRuleContract?: unknown;
   ruleset: SentencingRulesetMetadata;
   crimes: CrimeDefinition[];
   standards: Record<CrimeId, SentencingStandard[]>;
@@ -164,6 +202,7 @@ export interface FactorAdjustment {
 }
 
 export interface SentencingCalculationInput {
+  firstBatchReview?: FirstBatchReview;
   crimeName: string;
   amount: number;
   areaType: AreaType;
@@ -179,6 +218,9 @@ export interface SentencingCalculationInput {
 }
 
 export interface SentencingCalculationResult extends SentencingCalculationInput {
+  offenseAssessment?: { status: "candidate" | "pending" | "excluded" | "diverted"; tier: string | null; reasons: string[]; sourceIds: string[] };
+  additionalPenaltyReview?: string[];
+  probationReview?: string;
   judgeAdjustment: number;
   factTier: string | null;
   manualBasePenaltyRange: MonthRange | null;

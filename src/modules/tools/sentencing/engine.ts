@@ -5,6 +5,8 @@ import {
   PRINCIPAL_PENALTY_LABELS,
   SENTENCING_DATA,
 } from "./data.ts";
+import { isFirstBatch } from "./firstBatch.ts";
+import { calculateFirstBatch } from "./firstBatchCalculation.ts";
 import type {
   AreaType,
   CalculationProcessEntry,
@@ -86,6 +88,8 @@ function cloneRange(range: MonthRange | null | undefined): MonthRange | null {
  */
 export class SentencingEngine {
   calculate(input: SentencingCalculationInput): SentencingCalculationResult {
+    const batchId = CRIME_NAME_TO_ID[input.crimeName as CrimeName];
+    if (isFirstBatch(batchId)) return calculateFirstBatch(batchId, input);
     const {
       crimeName,
       amount,
@@ -599,6 +603,9 @@ export class SentencingEngine {
   }
 
   extractCrime(text: string): string | null {
+    // 完整较长罪名优先，避免集资诈骗被普通诈骗先命中。
+    const explicit = SENTENCING_DATA.crimes.filter(crime => text.includes(crime.name)).sort((a, b) => b.name.length - a.name.length);
+    if (explicit.length) return explicit[0].name;
     for (const [crimeName, keywords] of SENTENCING_DATA.keywords.crime) {
       if (keywords.some((keyword) => text.includes(keyword))) return crimeName;
     }
@@ -653,8 +660,7 @@ export class SentencingEngine {
 
   extractFactTier(text: string, crimeName: string | null): string | null {
     if (crimeName === "寻衅滋事罪") {
-      if (/三次以上|纠集他人三次|每次构罪/.test(text)) return "纠集他人三次且每次构罪";
-      if (/一次|单次/.test(text)) return "一次";
+      return null; // 必须核四类行为、纠集、每次构罪、未经处理及秩序，不能由自由文本推定。
     }
     if (crimeName === "交通肇事罪") {
       if (/逃逸致死|因逃逸致人死亡/.test(text)) return "因逃逸致人死亡";
@@ -700,6 +706,7 @@ export class SentencingEngine {
     }
     if (crime.amountRequired && extracted.amount == null) missing.push("涉案金额");
     if (!extracted.date) missing.push("犯罪时间");
+    if (isFirstBatch(crimeId)) return [...missing, "逐罪条件与证据核验", "人工基准刑及来源"];
     if (["embezzlement", "non_official_bribery"].includes(crimeId)) missing.push("适用规则时间依据");
     const canSelectByAmount = standards.some((item) => item.minAmount != null);
     if (standards.length > 1 && !canSelectByAmount && !extracted.factTier) missing.push("案件事实档位");
