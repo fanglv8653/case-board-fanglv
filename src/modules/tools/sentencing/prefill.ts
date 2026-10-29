@@ -26,9 +26,15 @@ const SEPARATORS = /[\s、,，/；;|]+/;
 
 function exactCrimeNames(value: unknown): CrimeName[] {
   if (typeof value !== "string") return [];
-  return value
+  // 先保护法定全称内部的顿号，再分隔多个罪名；其余文本仍精确匹配。
+  const names = [...CRIME_NAMES].sort((a, b) => b.length - a.length);
+  const protectedText = names.reduce((s, name, i) => s.split(name).join(`__CHARGE_${i}__`), value);
+  return protectedText
     .split(SEPARATORS)
-    .map((part) => part.trim())
+    .map((part) => {
+      const match = /^__CHARGE_(\d+)__$/.exec(part.trim());
+      return match ? names[Number(match[1])] : part.trim();
+    })
     .filter((part): part is CrimeName => CRIME_NAMES.has(part as CrimeName));
 }
 

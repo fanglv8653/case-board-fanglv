@@ -375,6 +375,15 @@ async fn wait_for_path_async(path: &Path, timeout: Duration) -> Result<(), Updat
     Err(UpdateLifecycleError::new(UPD_INSTALL_PREPARE_FAILED))
 }
 
+fn publish_helper_ready(path: &Path) -> Result<(), UpdateLifecycleError> {
+    if path.exists() {
+        return Err(UpdateLifecycleError::new(UPD_RECEIPT_PERSIST_FAILED));
+    }
+    // The parent treats this filename as the handoff signal. Do not expose it
+    // while write_new_secure is still flushing bytes or protecting its DACL.
+    atomic_replace_secure(path, b"ready", UPD_RECEIPT_PERSIST_FAILED)
+}
+
 fn startup_attempt_id() -> Option<String> {
     let mut args = std::env::args();
     while let Some(arg) = args.next() {
@@ -771,17 +780,43 @@ mod windows_acl {
             UpdateLifecycleError::with_detail(UPD_RECEIPT_ACL_INVALID, error.to_string())
         })?;
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Reassigning even the existing owner requires WRITE_OWNER. A directory
+        // owned by this user may only grant Modify through its inherited ACL;
+        // its owner can still tighten the DACL without taking ownership again.
+        let mut owner = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let owner_status = unsafe {
+            GetNamedSecurityInfoW(
+                PCWSTR(wide.as_ptr()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                &mut descriptor,
+            )
+        };
+        if owner_status.0 != 0 || descriptor.is_invalid() || owner.0.is_null() {
+            return Err(UpdateLifecycleError::new(UPD_RECEIPT_ACL_INVALID));
+        }
+        let _owner_descriptor = LocalDescriptor(descriptor);
+        let already_owned = unsafe { EqualSid(owner, sid) }.is_ok();
         let info = windows::Win32::Security::OBJECT_SECURITY_INFORMATION(
-            OWNER_SECURITY_INFORMATION.0
-                | DACL_SECURITY_INFORMATION.0
-                | PROTECTED_DACL_SECURITY_INFORMATION.0,
+            DACL_SECURITY_INFORMATION.0
+                | PROTECTED_DACL_SECURITY_INFORMATION.0
+                | if already_owned {
+                    0
+                } else {
+                    OWNER_SECURITY_INFORMATION.0
+                },
         );
         let status = unsafe {
             SetNamedSecurityInfoW(
                 PWSTR(wide.as_ptr().cast_mut()),
                 SE_FILE_OBJECT,
                 info,
-                Some(sid),
+                if already_owned { None } else { Some(sid) },
                 None,
                 Some(acl),
                 None,
@@ -943,7 +978,7 @@ fn run_helper(args: HelperArgs) -> Result<(), UpdateLifecycleError> {
     }
     validate_secure_path(&args.installer)?;
     let ready = attempt_dir.join("helper.ready");
-    write_new_secure(&ready, b"ready", UPD_RECEIPT_PERSIST_FAILED)?;
+    publish_helper_ready(&ready)?;
 
     let deadline = Instant::now() + HELPER_TOTAL_TIMEOUT;
     loop {
@@ -1129,6 +1164,72 @@ mod tests {
         assert!(!valid_version("0.08.4"));
         assert!(!valid_version("0.8"));
         assert!(valid_version("0.8.4"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_receipt_directory_can_be_secured_repeatedly_without_owner_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owned-receipts");
+        ensure_secure_dir(&path).unwrap();
+        validate_secure_path(&path).unwrap();
+        ensure_secure_dir(&path).unwrap();
+        let file = path.join("receipt.json");
+        write_new_secure(&file, b"original", UPD_RECEIPT_PERSIST_FAILED).unwrap();
+        validate_secure_path(&file).unwrap();
+        atomic_replace_secure(&file, b"updated", UPD_RECEIPT_PERSIST_FAILED).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"updated");
+        validate_secure_path(&file).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inherited_receipt_permissions_are_not_accepted_without_hardening() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("inherited");
+        fs::create_dir(&path).unwrap();
+        assert!(validate_secure_path(&path).is_err());
+        ensure_secure_dir(&path).unwrap();
+        validate_secure_path(&path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn helper_ready_is_secure_at_first_visibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ready-publication");
+        ensure_secure_dir(&root).unwrap();
+        for round in 0..20 {
+            let ready = root.join(format!("helper-{round}.ready"));
+            let observed = ready.clone();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let observer_start = Arc::clone(&start);
+            let observer = std::thread::spawn(move || {
+                observer_start.wait();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !observed.is_file() {
+                    assert!(Instant::now() < deadline, "ready marker not published");
+                    std::thread::yield_now();
+                }
+                validate_secure_path(&observed).unwrap();
+                assert_eq!(fs::read(&observed).unwrap(), b"ready");
+            });
+            start.wait();
+            publish_helper_ready(&ready).unwrap();
+            observer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn helper_ready_does_not_replace_an_existing_signal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ready-replay");
+        ensure_secure_dir(&root).unwrap();
+        let ready = root.join("helper.ready");
+        write_new_secure(&ready, b"existing", UPD_RECEIPT_PERSIST_FAILED).unwrap();
+        let error = publish_helper_ready(&ready).unwrap_err();
+        assert_eq!(error.code, UPD_RECEIPT_PERSIST_FAILED);
+        assert_eq!(fs::read(&ready).unwrap(), b"existing");
     }
 
     #[test]

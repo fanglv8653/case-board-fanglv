@@ -1,3 +1,5 @@
+import { FIRST_BATCH_CONTRACT, FIRST_BATCH_IDS, FIRST_BATCH_NAMES, FIRST_BATCH_NAME_TO_ID, FIRST_BATCH_STANDARDS, isFirstBatch } from "./firstBatch.ts";
+import { FIRST_BATCH_SOURCES } from "./firstBatchSources.ts";
 import type {
   CrimeId,
   CrimeName,
@@ -50,6 +52,7 @@ function statutory(
 }
 
 const INTENTIONAL_CRIMES: CrimeId[] = [
+  ...FIRST_BATCH_IDS.filter(id => id !== "disturbance"),
   "theft",
   "fraud",
   "contract_fraud",
@@ -129,14 +132,17 @@ const corporateHigh = (article: string) => statutory(
  * 2026贪污贿赂解释（二）的参照门槛需要先完成时间效力选择，才允许自动定位档位。
  */
 export const SENTENCING_DATA: SentencingData = {
+  offenseRuleContract: FIRST_BATCH_CONTRACT,
   ruleset: {
     id: "cn-national-sentencing-assist",
-    version: "2026.09.11-1",
-    engineVersion: "3.0.0",
+    version: "2026.10.29-3",
+    engineVersion: "4.0.2",
+    implementationHash: "sha256:c28b13088fb9d90a69f0ca0fa2893d1f0f86897093915fd7d4e556c97046ba18",
     schemaVersion: "sentencing-estimate-v2",
-    contentHash: "sha256:838470d24f63415385e761195ec3eab2b144f4cdf1f472ab07c402e4ede69c21",
-    verifiedOn: "2026-09-11",
+    contentHash: "sha256:86167d6bd25c0b009526d48921aade7f294064004aba595027e252b29ab50848",
+    verifiedOn: "2026-10-29",
     sources: [
+      ...FIRST_BATCH_SOURCES,
       {
         id: "criminal-law-current",
         title: "中华人民共和国刑法",
@@ -201,11 +207,14 @@ export const SENTENCING_DATA: SentencingData = {
       "本规则集不使用现行适用状态未核实的粤高法发〔2017〕6号自动推导增加刑罚量。",
       "量刑起点不是法定刑；除危险驾驶罪外，进入情节调节前必须录入已人工核验的基准刑区间和来源。",
       "月数区间不替代无期徒刑、死刑、管制、单处罚金、缓刑或免予刑事处罚的独立判断。",
-      "单罪辅助测算不处理数罪并罚、单位犯罪、共同犯罪全案责任分配和类案偏离校准。",
+      "单罪辅助测算不自动决定数罪并罚和共同犯罪责任；首批单位罚金与自然人责任分列，单位不生成徒刑。",
+      "首批按20261029完整审阅稿及经办律师补充确认实施：2024指导（二）继续引用，未冒称取得续期公文；广东未见新版细则，地方增量仍人工核验，不用外省替代。",
+      "首批百分比、从轻/减轻、特殊顺序及不足月处理须显式人工核验；保留2026认罚版本与日期来源。",
     ],
   },
 
   crimes: [
+    ...FIRST_BATCH_IDS.filter(id => id !== "disturbance").map(id => ({ id, name: FIRST_BATCH_NAMES[id], desc: FIRST_BATCH_CONTRACT.notes[id][0], culpability: "intentional" as const, amountRequired: ["concealment", "extortion", "illegal_deposits", "fundraising_fraud"].includes(id) })),
     { id: "theft", name: "盗窃罪", desc: "以非法占有为目的，盗窃公私财物", culpability: "intentional", amountRequired: true },
     { id: "fraud", name: "诈骗罪", desc: "以非法占有为目的，骗取公私财物", culpability: "intentional", amountRequired: true },
     { id: "contract_fraud", name: "合同诈骗罪", desc: "在签订、履行合同过程中骗取对方财物", culpability: "intentional", amountRequired: true },
@@ -245,10 +254,6 @@ export const SENTENCING_DATA: SentencingData = {
       { area: "全国", tier: "数额巨大", minAmount: 200000, maxAmount: 3000000, startMin: 36, startMax: 48, startKinds: ["fixed_term"], quantitativeStatus: "starting_point_only", statutory: corporateMiddle("《刑法》第271条"), sourceIds: ["criminal-law-current", "sentencing-guidance-2021", "corruption-interpretation-2026"], temporalRuleRequired: true },
       { area: "全国", tier: "数额特别巨大", minAmount: 3000000, maxAmount: null, startMin: 120, startMax: 132, startKinds: ["fixed_term"], quantitativeStatus: "starting_point_only", statutory: corporateHigh("《刑法》第271条"), sourceIds: ["criminal-law-current", "sentencing-guidance-2021", "corruption-interpretation-2026"], temporalRuleRequired: true },
     ],
-    disturbance: [
-      { area: "全国", tier: "一次", minAmount: null, maxAmount: null, startMin: 1, startMax: 36, startKinds: ["detention", "fixed_term"], quantitativeStatus: "starting_point_only", statutory: statutory("《刑法》第293条", "五年以下有期徒刑、拘役或者管制", [1, 60], [fixedTerm(6, 60), detention, control]), sourceIds: ["criminal-law-current", "sentencing-guidance-2021"] },
-      { area: "全国", tier: "纠集他人三次且每次构罪", minAmount: null, maxAmount: null, startMin: 60, startMax: 84, startKinds: ["fixed_term"], quantitativeStatus: "starting_point_only", statutory: statutory("《刑法》第293条第二款", "五年以上十年以下有期徒刑，可以并处罚金", [60, 120], [fixedTerm(60, 120)], [1, 60], [fixedTerm(6, 60), detention, control]), sourceIds: ["criminal-law-current", "sentencing-guidance-2021"] },
-    ],
     dangerous_driving: [
       { area: "全国", tier: "构成犯罪", minAmount: null, maxAmount: null, startMin: 1, startMax: 6, startKinds: ["detention"], quantitativeStatus: "direct_sentence", statutory: statutory("《刑法》第133条之一", "拘役，并处罚金", [1, 6], [detention]), sourceIds: ["criminal-law-current", "sentencing-guidance-2021"] },
     ],
@@ -284,6 +289,7 @@ export const SENTENCING_DATA: SentencingData = {
     aiding_cyber_crime: [
       { area: "全国", tier: "情节严重", minAmount: null, maxAmount: null, quantitativeStatus: "statutory_only", statutory: financialLow("《刑法》第287条之二"), sourceIds: ["criminal-law-current"] },
     ],
+    ...FIRST_BATCH_STANDARDS,
   },
 
   priorityFactors: [
@@ -309,6 +315,9 @@ export const SENTENCING_DATA: SentencingData = {
   ],
 
   generalFactors: [
+    { id: "deposit_return", name: "非吸公诉前积极退赃退赔、减少损害", direction: "reduce", minPct: -40, maxPct: 0, quantitative: true, legalEffect: "lighter_or_mitigated", applicableCrimeIds: ["illegal_deposits"], note: "与同一退赔和认罚综合组去重；较轻例外/免罚另审。" },
+    { id: "detention_abuse", name: "非法拘禁殴打侮辱或职权从重（已核去重）", direction: "increase", minPct: 10, maxPct: 20, quantitative: true, legalEffect: "heavier", applicableCrimeIds: ["illegal_detention"] },
+    { id: "compensation_unforgiven", name: "积极赔偿未获谅解", direction: "reduce", minPct: -30, maxPct: 0, quantitative: true, legalEffect: "lighter", conflictGroup: "victim_repair" },
     { id: "surrender", name: "自首", direction: "reduce", minPct: -40, maxPct: 0, quantitative: true, legalEffect: "lighter_or_mitigated_or_exempt", conflictGroup: "confession" },
     { id: "confess", name: "坦白", direction: "reduce", minPct: -20, maxPct: 0, quantitative: true, legalEffect: "lighter", conflictGroup: "confession", conflictsWith: ["plea_guilty"] },
     { id: "confess_heavy", name: "坦白（供述未掌握同种较重罪）", direction: "reduce", minPct: -30, maxPct: -10, quantitative: true, legalEffect: "lighter", conflictGroup: "confession" },
@@ -382,6 +391,7 @@ export function sentencingRulesetHashPayload(): string {
 }
 
 export const CRIME_NAME_TO_ID: Record<CrimeName, CrimeId> = {
+  ...FIRST_BATCH_NAME_TO_ID,
   "盗窃罪": "theft",
   "诈骗罪": "fraud",
   "合同诈骗罪": "contract_fraud",
@@ -398,6 +408,15 @@ export const CRIME_NAME_TO_ID: Record<CrimeName, CrimeId> = {
 };
 
 export const LEGAL_REFERENCES: Record<CrimeName, readonly string[]> = {
+  "掩饰、隐瞒犯罪所得、犯罪所得收益罪": ["《刑法》第312条", "法释〔2025〕13号", "法发〔2021〕21号；上游分类及第五条括号人工确认"],
+  "敲诈勒索罪": ["《刑法》第274条", "法释〔2013〕10号", "粤高法发〔2014〕19号"],
+  "非法拘禁罪": ["《刑法》第238条", "粤高法发〔2020〕13号第四部分", "法释〔2000〕19号、高检发释字〔2006〕2号"],
+  "聚众斗殴罪": ["《刑法》第292条", "法发〔2021〕21号；个体责任及转罪人工核验"],
+  "妨害公务罪": ["《刑法》第277条第一至四款", "高检发释字〔2025〕1号用于袭警分流"],
+  "开设赌场罪": ["《刑法》第303条第二款", "粤高法发〔2020〕13号第十二部分", "公通字〔2010〕40号、公通字〔2014〕17号", "法〔2024〕132号当前采纳人工确认"],
+  "非法吸收公众存款罪": ["《刑法》第176条", "法释〔2022〕5号", "公通字〔2014〕16号追缴不等于犯罪数额扣项"],
+  "集资诈骗罪": ["《刑法》第192条", "法释〔2022〕5号；实际骗取/案发前返还/非法占有目的分开"],
+  "强迫交易罪": ["《刑法》第226、231条", "公通字〔2017〕12号第五项", "高检发释字〔2014〕1号", "特别严重人工论证，不跨地区套数值"],
   "盗窃罪": ["《刑法》第264条", "法发〔2021〕21号盗窃罪部分", "具体数额档位和增加刑罚量须核对案件适用地区的现行实施细则"],
   "诈骗罪": ["《刑法》第266条", "法发〔2021〕21号诈骗罪部分", "电信网络诈骗另核对法发〔2016〕32号及后续规范"],
   "合同诈骗罪": ["《刑法》第224条", "法发〔2021〕21号合同诈骗罪部分", "具体数额档位须人工核对现行司法解释或属地规则"],
@@ -418,6 +437,10 @@ export function factorAppliesTo(
   crimeId: CrimeId,
   factTier: string | null,
 ): boolean {
+  if (isFirstBatch(crimeId)) {
+    if (factorId === "reconciliation" && !["extortion", "illegal_detention"].includes(crimeId)) return false;
+    if (["victim_fault", "civil_dispute"].includes(factorId)) return false; // 本批未核统一百分比，起因/过错在事实及人工判断中记录。
+  }
   const factor = [...SENTENCING_DATA.priorityFactors, ...SENTENCING_DATA.generalFactors]
     .find((item) => item.id === factorId);
   if (!factor) return false;
@@ -434,5 +457,6 @@ export const PRINCIPAL_PENALTY_LABELS: Record<PrincipalPenaltyKind, string> = {
   life: "无期徒刑",
   death: "死刑",
   fine_only: "单处罚金",
+  political_rights: "剥夺政治权利",
   exemption: "免予刑事处罚",
 };

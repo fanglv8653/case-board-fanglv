@@ -35,6 +35,13 @@ test("规则集具有可重复校验的版本、引擎和内容指纹", () => {
   assert.ok(SENTENCING_DATA.ruleset.sources.every((source) => source.url.startsWith("https://")));
 });
 
+test("快照指纹同时覆盖执行逻辑、预填及界面字段，执行代码变化不能沿用旧指纹", () => {
+  const files = ["engine.ts", "firstBatch.ts", "firstBatchCalculation.ts", "prefill.ts", "FirstBatchFields.tsx", "SentencingCalculator.tsx", "historyTime.ts"];
+  const payload = files.map(file => file + "\n" + readFileSync(new URL(file, import.meta.url), "utf8").replace(/\r\n/g, "\n")).join("\n");
+  const digest = createHash("sha256").update(payload).digest("hex");
+  assert.equal(SENTENCING_DATA.ruleset.implementationHash, `sha256:${digest}`);
+});
+
 test("法定刑、量刑起点、人工基准刑和月数结果分别保存", () => {
   const result = calculate();
   assert.equal(result.calculationStatus, "complete");
